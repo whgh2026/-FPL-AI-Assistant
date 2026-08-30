@@ -1,7 +1,7 @@
 import requests
 import os
 
-FPL_API = os.getenv("FPL_API_BASE", "https://fantasy.premierleague.com/api/")
+FPL_API = os.getenv("FPL_API_BASE", "https://fantasy.premierleague.com/api/").strip().strip("\"'").rstrip("/") + "/"
 
 HOME_BONUS = 1.10
 AWAY_PENALTY = 0.95
