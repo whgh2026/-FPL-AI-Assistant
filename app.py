@@ -1,3 +1,8 @@
+Here is the verified, fully consolidated **`app.py`**.
+
+This version integrates the dynamic dropdown keys, the horizontal player cards, the custom transfer market override, and the `st.session_state` image caching. Caching the image data prevents the app from repeating the expensive Gemini Vision API call on every button click, as Streamlit natively reruns the script from top to bottom whenever a widget state changes.
+
+```python
 import streamlit as st
 import fpl_tools
 import gemini_summary
@@ -181,29 +186,34 @@ with tab2:
 
     image_matched = []
     if uploaded_image:
-        with st.spinner("Reading squad image with Gemini Vision..."):
-            extraction = squad_override.extract_squad_from_image(uploaded_image)
-        if extraction.get("success"):
-            image_matched = squad_override.match_players_to_fpl(
-                bootstrap,
-                extraction.get("raw_players", [])
-            )
-            if image_matched:
-                st.success(f"Image parsed: {len(image_matched)} players matched.")
-                for p in image_matched:
-                    pos = p["position"]
-                    for idx, (pid, _) in enumerate(dropdown_options[pos]):
-                        if pid == p["player_id"]:
-                            if idx not in default_selections[pos]:
-                                default_selections[pos].append(idx)
-                            break
-        else:
-            st.warning(
-                extraction.get(
-                    "error",
-                    "Could not read the image properly. Please use the dropdowns below."
+        file_id = f"{uploaded_image.name}_{uploaded_image.size}"
+        
+        if st.session_state.get("last_uploaded_file") != file_id:
+            with st.spinner("Reading squad image with Gemini Vision..."):
+                extraction = squad_override.extract_squad_from_image(uploaded_image)
+            
+            if extraction.get("success"):
+                st.session_state["cached_image_matched"] = squad_override.match_players_to_fpl(
+                    bootstrap,
+                    extraction.get("raw_players", [])
                 )
-            )
+            else:
+                st.session_state["cached_image_matched"] = []
+                st.warning(extraction.get("error", "Could not read the image properly."))
+            
+            st.session_state["last_uploaded_file"] = file_id
+            
+        image_matched = st.session_state.get("cached_image_matched", [])
+        
+        if image_matched:
+            st.success(f"Image parsed: {len(image_matched)} players matched.")
+            for p in image_matched:
+                pos = p["position"]
+                for idx, (pid, _) in enumerate(dropdown_options[pos]):
+                    if pid == p["player_id"]:
+                        if idx not in default_selections[pos]:
+                            default_selections[pos].append(idx)
+                        break
 
     col_bank, col_ft = st.columns(2)
     with col_bank:
@@ -449,3 +459,5 @@ with tab4:
                 }
                 for p in res4["players"]
             ])
+
+```
