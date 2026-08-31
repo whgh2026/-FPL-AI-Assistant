@@ -1,15 +1,4 @@
-import os
-from typing import Dict, Any, List, Optional
-
-import google.generativeai as genai
-from dotenv import load_dotenv
-
-load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-
-# Ensure this matches your active endpoint
-MODEL = "gemini-3.6-flash"
-
+from typing import Dict, Any
 
 def _fmt_money(value):
     try:
@@ -17,140 +6,144 @@ def _fmt_money(value):
     except Exception:
         return "£0.0m"
 
-
-def _build_transfer_facts(transfer_result: Dict[str, Any]) -> str:
-    team = transfer_result.get("team_name", "Unknown")
-    bank = transfer_result.get("bank", 0)
-    advice = transfer_result.get("hit_advice", "")
-
-    lines = [
-        f"Manager team: {team}",
-        f"Bank: {_fmt_money(bank)}",
-        f"Hit advice: {advice}",
-    ]
-
-    bs = transfer_result.get("best_single")
-    if bs:
-        lines.append(
-            "Best single transfer: "
-            f"OUT {bs['out']['name']} ({bs['out']['team']}, xP {bs['out']['xp']}, price {_fmt_money(bs['out'].get('price', 0))}) "
-            f"-> IN {bs['in']['name']} ({bs['in']['team']}, xP {bs['in']['xp']}, price {_fmt_money(bs['in'].get('price', 0))}) "
-            f"gain +{bs['xp_gain']} xP, cost change {_fmt_money(bs['cost_change'])}."
-        )
-
-    bd = transfer_result.get("best_double")
-    if bd:
-        move_text = []
-        for m in bd.get("moves", []):
-            move_text.append(
-                f"OUT {m['out']['name']} ({m['out']['team']}, xP {m['out']['xp']}) "
-                f"-> IN {m['in']['name']} ({m['in']['team']}, xP {m['in']['xp']}), gain +{m['xp_gain']}."
-            )
-        lines.append("Best double transfer: " + " ".join(move_text))
-        lines.append(f"Total double-transfer gain: +{bd.get('xp_gain', 0)} xP")
-
-    return "\n".join(lines)
-
-
-def _build_squad_facts(squad_result: Dict[str, Any]) -> str:
-    team = squad_result.get("team_name", "Unknown")
-    bank = squad_result.get("bank", 0)
-    team_value = squad_result.get("team_value", 0)
-    gw = squad_result.get("gameweek_used", "?")
+def _get_optimal_xi(squad):
+    # FPL Positional Max Limits
+    limits = {"GK": 1, "DEF": 5, "MID": 5, "FWD": 3}
+    grouped = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     
-    squad = squad_result.get("squad", [])
-    weak_links = squad_result.get("weak_links", [])
+    for p in squad:
+        grouped[p["position"]].append(p)
+    for pos in grouped:
+        grouped[pos].sort(key=lambda x: x["xp"], reverse=True)
 
-    lines = [
-        f"Manager team: {team}",
-        f"Gameweek: {gw}",
-        f"Team value: {_fmt_money(team_value)}",
-        f"Bank: {_fmt_money(bank)}",
-    ]
+    xi = []
+    bench = []
 
-    if squad:
-        lines.append("Squad ranking by xP and context:")
-        for idx, p in enumerate(sorted(squad, key=lambda x: x.get("xp", 0), reverse=True), start=1):
-            lines.append(
-                f"{idx}. {p.get('name')} | {p.get('position')} | {p.get('team')} | "
-                f"price {_fmt_money(p.get('price', 0))} | xP {p.get('xp')} | status {p.get('status')}"
-            )
+    # 1. Fill minimum positional requirements (1 GK, 3 DEF, 1 FWD)
+    if grouped["GK"]:
+        xi.extend(grouped["GK"][:1])
+        bench.extend(grouped["GK"][1:])
+    
+    if len(grouped["DEF"]) >= 3:
+        xi.extend(grouped["DEF"][:3])
+        pool = grouped["DEF"][3:]
+    else:
+        xi.extend(grouped["DEF"])
+        pool = []
 
-    if weak_links:
-        lines.append("Weak links to prioritise:")
-        for p in weak_links:
-            lines.append(
-                f"- {p.get('name')} | {p.get('position')} | {p.get('team')} | "
-                f"price {_fmt_money(p.get('price', 0))} | xP {p.get('xp')} | status {p.get('status')}"
-            )
+    if len(grouped["FWD"]) >= 1:
+        xi.extend(grouped["FWD"][:1])
+        pool.extend(grouped["FWD"][1:])
+    else:
+        xi.extend(grouped["FWD"])
+    
+    pool.extend(grouped["MID"])
+    
+    # Sort all remaining outfield players by xP descending
+    pool.sort(key=lambda x: x["xp"], reverse=True)
 
-    return "\n".join(lines)
+    # Track current formation counts
+    counts = {
+        "GK": len([p for p in xi if p["position"] == "GK"]),
+        "DEF": len([p for p in xi if p["position"] == "DEF"]),
+        "MID": len([p for p in xi if p["position"] == "MID"]),
+        "FWD": len([p for p in xi if p["position"] == "FWD"])
+    }
+
+    # 2. Fill the remaining spots up to 11 players, respecting max FPL limits
+    for p in pool:
+        if len(xi) < 11 and counts[p["position"]] < limits[p["position"]]:
+            xi.append(p)
+            counts[p["position"]] += 1
+        else:
+            bench.append(p)
+
+    # 3. Sort Bench: GK first, then outfield strictly by descending xP
+    bench_gk = [p for p in bench if p["position"] == "GK"]
+    bench_out = [p for p in bench if p["position"] != "GK"]
+    bench_out.sort(key=lambda x: x["xp"], reverse=True)
+    
+    return xi, bench_gk + bench_out, counts
 
 def write_summary(data: Dict[str, Any]) -> str:
     """
-    Generate a short but well-justified plain-English summary for either:
-    * transfer recommendations
-    * squad analysis / manual override analysis
+    Generates a deterministic, pure Python FPL briefing without AI latency.
     """
     try:
-        if data.get("best_single") or data.get("best_double"):
-            facts = _build_transfer_facts(data)
+        sections = []
 
-            prompt = f"""
-You are an elite Fantasy Premier League analyst.
-
-Using ONLY the facts below, write a concise weekly transfer briefing in plain English.
-Make it decisive, practical, and specific.
-
-You MUST justify recommendations using:
-* expected points ranking
-* price / value
-* fixture difficulty
-* home vs away advantage
-* player form or status
-* whether the move is worth a hit
-
-Structure:
-* Short headline
-* Best move
-* Why it is better
-* Whether to take a hit or hold
-* One sentence conclusion
-
-Keep it under 140 words.
-
-FACTS:
-{facts}
-"""
-        else:
-            facts = _build_squad_facts(data)
+        # --- SQUAD (LINEUP, CAPTAIN, BENCH) SECTION ---
+        squad = data.get("squad")
+        if squad and len(squad) >= 11:
+            xi, bench, counts = _get_optimal_xi(squad)
             
-            # UPDATED: Tactical FPL prompt enforcing formations, captaincy, and bench logic
-            prompt = f"""
-You are an elite Fantasy Premier League analyst.
+            # Sort XI for clean UI display order (GK -> DEF -> MID -> FWD)
+            pos_order = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
+            xi.sort(key=lambda x: (pos_order.get(x["position"], 5), -x["xp"]))
 
-Using ONLY the facts below, write a comprehensive and decisive squad briefing. 
-The xP (Expected Points) metric provided already factors in recent performance, fixture difficulty, and home vs. away advantage. Use it as your primary guide.
+            formation = f"{counts['DEF']}-{counts['MID']}-{counts['FWD']}"
+            
+            sections.append(f"### 1. Starting XI & Formation ({formation})")
+            sections.append("---")
+            
+            for pos in ["GK", "DEF", "MID", "FWD"]:
+                pos_players = [p for p in xi if p["position"] == pos]
+                if pos_players:
+                    line = f"**{pos}:** " + " | ".join([f"{p['name']} ({p['team']}) — {p['xp']} xP" for p in pos_players])
+                    sections.append(line)
 
-You MUST follow strict FPL rules for the Starting 11: exactly 1 Goalkeeper, minimum 3 Defenders, and minimum 1 Forward. 
+            total_xi_xp = sum(p["xp"] for p in xi)
+            sections.append(f"\n**Total Projected Starting XI:** {total_xi_xp:.2f} xP\n")
 
-Structure your response with these exact sections:
-* **Headline:** A short, punchy summary of the squad's outlook.
-* **Formation & Starting XI:** State the best valid FPL formation (e.g., 3-5-2, 3-4-3) based on the highest xP players available. Briefly explain why this setup maximizes points this week.
-* **Captain & Vice-Captain:** Pick the best Captain (highest xP) and Vice-Captain (2nd highest xP) and justify the choice based on their specific fixture or form.
-* **Bench Order:** List the 4 benched players. List the backup GK first, followed by the 3 outfield players ordered 1st, 2nd, and 3rd sub based on their remaining xP and status.
-* **Transfer Priorities:** Name 1-2 weakest links to sell and why they are dead weight.
-* **Conclusion:** One sentence final thought.
+            # Captaincy Allocation
+            sections.append("### 2. Captaincy")
+            sections.append("---")
+            xi_sorted = sorted(xi, key=lambda x: x["xp"], reverse=True)
+            cap = xi_sorted[0] if len(xi_sorted) > 0 else None
+            vcap = xi_sorted[1] if len(xi_sorted) > 1 else None
 
-Keep the analysis sharp, professional, and under 250 words.
+            if cap:
+                sections.append(f"• **Captain (C):** {cap['name']} ({cap['team']}) — {cap['xp']} xP (x2 = {cap['xp']*2:.2f} xP)")
+            if vcap:
+                sections.append(f"• **Vice-Captain (VC):** {vcap['name']} ({vcap['team']}) — {vcap['xp']} xP\n")
 
-FACTS:
-{facts}
-"""
+            # Auto-Sub Bench Order
+            sections.append("### 3. Bench Priority")
+            sections.append("---")
+            for i, p in enumerate(bench):
+                if i == 0 and p["position"] == "GK":
+                    sections.append(f"• **GK Sub:** {p['name']} ({p['team']}) — {p['xp']} xP")
+                else:
+                    sub_num = i if bench[0]['position'] == 'GK' else i+1
+                    sections.append(f"• **Sub {sub_num}:** {p['name']} ({p['team']}) — {p['xp']} xP")
+            
+            sections.append("\n")
 
-        model = genai.GenerativeModel(MODEL)
-        response = model.generate_content(prompt)
-        return (response.text or "").strip()
+        # --- TRANSFERS SECTION ---
+        if data.get("best_single") or data.get("best_double"):
+            sections.append("### 4. Transfer Recommendation")
+            sections.append("---")
+            
+            bs = data.get("best_single")
+            bd = data.get("best_double")
+            advice = data.get("hit_advice", "")
+            
+            if bs:
+                sections.append(
+                    f"• **OUT:** {bs['out']['name']} ({bs['out']['team']}, {_fmt_money(bs['out'].get('price',0))}) -> "
+                    f"**IN:** {bs['in']['name']} ({bs['in']['team']}, {_fmt_money(bs['in'].get('price',0))})"
+                )
+                sections.append(f"• **Net Gain:** +{bs['xp_gain']} xP | **Cost Change:** {_fmt_money(bs['cost_change'])}")
+            
+            if bd:
+                sections.append("\n• **ALTERNATIVE DOUBLE TRANSFER:**")
+                for m in bd.get("moves", []):
+                    sections.append(f"  - **OUT:** {m['out']['name']} -> **IN:** {m['in']['name']} (+{m['xp_gain']} xP)")
+                sections.append(f"  - **Total Double Net Gain:** +{bd.get('xp_gain', 0)} xP")
+
+            sections.append(f"\n**Verdict:** {advice}")
+
+        return "\n".join(sections)
 
     except Exception as e:
-        return f"(Could not generate summary: {str(e)})"
+        return f"⚠️ Could not generate Data Science advice: {str(e)}"
