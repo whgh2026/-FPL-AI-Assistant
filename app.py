@@ -1,8 +1,6 @@
 import streamlit as st
 import fpl_tools
 import gemini_summary
-
-# New helper module you should add
 import squad_override
 
 st.set_page_config(page_title="FPL AI Assistant", page_icon="⚽", layout="wide")
@@ -13,6 +11,9 @@ tab1, tab2, tab3, tab4 = st.tabs(
     ["Weekly Transfers", "My Team", "Optimal Squad", "Top Players"]
 )
 
+# ------------------------------------------------------------------
+# TAB 1: Weekly Transfers (unchanged logic, auto-summary on apply)
+# ------------------------------------------------------------------
 with tab1:
     st.subheader("Best Transfers For This Week")
     c1, c2, c3 = st.columns(3)
@@ -25,11 +26,7 @@ with tab1:
 
     if st.button("Find Best Transfers", type="primary", key="btn_transfers"):
         with st.spinner("Analysing your squad and the market..."):
-            res = fpl_tools.suggest_weekly_transfers(
-                mid_transfer.strip(),
-                int(gw_transfer),
-                int(ft)
-            )
+            res = fpl_tools.suggest_weekly_transfers(mid_transfer.strip(), int(gw_transfer), int(ft))
         if "error" in res:
             st.error(res["error"])
         else:
@@ -55,293 +52,310 @@ with tab1:
         if bd:
             st.markdown("### Best Double Transfer")
             for m in bd["moves"]:
-                st.markdown(
-                    f"- OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)"
-                )
+                st.markdown(f"- OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)")
             st.markdown(f"**Total xP gain:** +{bd['xp_gain']}")
 
-        st.markdown("---")
-
-        if st.button("Generate Plain-English Summary", key="btn_summary"):
+        # Auto-generate summary when result exists (no button needed)
+        if "transfer_summary" not in st.session_state or not st.session_state["transfer_summary"]:
             with st.spinner("Writing your weekly briefing..."):
-                summary = gemini_summary.write_summary(res)
-            st.session_state["transfer_summary"] = summary
+                st.session_state["transfer_summary"] = gemini_summary.write_summary(res)
 
-        if st.session_state.get("transfer_summary"):
-            st.markdown("### Your Weekly Briefing")
-            st.write(st.session_state["transfer_summary"])
+        st.markdown("---")
+        st.markdown("### Your Weekly Briefing")
+        st.write(st.session_state.get("transfer_summary", ""))
 
+# ------------------------------------------------------------------
+# TAB 2: My Team — API + Manual Override in one flow
+# ------------------------------------------------------------------
 with tab2:
     st.subheader("Analyse Your Current Squad")
 
-    api_tab, manual_tab = st.tabs(["From FPL API", "Manual Override"])
+    # -------- STEP 1: Fetch from API --------
+    st.markdown("### Step 1 — Fetch Your Squad")
+    c1, c2 = st.columns(2)
+    with c1:
+        mid_squad = st.text_input("Manager ID", "7261134", key="mid_squad")
+    with c2:
+        gw_squad = st.number_input("Gameweek", 1, 38, 3, key="gw_squad")
 
-    with api_tab:
-        c1, c2 = st.columns(2)
-        with c1:
-            mid_squad = st.text_input("Manager ID", "7261134", key="mid_squad")
-        with c2:
-            gw_squad = st.number_input("Gameweek", 1, 38, 3, key="gw_squad")
-
-        if st.button("Analyse My Team", type="primary", key="btn_analyse"):
-            with st.spinner("Loading your squad..."):
-                res2 = fpl_tools.score_my_squad(mid_squad.strip(), int(gw_squad))
-            if "error" in res2:
-                st.error(res2["error"])
-            else:
-                st.session_state["current_squad_analysis"] = res2
-                st.session_state["current_squad_summary"] = gemini_summary.write_summary({
-                    "team_name": res2["team_name"],
-                    "bank": res2["bank"],
+    if st.button("Fetch Squad", type="primary", key="btn_fetch"):
+        with st.spinner("Loading from FPL API..."):
+            res_api = fpl_tools.score_my_squad(mid_squad.strip(), int(gw_squad))
+        if "error" in res_api:
+            st.error(res_api["error"])
+            st.session_state["api_result"] = None
+        else:
+            st.session_state["api_result"] = res_api
+            # Auto-summary for API result too
+            with st.spinner("Writing briefing..."):
+                st.session_state["api_summary"] = gemini_summary.write_summary({
+                    "team_name": res_api["team_name"],
+                    "bank": res_api["bank"],
                     "best_single": None,
                     "best_double": None,
-                    "hit_advice": "API squad analysis loaded.",
+                    "hit_advice": "API squad loaded.",
+                    "gameweek_used": res_api["gameweek_used"],
+                    "team_value": res_api["team_value"],
+                    "squad": res_api["squad"],
+                    "weak_links": res_api["weak_links"],
+                    "captain": res_api.get("captain"),
                 })
 
-        res2 = st.session_state.get("current_squad_analysis")
-        if res2 and "error" not in res2:
-            st.success(f"{res2['team_name']} (GW{res2['gameweek_used']})")
-            a, b = st.columns(2)
-            a.metric("Team Value", f"£{res2['team_value']}m")
-            b.metric("In the Bank", f"£{res2['bank']}m")
+    # Show API cards if fetched
+    api_res = st.session_state.get("api_result")
+    if api_res and "error" not in api_res:
+        st.success(f"API Squad — {api_res['team_name']} (GW{api_res['gameweek_used']})")
+        col_info1, col_info2 = st.columns(2)
+        col_info1.metric("Team Value", f"£{api_res['team_value']}m")
+        col_info2.metric("Bank", f"£{api_res['bank']}m")
 
-            cap = res2.get("captain")
-            if cap:
-                st.markdown(
-                    f"### Recommended Captain: **{cap['name']}** ({cap['team']}) - xP {cap['xp']}"
-                )
+        # Display squad cards in a compact grid (like your screenshot)
+        st.markdown("**API Squad — Player Cards**")
+        squad_cards = api_res["squad"]
+        # Arrange 5 per row
+        for row_start in range(0, len(squad_cards), 5):
+            cols = st.columns(5)
+            for i, p in enumerate(squad_cards[row_start:row_start+5]):
+                with cols[i]:
+                    pos_color = {"GK":"#FFE082","DEF":"#90CAF9","MID":"#A5D6A7","FWD":"#EF9A9A"}.get(p["position"], "#EEEEEE")
+                    cap_mark = " ⭐" if p.get("is_captain") else ""
+                    st.markdown(
+                        f"<div style='padding:8px;border-radius:10px;background:{pos_color};font-size:0.85rem;'>"
+                        f"<b>{p['name']}</b> {cap_mark}<br>"
+                        f"<span style='font-size:0.75rem;color:#555;'>{p['position']} • {p['team']} • £{p['price']}m</span><br>"
+                        f"<span style='font-size:0.8rem;font-weight:bold;'>xP {p['xp']}</span> • <span style='font-size:0.75rem;'>{p['status']}</span>"
+                        f"</div>", unsafe_allow_html=True
+                    )
 
-            st.markdown("### Your Squad")
-            st.table([
-                {
-                    "Player": p["name"],
-                    "Pos": p["position"],
-                    "Team": p["team"],
-                    "Price": f"£{p['price']}m",
-                    "xP": p["xp"],
-                    "Status": p["status"],
-                    "C": "C" if p["is_captain"] else ""
-                }
-                for p in res2["squad"]
-            ])
+        if st.session_state.get("api_summary"):
+            with st.expander("AI Briefing (API Squad)"):
+                st.write(st.session_state["api_summary"])
 
-            st.markdown("### Weakest Links")
-            st.table([
-                {
-                    "Player": p["name"],
-                    "Pos": p["position"],
-                    "Team": p["team"],
-                    "xP": p["xp"]
-                }
-                for p in res2["weak_links"]
-            ])
+    # -------- STEP 2: Midweek Override --------
+    st.markdown("---")
+    st.markdown("### Step 2 — Midweek Override")
+    st.info(
+        "⚠️ **The FPL API hides midweek transfers before the deadline.** "
+        "Override with your exact roster & bank if you made changes after the last deadline."
+    )
 
-            if st.session_state.get("current_squad_summary"):
-                st.markdown("### Plain-English Summary")
-                st.write(st.session_state["current_squad_summary"])
+    # Image upload
+    uploaded_image = st.file_uploader(
+        "Upload screenshot of your current squad (optional)",
+        type=["png", "jpg", "jpeg"],
+        key="override_image"
+    )
 
-    with manual_tab:
-        st.info(
-            "Upload a screenshot of your current squad. If the image is unclear, "
-            "you can manually correct players using dropdowns."
-        )
+    # Pre-populate dropdowns from API if available
+    bootstrap = fpl_tools._get_bootstrap()
+    players_by_id = {p["id"]: p for p in bootstrap["elements"]}
+    teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
-        uploaded_image = st.file_uploader(
-            "Upload squad screenshot",
-            type=["png", "jpg", "jpeg"],
-            key="squad_image_upload"
-        )
+    # Build dropdown options by position
+    dropdown_options = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    for p in bootstrap["elements"]:
+        pos = pos_map.get(p["element_type"])
+        if pos:
+            display = f"{p['first_name']} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m"
+            dropdown_options[pos].append((p["id"], display))
 
-        c1, c2 = st.columns(2)
-        with c1:
-            manual_gameweek = st.number_input("Gameweek", 1, 38, 3, key="manual_gw")
-        with c2:
-            manual_bank = st.number_input("Bank Balance (£m)", 0.0, 50.0, 0.0, 0.1, key="manual_bank")
-
-        bootstrap = None
-        extracted_players = []
-        matched_players = []
-
-        if uploaded_image:
-            st.image(uploaded_image, caption="Uploaded squad screenshot", use_container_width=True)
-
-            with st.spinner("Reading squad image..."):
-                bootstrap = fpl_tools._get_bootstrap()
-                extraction = squad_override.extract_squad_from_image(uploaded_image)
-
-            if extraction.get("success"):
-                extracted_players = extraction.get("raw_players", [])
-                matched_players = squad_override.match_players_to_fpl(bootstrap, extracted_players)
-
-                st.success(f"Detected {len(matched_players)} players from the screenshot.")
-
-                if extracted_players:
-                    with st.expander("Raw OCR / AI extraction"):
-                        st.write(extracted_players)
-
-                if matched_players:
-                    with st.expander("Matched players"):
-                        st.table([
-                            {
-                                "Player": p["name"],
-                                "Team": p["team"],
-                                "Pos": p["position"],
-                                "Price": f"£{p['price']}m"
-                            }
-                            for p in matched_players
-                        ])
+    # Initialize selections from API squad if present
+    default_selections = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    if api_res and "squad" in api_res:
+        for p in api_res["squad"]:
+            pos = p["position"]
+            # Find matching option index
+            for idx, (pid, _) in enumerate(dropdown_options[pos]):
+                if pid == p.get("player_id") or (p.get("name") and p["name"].split()[0] in dropdown_options[pos][idx][1]):
+                    default_selections[pos].append(idx)
+                    break
             else:
-                st.warning(
-                    extraction.get("error", "Could not read the image properly. "
-                    "Use the dropdowns below to build the squad manually.")
+                default_selections[pos].append(0)
+
+    # If image uploaded, process and update selections
+    image_matched = []
+    if uploaded_image:
+        with st.spinner("Reading squad image with Gemini Vision..."):
+            extraction = squad_override.extract_squad_from_image(uploaded_image)
+        if extraction.get("success"):
+            image_matched = squad_override.match_players_to_fpl(bootstrap, extraction.get("raw_players", []))
+            if image_matched:
+                st.success(f"Image parsed: {len(image_matched)} players matched.")
+                # Update default selections based on image match
+                for p in image_matched:
+                    pos = p["position"]
+                    for idx, (pid, _) in enumerate(dropdown_options[pos]):
+                        if pid == p["player_id"]:
+                            # Replace first empty/default slot for this position
+                            if len(default_selections[pos]) == 0 or default_selections[pos][0] == 0:
+                                default_selections[pos] = [idx]
+                            else:
+                                # Append if not already present
+                                if idx not in default_selections[pos]:
+                                    default_selections[pos].append(idx)
+                            break
+
+    # Manual bank input
+    bank_override = st.number_input("Bank Balance (£m)", 0.0, 50.0, float(api_res["bank"]) if api_res else 0.0, 0.1, key="override_bank")
+
+    # Dropdown grid by position — pre-populated
+    st.markdown("### Your Squad (correct any player using dropdowns)")
+    override_squad = []
+
+    quotas = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    for pos, count in quotas.items():
+        st.markdown(f"**{pos}**")
+        cols = st.columns(min(count, 5))
+        for i in range(count):
+            with cols[i % len(cols)]:
+                # Use session-state keys to persist selections across reruns
+                key_name = f"sel_{pos}_{i}"
+                # Determine default index
+                idx_default = 0
+                if pos in default_selections and i < len(default_selections[pos]):
+                    idx_default = default_selections[pos][i]
+                # If image matched and we have a match for this slot, try to use it
+                if image_matched and i < len(image_matched):
+                    for idx, (pid, _) in enumerate(dropdown_options[pos]):
+                        if pid == image_matched[i]["player_id"]:
+                            idx_default = idx
+                            break
+
+                selected = st.selectbox(
+                    f"{pos} {i+1}",
+                    options=dropdown_options[pos],
+                    format_func=lambda x: x[1],
+                    index=min(idx_default, len(dropdown_options[pos])-1),
+                    key=key_name,
+                    label_visibility="collapsed"
                 )
+                if selected:
+                    pid, display = selected
+                    name = display.split(" (")[0]
+                    team_match = __import__('re').search(r"\(([A-Z]{3})\)", display)
+                    price_match = __import__('re').search(r"£([\d.]+)m", display)
+                    override_squad.append({
+                        "player_id": pid,
+                        "name": name,
+                        "team": team_match.group(1) if team_match else "?",
+                        "position": pos,
+                        "price": float(price_match.group(1)) if price_match else 0.0,
+                    })
 
-        if bootstrap is None:
-            bootstrap = fpl_tools._get_bootstrap()
+    # Apply override
+    if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
+        if len(override_squad) != 15:
+            st.error("Please select exactly 15 players (2 GK, 5 DEF, 5 MID, 3 FWD).")
+        else:
+            with st.spinner("Analysing overridden squad..."):
+                fixture_lookup = fpl_tools._build_fixture_lookup()
+                analysed = []
 
-        st.markdown("### Build or Correct Squad")
-        override_squad = squad_override.render_override_ui(
-            matched_players=matched_players,
-            bootstrap_data=bootstrap,
-            bank=manual_bank
-        )
+                for p in override_squad:
+                    fpl_p = players_by_id.get(p["player_id"])
+                    if fpl_p:
+                        xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup)
+                        analysed.append({
+                            "player_id": p["player_id"],
+                            "name": p ...`"name": p["name"], "team": p["team"], "position": p["position"], "price": p["price"], "xp": xp, "status": note, "is_captain": False})`
 
-        if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
-            if not override_squad:
-                st.error("No squad selected yet.")
-            else:
-                with st.spinner("Analysing overridden squad..."):
-                    fixture_lookup = fpl_tools._build_fixture_lookup()
-                    players_by_id = {p["id"]: p for p in bootstrap["elements"]}
+```python
+                weak_links = sorted(analysed, key=lambda x: x["xp"])[:4]
+                best_xi = [p for p in analysed if p["xp"] > 0]
+                captain = max(best_xi, key=lambda x: x["xp"]) if best_xi else None
 
-                    analysed_squad = []
-                    for p in override_squad:
-                        fpl_player = players_by_id.get(p["player_id"])
-                        if fpl_player:
-                            xp, note = fpl_tools._player_xp(fpl_player, fixture_lookup)
-                            analysed_squad.append({
-                                "player_id": p["player_id"],
-                                "name": p["name"],
-                                "team": p["team"],
-                                "position": p["position"],
-                                "price": p["price"],
-                                "xp": xp,
-                                "status": note,
-                                "is_captain": False,
-                            })
+                analysis_result = {
+                    "gameweek_used": int(gw_squad),
+                    "team_name": "Manual Override Squad",
+                    "bank": float(bank_override),
+                    "team_value": round(sum(p["price"] for p in analysed), 1),
+                    "squad": analysed,
+                    "weak_links": weak_links,
+                    "captain": captain,
+                }
 
-                    weak_links = sorted(analysed_squad, key=lambda x: x["xp"])[:4]
-                    best_xi = [p for p in analysed_squad if p["xp"] > 0]
-                    captain = max(best_xi, key=lambda x: x["xp"]) if best_xi else None
-
-                    analysis_result = {
-                        "gameweek_used": int(manual_gameweek),
-                        "team_name": "Manual Override Squad",
-                        "bank": float(manual_bank),
-                        "team_value": round(sum(p["price"] for p in analysed_squad), 1),
-                        "squad": analysed_squad,
-                        "weak_links": weak_links,
-                        "captain": captain,
-                    }
-
-                    st.session_state["override_analysis"] = analysis_result
+                # Auto-generate plain-English summary (no button needed)
+                with st.spinner("Writing AI briefing..."):
                     st.session_state["override_summary"] = gemini_summary.write_summary({
                         "team_name": analysis_result["team_name"],
                         "bank": analysis_result["bank"],
                         "best_single": None,
                         "best_double": None,
-                        "hit_advice": "Manual squad override applied.",
+                        "hit_advice": "Manual squad override applied — FPL API did not reflect midweek changes.",
+                        "gameweek_used": analysis_result["gameweek_used"],
+                        "team_value": analysis_result["team_value"],
+                        "squad": analysis_result["squad"],
+                        "weak_links": analysis_result["weak_links"],
+                        "captain": analysis_result["captain"],
                     })
 
-                st.success("Squad overridden and analysed.")
+                st.session_state["override_analysis"] = analysis_result
+                st.success("Override applied and analysed.")
 
-        analysis = st.session_state.get("override_analysis")
-        if analysis:
+        # Display override results automatically
+        override_res = st.session_state.get("override_analysis")
+        if override_res:
             st.markdown("---")
-            st.success(f"{analysis['team_name']} (GW{analysis['gameweek_used']})")
+            st.success(f"{override_res['team_name']} (GW{override_res['gameweek_used']})")
 
             a, b = st.columns(2)
-            a.metric("Team Value", f"£{analysis['team_value']}m")
-            b.metric("In the Bank", f"£{analysis['bank']}m")
+            a.metric("Team Value", f"£{override_res['team_value']}m")
+            b.metric("Bank", f"£{override_res['bank']}m")
 
-            cap = analysis.get("captain")
+            cap = override_res.get("captain")
             if cap:
-                st.markdown(
-                    f"### Recommended Captain: **{cap['name']}** ({cap['team']}) - xP {cap['xp']}"
-                )
+                st.markdown(f"### Recommended Captain: **{cap['name']}** ({cap['team']}) — xP **{cap['xp']}**")
 
-            st.markdown("### Your Squad")
+            st.markdown("### Your Squard")
             st.table([
-                {
-                    "Player": p["name"],
-                    "Pos": p["position"],
-                    "Team": p["team"],
-                    "Price": f"£{p['price']}m",
-                    "xP": p["xp"],
-                    "Status": p["status"],
-                }
-                for p in analysis["squad"]
+                {"Player": p["name"], "Pos": p["position"], "Team": p["team"],
+                 "Price": f"£{p['price']}m", "xP": p["xp"], "Status": p["status"]}
+                for p in override_res["squad"]
             ])
 
             st.markdown("### Weakest Links")
             st.table([
-                {
-                    "Player": p["name"],
-                    "Pos": p["position"],
-                    "Team": p["team"],
-                    "xP": p["xp"]
-                }
-                for p in analysis["weak_links"]
+                {"Player": p["name"], "Pos": p["position"], "Team": p["team"], "xP": p["xp"]}
+                for p in override_res["weak_links"]
             ])
 
             if st.session_state.get("override_summary"):
-                st.markdown("### Plain-English Summary")
-                st.write(st.session_state["override_summary"])
+                st.markdown("### AI Briefing — Justified Analysis")
+                st.info(st.session_state["override_summary"])
 
+# ------------------------------------------------------------------
+# TAB 3: Optimal Squad (unchanged)
+# ------------------------------------------------------------------
 with tab3:
     st.subheader("Build the Optimal Squad From Scratch (Wildcard Mode)")
     budget = st.slider("Budget (£m)", 80.0, 100.0, 100.0, 0.5, key="budget_slider")
-
     if st.button("Build Optimal Squad", type="primary", key="btn_optimal"):
         with st.spinner("Crunching the numbers..."):
             res3 = fpl_tools.optimise_full_squad(budget=budget)
         if "error" in res3:
             st.error(res3["error"])
         else:
-            st.success(
-                f"Squad built: £{res3['total_price']}m / £{res3['budget']}m  -  Total xP: {res3['total_xp']}"
-            )
+            st.success(f"Squad built: £{res3['total_price']}m / £{res3['budget']}m  -  Total xP: {res3['total_xp']}")
             for pos in ["GK", "DEF", "MID", "FWD"]:
                 players = [p for p in res3["squad"] if p["position"] == pos]
                 st.markdown(f"**{pos}**")
                 st.table([
-                    {
-                        "Player": p["name"],
-                        "Team": p["team"],
-                        "Price": f"£{p['price']}m",
-                        "xP": p["xp"]
-                    }
+                    {"Player": p["name"], "Team": p["team"],
+                     "Price": f"£{p['price']}m", "xP": p["xp"]}
                     for p in players
                 ])
 
+# ------------------------------------------------------------------
+# TAB 4: Top Players (unchanged)
+# ------------------------------------------------------------------
 with tab4:
     st.subheader("Top Players by Expected Points")
     c1, c2 = st.columns(2)
     with c1:
-        pos_filter = st.selectbox(
-            "Position",
-            ["All", "GK", "DEF", "MID", "FWD"],
-            key="pos_select"
-        )
+        pos_filter = st.selectbox("Position", ["All", "GK", "DEF", "MID", "FWD"], key="pos_select")
     with c2:
-        max_price = st.number_input(
-            "Max price (£m, 0 = no limit)",
-            0.0,
-            15.5,
-            0.0,
-            0.5,
-            key="max_price_input"
-        )
+        max_price = st.number_input("Max price (£m, 0 = no limit)", 0.0, 15.5, 0.0, 0.5, key="max_price_input")
 
     if st.button("Show Rankings", type="primary", key="btn_rankings"):
         with st.spinner("Ranking players..."):
@@ -354,13 +368,7 @@ with tab4:
             st.error(res4["error"])
         else:
             st.table([
-                {
-                    "Player": p["name"],
-                    "Pos": p["position"],
-                    "Team": p["team"],
-                    "Price": f"£{p['price']}m",
-                    "xP": p["xp"],
-                    "Status": p["status"]
-                }
+                {"Player": p["name"], "Pos": p["position"], "Team": p["team"],
+                 "Price": f"£{p['price']}m", "xP": p["xp"], "Status": p["status"]}
                 for p in res4["players"]
             ])
