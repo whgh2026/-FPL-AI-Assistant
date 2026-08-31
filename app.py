@@ -245,7 +245,7 @@ with tab2:
 
     # Apply override
         if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
-        if len(override_squad) != 15:
+            if len(override_squad) != 15:
             st.error("Please select exactly 15 players (2 GK, 5 DEF, 5 MID, 3 FWD).")
         else:
             with st.spinner("Analysing overridden squad..."):
