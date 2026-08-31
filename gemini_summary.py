@@ -7,8 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-MODEL = "gemini-3.5-flash-lite"
-
+MODEL = "gemini-3.6-flash"
 
 def _fmt_money(value):
     try:
@@ -92,7 +91,6 @@ def _build_squad_facts(squad_result: Dict[str, Any]) -> str:
 
     return "\n".join(lines)
 
-
 def write_summary(data: Dict[str, Any]) -> str:
     """
     Generate a short but well-justified plain-English summary for either:
@@ -100,8 +98,9 @@ def write_summary(data: Dict[str, Any]) -> str:
     * squad analysis / manual override analysis
     """
     try:
-        if "best_single" in data or "best_double" in data:
+        if data.get("best_single") or data.get("best_double"):
             facts = _build_transfer_facts(data)
+
             prompt = f"""
 You are an elite Fantasy Premier League analyst.
 
