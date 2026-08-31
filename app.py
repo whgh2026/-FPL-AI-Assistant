@@ -233,7 +233,9 @@ with tab2:
         cols = st.columns(min(count, 5))
         for i in range(count):
             with cols[i % len(cols)]:
-                key_name = f"sel_{pos}_{i}"
+                # Create a dynamic key so dropdowns reset when an image is uploaded or API data changes
+                img_state = uploaded_image.name if uploaded_image else "none"
+                key_name = f"sel_{pos}_{i}_{img_state}_{mid_squad}_{gw_squad}"
                 idx_default = 0
                 
                 if i < len(default_selections[pos]):
