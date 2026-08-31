@@ -244,12 +244,13 @@ with tab2:
                     })
 
     # Apply override
-    if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
+        if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
         if len(override_squad) != 15:
             st.error("Please select exactly 15 players (2 GK, 5 DEF, 5 MID, 3 FWD).")
         else:
             with st.spinner("Analysing overridden squad..."):
                 fixture_lookup = fpl_tools._build_fixture_lookup()
+                players_by_id = {p["id"]: p for p in bootstrap["elements"]}
                 analysed = []
 
                 for p in override_squad:
@@ -258,9 +259,15 @@ with tab2:
                         xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup)
                         analysed.append({
                             "player_id": p["player_id"],
-                            "name": p ...`"name": p["name"], "team": p["team"], "position": p["position"], "price": p["price"], "xp": xp, "status": note, "is_captain": False})`
+                            "name": p["name"],
+                            "team": p["team"],
+                            "position": p["position"],
+                            "price": p["price"],
+                            "xp": xp,
+                            "status": note,
+                            "is_captain": False,
+                        })
 
-```python
                 weak_links = sorted(analysed, key=lambda x: x["xp"])[:4]
                 best_xi = [p for p in analysed if p["xp"] > 0]
                 captain = max(best_xi, key=lambda x: x["xp"]) if best_xi else None
@@ -274,6 +281,23 @@ with tab2:
                     "weak_links": weak_links,
                     "captain": captain,
                 }
+
+                with st.spinner("Writing AI briefing..."):
+                    st.session_state["override_summary"] = gemini_summary.write_summary({
+                        "team_name": analysis_result["team_name"],
+                        "bank": analysis_result["bank"],
+                        "best_single": None,
+                        "best_double": None,
+                        "hit_advice": "Manual squad override applied — FPL API did not reflect midweek changes.",
+                        "gameweek_used": analysis_result["gameweek_used"],
+                        "team_value": analysis_result["team_value"],
+                        "squad": analysis_result["squad"],
+                        "weak_links": analysis_result["weak_links"],
+                        "captain": analysis_result["captain"],
+                    })
+
+                st.session_state["override_analysis"] = analysis_result
+                st.success("Override applied and analysed.")
 
                 # Auto-generate plain-English summary (no button needed)
                 with st.spinner("Writing AI briefing..."):
