@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+import json
 import re
 from difflib import SequenceMatcher
 import os
@@ -7,10 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-MODEL = "gemini-3.5-flash-lite"
+
+# UPDATED: Use the vision-optimized JSON model
+MODEL = "gemini-1.5-flash"
 
 def extract_squad_from_image(image_file) -> dict:
-    """Use Gemini Vision to accurately extract squad player names and teams from the pitch screenshot."""
+    """Use Gemini Vision to accurately extract squad player names and teams, outputting JSON."""
     try:
         image_bytes = image_file.getvalue()
         model = genai.GenerativeModel(MODEL)
@@ -20,33 +23,38 @@ def extract_squad_from_image(image_file) -> dict:
             "data": image_bytes
         }
         
-        prompt = """Look at this Fantasy Premier League (FPL) pitch screenshot. 
-Extract all 15 players shown on the pitch. For each player, read:
-1. Their exact display name inside the white box at the bottom of their card (e.g., Kinsky, Dunk, Saka, Haaland).
-2. Their team opponent/status code inside the lower box if visible, or infer their Premier League club from their shirt kit if possible.
-3. Their position based on where they are placed on the pitch (GK = top row, DEF = second row, MID = third row, FWD = bottom row).
+        # UPDATED: Prompt specifically addresses the shirt vs opponent box issue and enforces JSON
+        prompt = """Look at this Fantasy Premier League (FPL) screenshot. 
+Extract the 15 players shown on the pitch. 
 
-Return ONLY a list in this EXACT format (one per line):
-PLAYER: [Exact Name] ([Team Abbreviation or Club]) [GK/DEF/MID/FWD]
+CRITICAL INSTRUCTIONS FOR TEAM IDENTIFICATION:
+1. Ignore the text in the lower white box (e.g., 'NFO (A)' or 'LEE (H)'). That is their upcoming OPPONENT, not their club!
+2. You MUST deduce the player's actual team strictly by looking at their shirt color, design, and sponsor (e.g., AIA pink shirt = Spurs, American Express blue/white = Brighton, Etihad blue = Man City, Snapdragon red = Man Utd).
 
-Example:
-PLAYER: Kinsky (TOT) GK
-PLAYER: Dunk (BHA) DEF
-PLAYER: Saka (ARS) MID
-PLAYER: Haaland (MCI) FWD"""
+Return a valid JSON array of objects. Each object should have these keys:
+- "name": The player's display name.
+- "team": The 3-letter abbreviation of their deduced team.
+- "position": Based on pitch rows (Top row = "GK", 2nd row = "DEF", 3rd row = "MID", 4th row = "FWD").
+
+Return ONLY the raw JSON array. Do not include markdown formatting like ```json."""
 
         response = model.generate_content([image_part, prompt])
         
-        players = []
-        for line in response.text.split('\n'):
-            line = line.strip()
-            if line.startswith('PLAYER:'):
-                players.append(line.replace('PLAYER:', '').strip())
+        # Clean up any potential markdown formatting the AI might add
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+            
+        players_data = json.loads(raw_text.strip())
         
         return {
-            "success": len(players) > 0,
-            "player_count": len(players),
-            "raw_players": players,
+            "success": len(players_data) > 0,
+            "player_count": len(players_data),
+            "raw_players": players_data, 
         }
     except Exception as e:
         return {
@@ -56,7 +64,7 @@ PLAYER: Haaland (MCI) FWD"""
 
 
 def match_players_to_fpl(bootstrap_data: dict, raw_players: list) -> list:
-    """Strictly match extracted player strings to FPL player database IDs using name and position."""
+    """Fuzzy match extracted JSON players to FPL player database IDs."""
     fpl_players = bootstrap_data.get("elements", [])
     teams = {t["id"]: t["name"] for t in bootstrap_data.get("teams", [])}
     team_code_map = {
@@ -70,51 +78,42 @@ def match_players_to_fpl(bootstrap_data: dict, raw_players: list) -> list:
     
     matched = []
     for raw in raw_players:
-        # Expected format: Name (TEAM) POS
-        match = re.match(r"(.+?)\s*\(([^)]+)\)\s*([A-Z]{3})", raw)
-        if not match:
-            # Fallback regex if format varies slightly
-            parts = raw.rsplit(" ", 1)
-            if len(parts) == 2:
-                name_team, pos = parts
-                name_parts = name_team.rsplit("(", 1)
-                name = name_parts[0].strip()
-                team_hint = name_parts[1].replace(")", "").strip() if len(name_parts) > 1 else ""
-            else:
-                continue
-        else:
-            name, team_hint, pos = match.groups()
-            name = name.strip()
-            pos = pos.strip()
+        if not isinstance(raw, dict):
+            continue
 
-        # Find best match in FPL database prioritizing position and name similarity
+        name = raw.get("name", "").strip()
+        team_hint = raw.get("team", "").strip()
+        pos = raw.get("position", "").strip()
+
         best_match = None
-        best_score = 0.4
+        best_score = 0.45 
         
         resolved_team = team_code_map.get(team_hint.upper(), team_hint)
 
         for p in fpl_players:
             p_pos = pos_map.get(p.get("element_type"))
-            if pos and p_pos != pos:
-                continue  # Strict position filter to prevent cross-position mapping
-                
+            
             fpl_first = p.get("first_name", "").lower()
             fpl_second = p.get("second_name", "").lower()
             fpl_web = p.get("web_name", "").lower()
             
             target = name.lower()
             
-            # Calculate match score
+            # Calculate match score based on Web Name, Last Name, or Full Name
             score = max(
                 SequenceMatcher(None, target, fpl_second).ratio(),
                 SequenceMatcher(None, target, fpl_web).ratio(),
-                SequenceMatcher(None, target, fpl_first).ratio()
+                SequenceMatcher(None, target, fpl_first + " " + fpl_second).ratio()
             )
             
-            # Boost score if team matches
+            # Boost score if the club matches
             p_team_name = teams.get(p.get("team"), "").lower()
-            if resolved_team.lower() in p_team_name or p_team_name in resolved_team.lower():
+            if resolved_team and (resolved_team.lower() in p_team_name or p_team_name in resolved_team.lower()):
                 score += 0.25
+                
+            # Apply a penalty if the position is wrong (instead of skipping completely)
+            if pos and p_pos != pos:
+                score -= 0.3
 
             if score > best_score:
                 best_score = score
