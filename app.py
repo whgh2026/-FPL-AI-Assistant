@@ -110,12 +110,10 @@ with tab2:
         squad_cards = api_res["squad"]
         
         for pos in ["GK", "DEF", "MID", "FWD"]:
-            # Filter players by current position
             pos_players = [p for p in squad_cards if p["position"] == pos]
             
             if pos_players:
                 st.markdown(f"**{pos}**")
-                # Create exactly enough columns for the players in this position
                 cols = st.columns(len(pos_players))
                 
                 for i, p in enumerate(pos_players):
@@ -138,7 +136,6 @@ with tab2:
                             f"</div>",
                             unsafe_allow_html=True
                         )
-                        
 
         if st.session_state.get("api_summary"):
             with st.expander("AI Briefing (API Squad)"):
@@ -208,16 +205,25 @@ with tab2:
                 )
             )
 
-    bank_override = st.number_input(
-        "Bank Balance (£m)",
-        0.0,
-        50.0,
-        float(api_res["bank"]) if api_res else 0.0,
-        0.1,
-        key="override_bank"
-    )
+    col_bank, col_ft = st.columns(2)
+    with col_bank:
+        bank_override = st.number_input(
+            "Bank Balance (£m)",
+            0.0,
+            50.0,
+            float(api_res["bank"]) if api_res else 0.0,
+            0.1,
+            key="override_bank"
+        )
+    with col_ft:
+        ft_override = st.number_input(
+            "Free Transfers",
+            0,
+            5,
+            1,
+            key="override_ft"
+        )
 
-    # UPDATED: Group matched players by position first to fix dropdown alignment bug
     image_matched_by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     if image_matched:
         for p in image_matched:
@@ -233,7 +239,6 @@ with tab2:
         cols = st.columns(min(count, 5))
         for i in range(count):
             with cols[i % len(cols)]:
-                # Create a dynamic key so dropdowns reset when an image is uploaded or API data changes
                 img_state = uploaded_image.name if uploaded_image else "none"
                 key_name = f"sel_{pos}_{i}_{img_state}_{mid_squad}_{gw_squad}"
                 idx_default = 0
@@ -241,7 +246,6 @@ with tab2:
                 if i < len(default_selections[pos]):
                     idx_default = default_selections[pos][i]
 
-                # UPDATED: Use the grouped dictionary for accurate dropdown matching
                 if image_matched_by_pos[pos] and i < len(image_matched_by_pos[pos]):
                     matched_p = image_matched_by_pos[pos][i]
                     for idx, (pid, _) in enumerate(dropdown_options[pos]):
@@ -309,22 +313,24 @@ with tab2:
                     "captain": captain,
                 }
 
-                with st.spinner("Writing AI briefing..."):
-                    st.session_state["override_summary"] = gemini_summary.write_summary({
-                        "team_name": analysis_result["team_name"],
-                        "bank": analysis_result["bank"],
-                        "best_single": None,
-                        "best_double": None,
-                        "hit_advice": "Manual squad override applied — FPL API did not reflect midweek changes.",
-                        "gameweek_used": analysis_result["gameweek_used"],
-                        "team_value": analysis_result["team_value"],
-                        "squad": analysis_result["squad"],
-                        "weak_links": analysis_result["weak_links"],
-                        "captain": analysis_result["captain"],
-                    })
+                with st.spinner("Calculating optimal transfers..."):
+                    transfer_result = fpl_tools.suggest_transfers_for_custom_squad(
+                        analysed, 
+                        float(bank_override), 
+                        int(ft_override)
+                    )
+                    analysis_result["transfers"] = transfer_result
+
+                with st.spinner("Writing AI tactical & transfer briefings..."):
+                    st.session_state["override_summary"] = gemini_summary.write_summary(analysis_result)
+                    
+                    if "error" not in transfer_result:
+                        st.session_state["override_transfer_summary"] = gemini_summary.write_summary(transfer_result)
+                    else:
+                        st.session_state["override_transfer_summary"] = None
 
                 st.session_state["override_analysis"] = analysis_result
-                st.success("Override applied and analysed.")
+                st.success("Override applied and fully analysed.")
 
     override_res = st.session_state.get("override_analysis")
     if override_res:
@@ -352,20 +358,37 @@ with tab2:
             for p in override_res["squad"]
         ])
 
-        st.markdown("### Weakest Links")
-        st.table([
-            {
-                "Player": p["name"],
-                "Pos": p["position"],
-                "Team": p["team"],
-                "xP": p["xp"]
-            }
-            for p in override_res["weak_links"]
-        ])
-
         if st.session_state.get("override_summary"):
-            st.markdown("### AI Briefing — Justified Analysis")
+            st.markdown("### AI Tactical Briefing")
             st.info(st.session_state["override_summary"])
+
+        st.markdown("---")
+        st.markdown("### Recommended Midweek Transfers")
+        tr = override_res.get("transfers")
+        if tr and "error" not in tr:
+            st.warning(f"Advice: {tr['hit_advice']}")
+            
+            bs = tr.get("best_single")
+            if bs:
+                st.markdown("#### Best Single Move")
+                st.markdown(
+                    f"**OUT:** {bs['out']['name']} ({bs['out']['team']}) - xP {bs['out']['xp']}  \n"
+                    f"**IN:** {bs['in']['name']} ({bs['in']['team']}) - xP {bs['in']['xp']}  \n"
+                    f"**xP gain:** +{bs['xp_gain']}  -  **Cost change:** £{bs['cost_change']}m"
+                )
+            else:
+                st.write("No beneficial single transfer found.")
+                
+            bd = tr.get("best_double")
+            if bd:
+                st.markdown("#### Best Double Move")
+                for m in bd["moves"]:
+                    st.markdown(f"- OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)")
+                st.markdown(f"**Total xP gain:** +{bd['xp_gain']}")
+
+            if st.session_state.get("override_transfer_summary"):
+                st.markdown("### AI Transfer Briefing")
+                st.success(st.session_state["override_transfer_summary"])
 
 # ------------------------------------------------------------------
 # TAB 3: Optimal Squad
