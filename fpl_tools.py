@@ -7,26 +7,20 @@ FPL_API = os.getenv("FPL_API_BASE", "https://fantasy.premierleague.com/api/").st
 HOME_BONUS = 1.10
 AWAY_PENALTY = 0.95
 
-VALID_PL_TEAMS = {
-    "Arsenal", "Aston Villa", "Bournemouth", "Brentford", "Brighton",
-    "Chelsea", "Coventry", "Crystal Palace", "Everton", "Fulham",
-    "Hull City", "Ipswich", "Leeds", "Liverpool", "Man City",
-    "Man Utd", "Newcastle", "Nott'm Forest", "Spurs", "Sunderland",
-}
-
+# FIX 1: Custom User-Agent prevents the FPL API from blocking the request and causing 10-second timeout hangs
+HEADERS = {"User-Agent": "FPL-AI-Assistant/1.0 (Mozilla/5.0)"}
 
 @st.cache_data(ttl=900)
 def _get_bootstrap():
-    return requests.get(f"{FPL_API}bootstrap-static/", timeout=10).json()
-
+    return requests.get(f"{FPL_API}bootstrap-static/", headers=HEADERS, timeout=10).json()
 
 def _valid_team_ids_by_name(bootstrap):
-    return {t["id"] for t in bootstrap.get("teams", []) if t["name"] in VALID_PL_TEAMS}
-
+    # FIX 2: Dynamically map all active teams from the API instead of relying on a hardcoded, outdated list
+    return {t["id"] for t in bootstrap.get("teams", [])}
 
 @st.cache_data(ttl=900)
 def _build_fixture_lookup():
-    fixtures = requests.get(f"{FPL_API}fixtures/?future=1", timeout=10).json()
+    fixtures = requests.get(f"{FPL_API}fixtures/?future=1", headers=HEADERS, timeout=10).json()
     lookup = {}
     for f in fixtures:
         if f.get("event") is None:
@@ -39,7 +33,6 @@ def _build_fixture_lookup():
             {"opponent": th, "is_home": False, "difficulty": f.get("team_a_difficulty", 3)}
         )
     return lookup
-
 
 def _player_xp(p, fixture_lookup):
     status = p.get("status", "a")
@@ -86,7 +79,6 @@ def _player_xp(p, fixture_lookup):
 
     return round(xp, 2), note
 
-
 def rank_players_by_xp(position=None, max_price=None, limit=15) -> dict:
     try:
         bootstrap = _get_bootstrap()
@@ -127,7 +119,6 @@ def rank_players_by_xp(position=None, max_price=None, limit=15) -> dict:
     except Exception as e:
         return {"error": f"Failed to rank players: {str(e)}"}
 
-
 def score_my_squad(manager_id, gameweek) -> dict:
     try:
         manager_id = int(manager_id)
@@ -142,7 +133,7 @@ def score_my_squad(manager_id, gameweek) -> dict:
         picks_data = None
         used_gw = gameweek
         for gw in range(gameweek, 0, -1):
-            r = requests.get(f"{FPL_API}entry/{manager_id}/event/{gw}/picks/", timeout=10)
+            r = requests.get(f"{FPL_API}entry/{manager_id}/event/{gw}/picks/", headers=HEADERS, timeout=10)
             if r.status_code == 200:
                 picks_data = r.json()
                 used_gw = gw
@@ -171,7 +162,7 @@ def score_my_squad(manager_id, gameweek) -> dict:
         best_xi = [p for p in squad if p["xp"] > 0]
         captain = max(best_xi, key=lambda x: x["xp"]) if best_xi else None
 
-        entry_data = requests.get(f"{FPL_API}entry/{manager_id}/", timeout=10).json()
+        entry_data = requests.get(f"{FPL_API}entry/{manager_id}/", headers=HEADERS, timeout=10).json()
         return {
             "gameweek_used": used_gw,
             "team_name": entry_data.get("name", "Unknown"),
@@ -183,7 +174,6 @@ def score_my_squad(manager_id, gameweek) -> dict:
         }
     except Exception as e:
         return {"error": f"Failed to score squad: {str(e)}"}
-
 
 def _all_scored_players():
     bootstrap = _get_bootstrap()
@@ -210,7 +200,6 @@ def _all_scored_players():
             "xp": xp,
         })
     return scored
-
 
 def optimise_full_squad(budget=100.0) -> dict:
     try:
@@ -253,7 +242,6 @@ def optimise_full_squad(budget=100.0) -> dict:
     except Exception as e:
         return {"error": f"Optimisation failed: {str(e)}"}
 
-
 def suggest_weekly_transfers(manager_id, gameweek, free_transfers=1) -> dict:
     try:
         manager_id = int(manager_id)
@@ -270,7 +258,7 @@ def suggest_weekly_transfers(manager_id, gameweek, free_transfers=1) -> dict:
         picks_data = None
         used_gw = gameweek
         for gw in range(gameweek, 0, -1):
-            r = requests.get(f"{FPL_API}entry/{manager_id}/event/{gw}/picks/", timeout=10)
+            r = requests.get(f"{FPL_API}entry/{manager_id}/event/{gw}/picks/", headers=HEADERS, timeout=10)
             if r.status_code == 200:
                 picks_data = r.json()
                 used_gw = gw
@@ -299,7 +287,7 @@ def suggest_weekly_transfers(manager_id, gameweek, free_transfers=1) -> dict:
                 "status": note,
             })
 
-        entry_data = requests.get(f"{FPL_API}entry/{manager_id}/", timeout=10).json()
+        entry_data = requests.get(f"{FPL_API}entry/{manager_id}/", headers=HEADERS, timeout=10).json()
         bank = entry_data.get("last_deadline_bank", 0) / 10
 
         pool = []
