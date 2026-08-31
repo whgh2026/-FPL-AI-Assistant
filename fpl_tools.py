@@ -1,5 +1,6 @@
 import requests
 import os
+import streamlit as st
 
 FPL_API = os.getenv("FPL_API_BASE", "https://fantasy.premierleague.com/api/").strip().strip("\"'").rstrip("/") + "/"
 
@@ -14,6 +15,7 @@ VALID_PL_TEAMS = {
 }
 
 
+@st.cache_data(ttl=900)
 def _get_bootstrap():
     return requests.get(f"{FPL_API}bootstrap-static/", timeout=10).json()
 
@@ -22,6 +24,7 @@ def _valid_team_ids_by_name(bootstrap):
     return {t["id"] for t in bootstrap.get("teams", []) if t["name"] in VALID_PL_TEAMS}
 
 
+@st.cache_data(ttl=900)
 def _build_fixture_lookup():
     fixtures = requests.get(f"{FPL_API}fixtures/?future=1", timeout=10).json()
     lookup = {}
