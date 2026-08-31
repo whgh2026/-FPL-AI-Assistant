@@ -1,8 +1,3 @@
-Here is the verified, fully consolidated **`app.py`**.
-
-This version integrates the dynamic dropdown keys, the horizontal player cards, the custom transfer market override, and the `st.session_state` image caching. Caching the image data prevents the app from repeating the expensive Gemini Vision API call on every button click, as Streamlit natively reruns the script from top to bottom whenever a widget state changes.
-
-```python
 import streamlit as st
 import fpl_tools
 import gemini_summary
