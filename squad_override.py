@@ -1,18 +1,16 @@
 import streamlit as st
 import google.generativeai as genai
-import fpl_tools
-import os
-from dotenv import load_dotenv
 import re
 from difflib import SequenceMatcher
+import os
+from dotenv import load_dotenv
 
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 MODEL = "gemini-3.5-flash-lite"
 
-
 def extract_squad_from_image(image_file) -> dict:
-    """Use Gemini Vision to extract squad from screenshot."""
+    """Use Gemini Vision to accurately extract squad player names and teams from the pitch screenshot."""
     try:
         image_bytes = image_file.getvalue()
         model = genai.GenerativeModel(MODEL)
@@ -22,18 +20,26 @@ def extract_squad_from_image(image_file) -> dict:
             "data": image_bytes
         }
         
-        prompt = """Analyze this FPL squad screenshot and extract ALL 15 player names, team codes, prices, and positions.
+        prompt = """Look at this Fantasy Premier League (FPL) pitch screenshot. 
+Extract all 15 players shown on the pitch. For each player, read:
+1. Their exact display name inside the white box at the bottom of their card (e.g., Kinsky, Dunk, Saka, Haaland).
+2. Their team opponent/status code inside the lower box if visible, or infer their Premier League club from their shirt kit if possible.
+3. Their position based on where they are placed on the pitch (GK = top row, DEF = second row, MID = third row, FWD = bottom row).
+
 Return ONLY a list in this EXACT format (one per line):
-PLAYER: [First Name] [Last Name] ([Team Code]) £[Price]m [Position]
+PLAYER: [Exact Name] ([Team Abbreviation or Club]) [GK/DEF/MID/FWD]
 
 Example:
-PLAYER: Erling Haaland (MCI) £15.5m FWD
-PLAYER: Bukayo Saka (ARS) £9.5m MID"""
+PLAYER: Kinsky (TOT) GK
+PLAYER: Dunk (BHA) DEF
+PLAYER: Saka (ARS) MID
+PLAYER: Haaland (MCI) FWD"""
 
         response = model.generate_content([image_part, prompt])
         
         players = []
         for line in response.text.split('\n'):
+            line = line.strip()
             if line.startswith('PLAYER:'):
                 players.append(line.replace('PLAYER:', '').strip())
         
@@ -50,26 +56,66 @@ PLAYER: Bukayo Saka (ARS) £9.5m MID"""
 
 
 def match_players_to_fpl(bootstrap_data: dict, raw_players: list) -> list:
-    """Match extracted player strings to FPL player database IDs."""
+    """Strictly match extracted player strings to FPL player database IDs using name and position."""
     fpl_players = bootstrap_data.get("elements", [])
     teams = {t["id"]: t["name"] for t in bootstrap_data.get("teams", [])}
+    team_code_map = {
+        "ARS": "Arsenal", "AVL": "Aston Villa", "BOU": "Bournemouth", "BRE": "Brentford",
+        "BHA": "Brighton", "CHE": "Chelsea", "CRY": "Crystal Palace", "EVE": "Everton",
+        "FUL": "Fulham", "IPS": "Ipswich", "LEI": "Leicester", "LIV": "Liverpool",
+        "MCI": "Man City", "MUN": "Man Utd", "NEW": "Newcastle", "NFO": "Nott'm Forest",
+        "TOT": "Spurs", "WHU": "West Ham", "WOL": "Wolves", "SOU": "Southampton"
+    }
     pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
     
     matched = []
     for raw in raw_players:
-        match = re.match(r"(.+?)\s*\(([A-Z]{3})\)\s*£([\d.]+)m\s*(\w+)", raw)
+        # Expected format: Name (TEAM) POS
+        match = re.match(r"(.+?)\s*\(([^)]+)\)\s*([A-Z]{3})", raw)
         if not match:
-            continue
-        
-        name, _, _, _ = match.groups()
-        name = name.strip()
-        
+            # Fallback regex if format varies slightly
+            parts = raw.rsplit(" ", 1)
+            if len(parts) == 2:
+                name_team, pos = parts
+                name_parts = name_team.rsplit("(", 1)
+                name = name_parts[0].strip()
+                team_hint = name_parts[1].replace(")", "").strip() if len(name_parts) > 1 else ""
+            else:
+                continue
+        else:
+            name, team_hint, pos = match.groups()
+            name = name.strip()
+            pos = pos.strip()
+
+        # Find best match in FPL database prioritizing position and name similarity
         best_match = None
-        best_score = 0.5
+        best_score = 0.4
         
+        resolved_team = team_code_map.get(team_hint.upper(), team_hint)
+
         for p in fpl_players:
-            fpl_name = f"{p.get('first_name')} {p.get('second_name')}".strip()
-            score = SequenceMatcher(None, name.lower(), fpl_name.lower()).ratio()
+            p_pos = pos_map.get(p.get("element_type"))
+            if pos and p_pos != pos:
+                continue  # Strict position filter to prevent cross-position mapping
+                
+            fpl_first = p.get("first_name", "").lower()
+            fpl_second = p.get("second_name", "").lower()
+            fpl_web = p.get("web_name", "").lower()
+            
+            target = name.lower()
+            
+            # Calculate match score
+            score = max(
+                SequenceMatcher(None, target, fpl_second).ratio(),
+                SequenceMatcher(None, target, fpl_web).ratio(),
+                SequenceMatcher(None, target, fpl_first).ratio()
+            )
+            
+            # Boost score if team matches
+            p_team_name = teams.get(p.get("team"), "").lower()
+            if resolved_team.lower() in p_team_name or p_team_name in resolved_team.lower():
+                score += 0.25
+
             if score > best_score:
                 best_score = score
                 best_match = p
@@ -82,6 +128,7 @@ def match_players_to_fpl(bootstrap_data: dict, raw_players: list) -> list:
                 "position": pos_map.get(best_match["element_type"], "?"),
                 "price": best_match["now_cost"] / 10,
             })
+            
     return matched
 
 
@@ -150,33 +197,3 @@ def render_override_ui(matched_players: list, bootstrap_data: dict, bank: float)
                     st.caption(f"£{overridden_squad[-1]['price']:.1f}m")
                     
     return overridden_squad
-
-
-def generate_squad_justification(analysis_result: dict) -> str:
-    """Automatically generate a data-backed justification summary covering form, fixtures, and cost."""
-    try:
-        team = analysis_result.get("team_name")
-        bank = analysis_result.get("bank")
-        squad = analysis_result.get("squad", [])
-        weak_links = analysis_result.get("weak_links", [])
-        captain = analysis_result.get("captain")
-        
-        squad_summary = ", ".join([f"{p['name']} ({p['position']}, xP {p['xp']}, Status: {p['status']})" for p in squad])
-        weak_summary = ", ".join([f"{p['name']} (xP {p['xp']})" for p in weak_links])
-        
-        prompt = f"""You are an expert FPL Data Scientist. Analyze this custom squad configuration:
-Team: {team} | Bank: £{bank}m
-Captain Choice: {captain['name'] if captain else 'None'} (xP {captain['xp'] if captain else 0})
-Full Squad & Expected Points (xP): {squad_summary}
-Identified Weak Links: {weak_summary}
-
-Write a comprehensive, data-backed justification (max 150 words) explaining:
-1. Why the captaincy pick is mathematically optimal based on expected points, form, and fixture difficulty (venue multiplier).
-2. The strategic evaluation of squad cost vs. team value and bank flexibility.
-3. Specific recommendations on which weak links need immediate attention based on upcoming fixture difficulty and player status."""
-
-        model = genai.GenerativeModel(MODEL)
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"Could not generate automated justification: {str(e)}"
