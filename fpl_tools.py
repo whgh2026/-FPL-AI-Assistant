@@ -371,3 +371,117 @@ def suggest_weekly_transfers(manager_id, gameweek, free_transfers=1) -> dict:
         }
     except Exception as e:
         return {"error": f"Failed to suggest transfers: {str(e)}"}
+
+def suggest_transfers_for_custom_squad(squad, bank, free_transfers=1):
+    try:
+        free_transfers = int(free_transfers)
+        bootstrap = _get_bootstrap()
+        fixture_lookup = _build_fixture_lookup()
+        valid_teams = _valid_team_ids_by_name(bootstrap)
+        pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+        teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+        players_by_id = {p["id"]: p for p in bootstrap["elements"]}
+
+        owned_ids = set()
+        club_counts = {}
+        for p in squad:
+            owned_ids.add(p["player_id"])
+            fpl_p = players_by_id.get(p["player_id"])
+            if fpl_p:
+                club_counts[fpl_p["team"]] = club_counts.get(fpl_p["team"], 0) + 1
+
+        pool = []
+        for p in bootstrap["elements"]:
+            if p["team"] not in valid_teams:
+                continue
+            if p["id"] in owned_ids:
+                continue
+            xp, note = _player_xp(p, fixture_lookup)
+            if xp <= 0:
+                continue
+            pool.append({
+                "id": p["id"],
+                "name": f"{p['first_name']} {p['second_name']}",
+                "team_id": p["team"],
+                "team": teams.get(p["team"], "?"),
+                "position": pos_map.get(p["element_type"]),
+                "price": p["now_cost"] / 10,
+                "xp": xp,
+            })
+
+        single_swaps = []
+        for out_p in squad:
+            fpl_out = players_by_id.get(out_p["player_id"])
+            if not fpl_out: continue
+            out_team_id = fpl_out["team"]
+            spendable = bank + out_p["price"]
+            
+            for in_p in pool:
+                if in_p["position"] != out_p["position"]:
+                    continue
+                if in_p["price"] > spendable:
+                    continue
+                new_count = club_counts.get(in_p["team_id"], 0)
+                if in_p["team_id"] == out_team_id:
+                    new_count -= 1
+                if new_count >= 3:
+                    continue
+                gain = round(in_p["xp"] - out_p["xp"], 2)
+                if gain <= 0:
+                    continue
+                    
+                formatted_out = {
+                    "id": out_p["player_id"],
+                    "name": out_p["name"],
+                    "team_id": out_team_id,
+                    "team": out_p["team"],
+                    "position": out_p["position"],
+                    "price": out_p["price"],
+                    "xp": out_p["xp"]
+                }
+                
+                single_swaps.append({
+                    "out": formatted_out,
+                    "in": in_p,
+                    "xp_gain": gain,
+                    "cost_change": round(in_p["price"] - formatted_out["price"], 1),
+                })
+
+        single_swaps.sort(key=lambda x: x["xp_gain"], reverse=True)
+        best_single = single_swaps[0] if single_swaps else None
+
+        best_double = None
+        if len(single_swaps) >= 2:
+            top = single_swaps[:15]
+            for i in range(len(top)):
+                for j in range(i + 1, len(top)):
+                    a, b = top[i], top[j]
+                    if a["out"]["id"] == b["out"]["id"]:
+                        continue
+                    if a["in"]["id"] == b["in"]["id"]:
+                        continue
+                    combined = round(a["xp_gain"] + b["xp_gain"], 2)
+                    if best_double is None or combined > best_double["xp_gain"]:
+                        best_double = {"moves": [a, b], "xp_gain": combined}
+
+        if free_transfers == 0:
+            if best_single and best_single["xp_gain"] >= 4:
+                hit_advice = "You have 0 free transfers. This move is worth a -4 hit (xP gain beats the 4-point cost)."
+            else:
+                hit_advice = "You have 0 free transfers. No move is worth a -4 hit this week - hold."
+        elif free_transfers >= 2 and best_double:
+            hit_advice = "You have 2+ free transfers - make both moves for free."
+        elif best_double and best_single and (best_double["xp_gain"] - best_single["xp_gain"]) >= 4:
+            hit_advice = "A second transfer (-4 hit) looks worth it this week."
+        else:
+            hit_advice = "Stick to one transfer - a -4 hit is not worth it this week."
+
+        return {
+            "team_name": "Manual Override Squad",
+            "bank": bank,
+            "best_single": best_single,
+            "best_double": best_double,
+            "hit_advice": hit_advice,
+        }
+    except Exception as e:
+        return {"error": f"Failed to suggest transfers for custom squad: {str(e)}"}
