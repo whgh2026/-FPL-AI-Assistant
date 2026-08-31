@@ -270,7 +270,7 @@ with tab2:
                 if selected:
                     pid, display = selected
                     name = display.split(" (")[0]
-                    team_match = re.search(r"\(([A-Z]{3})\)", display)
+                    team_match = re.search(r"\((.*?)\)", display)
                     price_match = re.search(r"£([\d.]+)m", display)
 
                     override_squad.append({
