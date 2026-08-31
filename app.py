@@ -108,26 +108,37 @@ with tab2:
 
         st.markdown("**API Squad — Player Cards**")
         squad_cards = api_res["squad"]
-        for row_start in range(0, len(squad_cards), 5):
-            cols = st.columns(5)
-            for i, p in enumerate(squad_cards[row_start:row_start + 5]):
-                with cols[i]:
-                    pos_color = {
-                        "GK": "#FFE082",
-                        "DEF": "#90CAF9",
-                        "MID": "#A5D6A7",
-                        "FWD": "#EF9A9A"
-                    }.get(p["position"], "#EEEEEE")
-                    cap_mark = " ⭐" if p.get("is_captain") else ""
-                    st.markdown(
-                        f"<div style='padding:8px;border-radius:10px;background:{pos_color};font-size:0.85rem;'>"
-                        f"<b>{p['name']}</b>{cap_mark}<br>"
-                        f"<span style='font-size:0.75rem;color:#555;'>{p['position']} • {p['team']} • £{p['price']}m</span><br>"
-                        f"<span style='font-size:0.8rem;font-weight:bold;'>xP {p['xp']}</span> • "
-                        f"<span style='font-size:0.75rem;'>{p['status']}</span>"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
+        
+        for pos in ["GK", "DEF", "MID", "FWD"]:
+            # Filter players by current position
+            pos_players = [p for p in squad_cards if p["position"] == pos]
+            
+            if pos_players:
+                st.markdown(f"**{pos}**")
+                # Create exactly enough columns for the players in this position
+                cols = st.columns(len(pos_players))
+                
+                for i, p in enumerate(pos_players):
+                    with cols[i]:
+                        pos_color = {
+                            "GK": "#FFE082",
+                            "DEF": "#90CAF9",
+                            "MID": "#A5D6A7",
+                            "FWD": "#EF9A9A"
+                        }.get(p["position"], "#EEEEEE")
+                        
+                        cap_mark = " ⭐" if p.get("is_captain") else ""
+                        
+                        st.markdown(
+                            f"<div style='padding:8px;border-radius:10px;background:{pos_color};font-size:0.85rem;margin-bottom:15px;'>"
+                            f"<b>{p['name']}</b>{cap_mark}<br>"
+                            f"<span style='font-size:0.75rem;color:#555;'>{p['team']} • £{p['price']}m</span><br>"
+                            f"<span style='font-size:0.8rem;font-weight:bold;'>xP {p['xp']}</span> • "
+                            f"<span style='font-size:0.75rem;'>{p['status']}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
+                        
 
         if st.session_state.get("api_summary"):
             with st.expander("AI Briefing (API Squad)"):
