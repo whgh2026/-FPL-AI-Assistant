@@ -10,7 +10,7 @@ load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # UPDATED: Use the vision-optimized JSON model
-MODEL = "gemini-1.5-flash"
+MODEL = "gemini-3.7-flash"
 
 def extract_squad_from_image(image_file) -> dict:
     """Use Gemini Vision to accurately extract squad player names and teams, outputting JSON."""
