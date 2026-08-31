@@ -250,19 +250,12 @@ with tab2:
                         "price": float(price_match.group(1)) if price_match else 0.0,
                     })
 
-<<<<<<< HEAD
     if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
         if len(override_squad) != 15:
-=======
-    # Apply override
-        if st.button("Apply Override & Analyse", type="primary", key="btn_apply_override"):
-            if len(override_squad) != 15:
->>>>>>> 70ce0b50e53fa9353409ee47cb0e9d76cf12d1a1
             st.error("Please select exactly 15 players (2 GK, 5 DEF, 5 MID, 3 FWD).")
         else:
             with st.spinner("Analysing overridden squad..."):
                 fixture_lookup = fpl_tools._build_fixture_lookup()
-                players_by_id = {p["id"]: p for p in bootstrap["elements"]}
                 analysed = []
 
                 for p in override_squad:
@@ -294,27 +287,6 @@ with tab2:
                     "captain": captain,
                 }
 
-<<<<<<< HEAD
-=======
-                with st.spinner("Writing AI briefing..."):
-                    st.session_state["override_summary"] = gemini_summary.write_summary({
-                        "team_name": analysis_result["team_name"],
-                        "bank": analysis_result["bank"],
-                        "best_single": None,
-                        "best_double": None,
-                        "hit_advice": "Manual squad override applied — FPL API did not reflect midweek changes.",
-                        "gameweek_used": analysis_result["gameweek_used"],
-                        "team_value": analysis_result["team_value"],
-                        "squad": analysis_result["squad"],
-                        "weak_links": analysis_result["weak_links"],
-                        "captain": analysis_result["captain"],
-                    })
-
-                st.session_state["override_analysis"] = analysis_result
-                st.success("Override applied and analysed.")
-
-                # Auto-generate plain-English summary (no button needed)
->>>>>>> 70ce0b50e53fa9353409ee47cb0e9d76cf12d1a1
                 with st.spinner("Writing AI briefing..."):
                     st.session_state["override_summary"] = gemini_summary.write_summary({
                         "team_name": analysis_result["team_name"],
