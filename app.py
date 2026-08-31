@@ -3,6 +3,7 @@ import fpl_tools
 import gemini_summary
 import squad_override
 import re
+import copy
 
 st.set_page_config(page_title="FPL Data Science Assistant", page_icon="⚽", layout="wide")
 st.title("⚽ FPL Data Science Assistant")
@@ -52,17 +53,11 @@ with tab1:
         bd = res["best_double"]
         if bd:
             st.markdown("### Best Double Transfer")
-            for m in bd["moves"]:
-                st.markdown(f"- OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)")
+            # Sort double transfers by highest gain priority
+            sorted_bd_moves = sorted(bd["moves"], key=lambda x: x["xp_gain"], reverse=True)
+            for i, m in enumerate(sorted_bd_moves, 1):
+                st.markdown(f"**Priority {i}:** OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)")
             st.markdown(f"**Total xP gain:** +{bd['xp_gain']}")
-
-        if "transfer_summary" not in st.session_state or not st.session_state.get("transfer_summary"):
-            with st.spinner("Generating your weekly data science advice..."):
-                st.session_state["transfer_summary"] = gemini_summary.write_summary(res)
-
-        st.markdown("---")
-        st.markdown("### Your Weekly Data Science Advice")
-        st.write(st.session_state.get("transfer_summary", ""))
 
 # ------------------------------------------------------------------
 # TAB 2: My Team — API + Manual Override
@@ -85,19 +80,7 @@ with tab2:
             st.session_state["api_result"] = None
         else:
             st.session_state["api_result"] = res_api
-            with st.spinner("Generating data science advice..."):
-                st.session_state["api_summary"] = gemini_summary.write_summary({
-                    "team_name": res_api["team_name"],
-                    "bank": res_api["bank"],
-                    "best_single": None,
-                    "best_double": None,
-                    "hit_advice": "API squad loaded.",
-                    "gameweek_used": res_api["gameweek_used"],
-                    "team_value": res_api["team_value"],
-                    "squad": res_api["squad"],
-                    "weak_links": res_api["weak_links"],
-                    "captain": res_api.get("captain"),
-                })
+            st.session_state["api_summary"] = gemini_summary.write_summary({"squad": res_api["squad"]})
 
     api_res = st.session_state.get("api_result")
     if api_res and "error" not in api_res:
@@ -304,39 +287,24 @@ with tab2:
                             "is_captain": False,
                         })
 
-                weak_links = sorted(analysed, key=lambda x: x["xp"])[:4]
-                best_xi = [p for p in analysed if p["xp"] > 0]
-                captain = max(best_xi, key=lambda x: x["xp"]) if best_xi else None
-
                 analysis_result = {
                     "gameweek_used": int(gw_squad),
                     "team_name": "Manual Override Squad",
                     "bank": float(bank_override),
                     "team_value": round(sum(p["price"] for p in analysed), 1),
-                    "squad": analysed,
-                    "weak_links": weak_links,
-                    "captain": captain,
+                    "squad": analysed
                 }
 
                 with st.spinner("Calculating optimal transfers..."):
-                    transfer_result = fpl_tools.suggest_transfers_for_custom_squad(
-                        analysed, 
-                        float(bank_override), 
-                        int(ft_override)
+                    analysis_result["transfers"] = fpl_tools.suggest_transfers_for_custom_squad(
+                        analysed, float(bank_override), int(ft_override)
                     )
-                    analysis_result["transfers"] = transfer_result
-
-                with st.spinner("Generating Data Science tactical & transfer advice..."):
-                    st.session_state["override_summary"] = gemini_summary.write_summary(analysis_result)
-                    
-                    if "error" not in transfer_result:
-                        st.session_state["override_transfer_summary"] = gemini_summary.write_summary(transfer_result)
-                    else:
-                        st.session_state["override_transfer_summary"] = None
 
                 st.session_state["override_analysis"] = analysis_result
-                st.success("Override applied and fully analysed.")
 
+    # --------------------------------------------------------------
+    # INTERACTIVE TACTICAL SANDBOX
+    # --------------------------------------------------------------
     override_res = st.session_state.get("override_analysis")
     if override_res:
         st.markdown("---")
@@ -346,13 +314,71 @@ with tab2:
         a.metric("Team Value", f"£{override_res['team_value']}m")
         b.metric("Bank", f"£{override_res['bank']}m")
 
-        if st.session_state.get("override_summary"):
-            st.markdown("### Data Science Tactical Advice")
-            st.info(st.session_state["override_summary"])
+        tr = override_res.get("transfers", {})
+        active_squad = copy.deepcopy(override_res["squad"])
+        
+        apply_bs = False
+        apply_bd = False
 
-        if st.session_state.get("override_transfer_summary"):
-            st.markdown("### Data Science Transfer Advice")
-            st.success(st.session_state["override_transfer_summary"])
+        if tr and "error" not in tr:
+            st.markdown("### 1. Market Opportunities")
+            st.info(f"**Verdict:** {tr.get('hit_advice', 'Hold')}")
+            
+            bs = tr.get("best_single")
+            bd = tr.get("best_double")
+            
+            t_col1, t_col2 = st.columns(2)
+            
+            if bs:
+                with t_col1:
+                    st.markdown("#### Best Single Move")
+                    st.markdown(f"**OUT:** {bs['out']['name']} -> **IN:** {bs['in']['name']}")
+                    st.markdown(f"**Net Gain:** +{bs['xp_gain']} xP | **Cost:** £{bs['cost_change']}m")
+                    apply_bs = st.checkbox("✅ Simulate Single Move", key="chk_bs")
+                    
+            if bd:
+                with t_col2:
+                    st.markdown("#### Best Double Move")
+                    # Sort moves by priority (highest xP gain first)
+                    sorted_bd_moves = sorted(bd["moves"], key=lambda x: x["xp_gain"], reverse=True)
+                    for i, m in enumerate(sorted_bd_moves, 1):
+                        st.markdown(f"**Priority {i}:** OUT {m['out']['name']} -> IN {m['in']['name']} (+{m['xp_gain']} xP)")
+                    st.markdown(f"**Total Gain:** +{bd['xp_gain']} xP")
+                    
+                    # Disable if single is checked to prevent conflict
+                    apply_bd = st.checkbox("✅ Simulate Double Move", key="chk_bd", disabled=apply_bs)
+
+            # Apply UI simulation to the active_squad memory
+            if apply_bd and bd:
+                for m in bd["moves"]:
+                    active_squad = [p for p in active_squad if p["player_id"] != m["out"]["id"]]
+                    active_squad.append({
+                        "player_id": m["in"]["id"],
+                        "name": m["in"]["name"],
+                        "team": m["in"]["team"],
+                        "position": m["in"]["position"],
+                        "price": m["in"]["price"],
+                        "xp": m["in"]["xp"],
+                        "status": "Available"
+                    })
+            elif apply_bs and bs:
+                active_squad = [p for p in active_squad if p["player_id"] != bs["out"]["id"]]
+                active_squad.append({
+                    "player_id": bs["in"]["id"],
+                    "name": bs["in"]["name"],
+                    "team": bs["in"]["team"],
+                    "position": bs["in"]["position"],
+                    "price": bs["in"]["price"],
+                    "xp": bs["in"]["xp"],
+                    "status": "Available"
+                })
+
+        st.markdown("---")
+        status_header = " (Post-Transfer Simulation)" if (apply_bs or apply_bd) else ""
+        st.markdown(f"### 2. Tactical Lineup & Bench{status_header}")
+        
+        tactical_summary = gemini_summary.write_summary({"squad": active_squad})
+        st.markdown(tactical_summary)
 
 # ------------------------------------------------------------------
 # TAB 3: Optimal Squad
