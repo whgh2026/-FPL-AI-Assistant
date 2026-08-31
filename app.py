@@ -206,6 +206,13 @@ with tab2:
         key="override_bank"
     )
 
+    # UPDATED: Group matched players by position first to fix dropdown alignment bug
+    image_matched_by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    if image_matched:
+        for p in image_matched:
+            if p["position"] in image_matched_by_pos:
+                image_matched_by_pos[p["position"]].append(p)
+
     st.markdown("### Your Squad (correct any player using dropdowns)")
     override_squad = []
 
@@ -221,9 +228,11 @@ with tab2:
                 if i < len(default_selections[pos]):
                     idx_default = default_selections[pos][i]
 
-                if image_matched and i < len(image_matched):
+                # UPDATED: Use the grouped dictionary for accurate dropdown matching
+                if image_matched_by_pos[pos] and i < len(image_matched_by_pos[pos]):
+                    matched_p = image_matched_by_pos[pos][i]
                     for idx, (pid, _) in enumerate(dropdown_options[pos]):
-                        if pid == image_matched[i]["player_id"]:
+                        if pid == matched_p["player_id"]:
                             idx_default = idx
                             break
 
