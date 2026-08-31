@@ -4,8 +4,8 @@ import gemini_summary
 import squad_override
 import re
 
-st.set_page_config(page_title="FPL AI Assistant", page_icon="⚽", layout="wide")
-st.title("⚽ FPL AI Assistant")
+st.set_page_config(page_title="FPL Data Science Assistant", page_icon="⚽", layout="wide")
+st.title("⚽ FPL Data Science Assistant")
 st.caption("Your personal fantasy football data scientist")
 
 tab1, tab2, tab3, tab4 = st.tabs(
@@ -57,11 +57,11 @@ with tab1:
             st.markdown(f"**Total xP gain:** +{bd['xp_gain']}")
 
         if "transfer_summary" not in st.session_state or not st.session_state.get("transfer_summary"):
-            with st.spinner("Writing your weekly briefing..."):
+            with st.spinner("Generating your weekly data science advice..."):
                 st.session_state["transfer_summary"] = gemini_summary.write_summary(res)
 
         st.markdown("---")
-        st.markdown("### Your Weekly Briefing")
+        st.markdown("### Your Weekly Data Science Advice")
         st.write(st.session_state.get("transfer_summary", ""))
 
 # ------------------------------------------------------------------
@@ -85,7 +85,7 @@ with tab2:
             st.session_state["api_result"] = None
         else:
             st.session_state["api_result"] = res_api
-            with st.spinner("Writing briefing..."):
+            with st.spinner("Generating data science advice..."):
                 st.session_state["api_summary"] = gemini_summary.write_summary({
                     "team_name": res_api["team_name"],
                     "bank": res_api["bank"],
@@ -138,8 +138,8 @@ with tab2:
                         )
 
         if st.session_state.get("api_summary"):
-            with st.expander("AI Briefing (API Squad)"):
-                st.write(st.session_state["api_summary"])
+            with st.expander("Data Science Advice (API Squad)"):
+                st.markdown(st.session_state["api_summary"])
 
     st.markdown("---")
     st.markdown("### Step 2 — Midweek Override")
@@ -326,7 +326,7 @@ with tab2:
                     )
                     analysis_result["transfers"] = transfer_result
 
-                with st.spinner("Writing AI tactical & transfer briefings..."):
+                with st.spinner("Generating Data Science tactical & transfer advice..."):
                     st.session_state["override_summary"] = gemini_summary.write_summary(analysis_result)
                     
                     if "error" not in transfer_result:
@@ -346,54 +346,13 @@ with tab2:
         a.metric("Team Value", f"£{override_res['team_value']}m")
         b.metric("Bank", f"£{override_res['bank']}m")
 
-        cap = override_res.get("captain")
-        if cap:
-            st.markdown(f"### Recommended Captain: **{cap['name']}** ({cap['team']}) — xP **{cap['xp']}**")
-
-        st.markdown("### Your Squad")
-        st.table([
-            {
-                "Player": p["name"],
-                "Pos": p["position"],
-                "Team": p["team"],
-                "Price": f"£{p['price']}m",
-                "xP": p["xp"],
-                "Status": p["status"]
-            }
-            for p in override_res["squad"]
-        ])
-
         if st.session_state.get("override_summary"):
-            st.markdown("### AI Tactical Briefing")
+            st.markdown("### Data Science Tactical Advice")
             st.info(st.session_state["override_summary"])
 
-        st.markdown("---")
-        st.markdown("### Recommended Midweek Transfers")
-        tr = override_res.get("transfers")
-        if tr and "error" not in tr:
-            st.warning(f"Advice: {tr['hit_advice']}")
-            
-            bs = tr.get("best_single")
-            if bs:
-                st.markdown("#### Best Single Move")
-                st.markdown(
-                    f"**OUT:** {bs['out']['name']} ({bs['out']['team']}) - xP {bs['out']['xp']}  \n"
-                    f"**IN:** {bs['in']['name']} ({bs['in']['team']}) - xP {bs['in']['xp']}  \n"
-                    f"**xP gain:** +{bs['xp_gain']}  -  **Cost change:** £{bs['cost_change']}m"
-                )
-            else:
-                st.write("No beneficial single transfer found.")
-                
-            bd = tr.get("best_double")
-            if bd:
-                st.markdown("#### Best Double Move")
-                for m in bd["moves"]:
-                    st.markdown(f"- OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)")
-                st.markdown(f"**Total xP gain:** +{bd['xp_gain']}")
-
-            if st.session_state.get("override_transfer_summary"):
-                st.markdown("### AI Transfer Briefing")
-                st.success(st.session_state["override_transfer_summary"])
+        if st.session_state.get("override_transfer_summary"):
+            st.markdown("### Data Science Transfer Advice")
+            st.success(st.session_state["override_transfer_summary"])
 
 # ------------------------------------------------------------------
 # TAB 3: Optimal Squad
@@ -454,5 +413,3 @@ with tab4:
                 }
                 for p in res4["players"]
             ])
-
-```
