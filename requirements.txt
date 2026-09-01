@@ -1,5 +1,7 @@
 streamlit
-google-generativeai
+google-genai
 requests
 pulp
 python-dotenv
+Pillow
+python-dateutil

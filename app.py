@@ -172,12 +172,15 @@ with tab2:
                 extraction = squad_override.extract_squad_from_image(uploaded_image)
             
             if extraction.get("success"):
-                st.session_state["cached_image_matched"] = squad_override.match_players_to_fpl(
+                matched, unmatched = squad_override.match_players_to_fpl(
                     bootstrap,
                     extraction.get("raw_players", [])
                 )
+                st.session_state["cached_image_matched"] = matched
+                st.session_state["cached_image_unmatched"] = unmatched
             else:
                 st.session_state["cached_image_matched"] = []
+                st.session_state["cached_image_unmatched"] = []
                 st.warning(extraction.get("error", "Could not read the image properly."))
             
             st.session_state["last_uploaded_file"] = file_id
@@ -185,13 +188,9 @@ with tab2:
         image_matched = st.session_state.get("cached_image_matched", [])
         if image_matched:
             st.success(f"Image parsed: {len(image_matched)} players matched.")
-            for p in image_matched:
-                pos = p["position"]
-                for idx, (pid, _) in enumerate(dropdown_options[pos]):
-                    if pid == p["player_id"]:
-                        if idx not in default_selections[pos]:
-                            default_selections[pos].append(idx)
-                        break
+        image_unmatched = st.session_state.get("cached_image_unmatched", [])
+        if image_unmatched:
+            st.warning(f"⚠️ {len(image_unmatched)} player(s) could not be matched: {', '.join(image_unmatched)}")
 
     col_bank, col_ft = st.columns(2)
     with col_bank:
@@ -227,7 +226,7 @@ with tab2:
         cols = st.columns(min(count, 5))
         for i in range(count):
             with cols[i % len(cols)]:
-                img_state = uploaded_image.name if uploaded_image else "none"
+                img_state = f"{uploaded_image.name}_{uploaded_image.size}" if uploaded_image else "none"
                 key_name = f"sel_{pos}_{i}_{img_state}_{mid_squad}_{gw_squad}"
                 idx_default = 0
                 

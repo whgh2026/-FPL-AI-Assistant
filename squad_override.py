@@ -1,4 +1,5 @@
 import os
+import io
 import json
 from google import genai
 from google.genai import types
@@ -16,7 +17,10 @@ def extract_squad_from_image(uploaded_file) -> dict:
 
     try:
         client = genai.Client(api_key=api_key)
-        image = Image.open(uploaded_file)
+        image = Image.open(uploaded_file).convert("RGB")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        image_part = types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")
 
         prompt = """
         Analyze this Fantasy Premier League (FPL) squad screenshot.
@@ -30,7 +34,7 @@ def extract_squad_from_image(uploaded_file) -> dict:
 
         response = client.models.generate_content(
             model=MODEL,
-            contents=[image, prompt],
+            contents=[image_part, prompt],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
             )
@@ -42,12 +46,14 @@ def extract_squad_from_image(uploaded_file) -> dict:
     except Exception as e:
         return {"success": False, "error": f"Gemini OCR extraction failed: {str(e)}"}
 
-def match_players_to_fpl(bootstrap: dict, raw_players: list) -> list:
+def match_players_to_fpl(bootstrap: dict, raw_players: list) -> tuple:
     """
     Matches OCR player name strings against official FPL element records.
+    Returns (matched_squad, unmatched_names).
     """
     fpl_elements = bootstrap.get("elements", [])
     matched_squad = []
+    unmatched = []
 
     for item in raw_players:
         ocr_name = item.get("name", "").lower().strip()
@@ -70,5 +76,7 @@ def match_players_to_fpl(bootstrap: dict, raw_players: list) -> list:
                 "player_id": best_match["id"],
                 "position": pos_map.get(best_match["element_type"], ocr_pos)
             })
+        else:
+            unmatched.append(item.get("name", ""))
 
-    return matched_squad
+    return matched_squad, unmatched
