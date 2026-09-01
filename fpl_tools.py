@@ -355,6 +355,20 @@ def get_gameweek_deadline(gw: int) -> str:
         return "Unknown Deadline"
 
 
+def get_upcoming_gameweek() -> Dict[str, Any]:
+    """Returns the next gameweek's id, name and deadline straight from the FPL API."""
+    bootstrap = _get_bootstrap()
+    gw = _next_gameweek(bootstrap)
+    for event in bootstrap.get("events", []):
+        if event["id"] == gw:
+            return {
+                "id": gw,
+                "name": event.get("name") or f"Gameweek {gw}",
+                "deadline_time": event.get("deadline_time"),
+            }
+    return {"id": gw, "name": f"Gameweek {gw}", "deadline_time": None}
+
+
 # ------------------------------------------------------------------
 # Player pool helpers
 # ------------------------------------------------------------------
@@ -676,6 +690,35 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     if best_xi is None:
         return {"xi": [], "bench": [], "formation": None, "captain": None, "vice_captain": None, "total_xp": 0.0}
 
+    # Captain / vice-captain: use the active C/VC that FPL reports for the squad when
+    # available (the picks payload carries is_captain / is_vice_captain flags). For squads
+    # without this info (e.g. manual screenshot overrides), fall back to the highest-xP picks.
+    captain = next((p for p in squad if p.get("is_captain")), None)
+    vice = next((p for p in squad if p.get("is_vice_captain")), None)
+
+    # Make sure the real captain and vice-captain appear in the XI (the optimiser may
+    # otherwise bench them if it prefers another player's xP). Swap by position so the
+    # formation stays valid.
+    flagged = [p for p in (captain, vice) if p is not None]
+    flagged_ids = {_pid(p) for p in flagged}
+    for fp in flagged:
+        if any(_pid(p) == _pid(fp) for p in best_xi):
+            continue
+        pos = fp.get("position")
+        same_pos = [p for p in best_xi if p.get("position") == pos and _pid(p) not in flagged_ids]
+        if not same_pos:
+            same_pos = [p for p in best_xi if p.get("position") == pos]
+        if not same_pos:
+            continue
+        weakest = min(same_pos, key=lambda x: x.get("xp", 0))
+        best_xi = [fp if _pid(p) == _pid(weakest) else p for p in best_xi]
+
+    if captain is None:
+        captain = max(best_xi, key=lambda x: x.get("xp", 0))
+    if vice is None or _pid(vice) == _pid(captain):
+        others = sorted((p for p in best_xi if _pid(p) != _pid(captain)), key=lambda x: x.get("xp", 0), reverse=True)
+        vice = others[0] if others else None
+
     xi_ids = {_pid(p) for p in best_xi}
     bench = [p for p in squad if _pid(p) not in xi_ids]
     bench_gk = [p for p in bench if p.get("position") == "GK"]
@@ -684,8 +727,6 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     pos_order = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
     xi_sorted = sorted(best_xi, key=lambda x: (pos_order.get(x.get("position"), 5), -x.get("xp", 0)))
-    captain = max(best_xi, key=lambda x: x.get("xp", 0))
-    vice = sorted(best_xi, key=lambda x: x.get("xp", 0), reverse=True)[1] if len(best_xi) > 1 else None
 
     return {
         "xi": xi_sorted,
@@ -693,7 +734,7 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
         "formation": best_form,
         "captain": captain,
         "vice_captain": vice,
-        "total_xp": round(best_score, 2),
+        "total_xp": round(sum(p.get("xp", 0) for p in best_xi), 2),
     }
 
 
