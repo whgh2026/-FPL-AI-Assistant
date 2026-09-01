@@ -2,6 +2,7 @@ import streamlit as st
 import fpl_tools
 import squad_override
 import dateutil.parser
+import datetime
 
 st.set_page_config(page_title="FPL AI Manager", page_icon="⚽", layout="wide")
 
@@ -280,6 +281,9 @@ st.markdown(
     '</div>',
     unsafe_allow_html=True,
 )
+
+now_str = datetime.datetime.now().strftime("%d %B %Y at %H:%M")
+st.caption(f"ℹ️ *Note: Player values and expected points (xP) are calculated using live FPL API data, correct as of {now_str}.*")
 
 with st.expander("🔍 How it works", expanded=True):
     st.markdown(
@@ -653,7 +657,7 @@ with st.container(border=True):
 # ------------------------------------------------------------------
 # Top players (moved to bottom)
 # ------------------------------------------------------------------
-with st.expander("🛠️ Pre-Season / Wildcard £100m Squad Builder", expanded=False):
+with st.expander("📊 Player Scout & xP Rankings", expanded=False):
     t1, t2 = st.columns(2)
     with t1:
         pos_filter = st.selectbox("Position", ["All"] + POS_ORDER, key="tp_pos")
