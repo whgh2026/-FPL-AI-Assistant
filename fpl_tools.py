@@ -1,487 +1,303 @@
 import requests
-import os
-import streamlit as st
+from typing import Dict, Any, List, Tuple
+from datetime import datetime
+import dateutil.parser
 
-FPL_API = os.getenv("FPL_API_BASE", "https://fantasy.premierleague.com/api/").strip().strip("\"'").rstrip("/") + "/"
+BASE_URL = "https://fantasy.premierleague.com/api"
 
-HOME_BONUS = 1.10
-AWAY_PENALTY = 0.95
+def _get_bootstrap() -> Dict[str, Any]:
+    url = f"{BASE_URL}/bootstrap-static/"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
 
-# FIX 1: Custom User-Agent prevents the FPL API from blocking the request and causing 10-second timeout hangs
-HEADERS = {"User-Agent": "FPL-AI-Assistant/1.0 (Mozilla/5.0)"}
+def get_gameweek_deadline(gw: int) -> str:
+    """Fetches and formats the official deadline for a specific gameweek."""
+    try:
+        bootstrap = _get_bootstrap()
+        for event in bootstrap.get("events", []):
+            if event["id"] == gw:
+                dt = dateutil.parser.isoparse(event["deadline_time"])
+                return dt.strftime("%A, %d %B at %H:%M")
+        return "Unknown Deadline"
+    except Exception:
+        return "Unknown Deadline"
 
-@st.cache_data(ttl=900)
-def _get_bootstrap():
-    return requests.get(f"{FPL_API}bootstrap-static/", headers=HEADERS, timeout=10).json()
+def _build_fixture_lookup() -> Dict[int, List[Dict[str, Any]]]:
+    """Maps team_id -> upcoming fixture info."""
+    fixtures_url = f"{BASE_URL}/fixtures/?future=1"
+    try:
+        resp = requests.get(fixtures_url, timeout=10)
+        resp.raise_for_status()
+        fixtures = resp.json()
+    except Exception:
+        return {}
 
-def _valid_team_ids_by_name(bootstrap):
-    # FIX 2: Dynamically map all active teams from the API instead of relying on a hardcoded, outdated list
-    return {t["id"] for t in bootstrap.get("teams", [])}
-
-@st.cache_data(ttl=900)
-def _build_fixture_lookup():
-    fixtures = requests.get(f"{FPL_API}fixtures/?future=1", headers=HEADERS, timeout=10).json()
     lookup = {}
     for f in fixtures:
-        if f.get("event") is None:
-            continue
-        th, ta = f.get("team_h"), f.get("team_a")
-        lookup.setdefault(th, []).append(
-            {"opponent": ta, "is_home": True, "difficulty": f.get("team_h_difficulty", 3)}
-        )
-        lookup.setdefault(ta, []).append(
-            {"opponent": th, "is_home": False, "difficulty": f.get("team_a_difficulty", 3)}
-        )
+        h, a = f["team_h"], f["team_a"]
+        h_diff, a_diff = f.get("team_h_difficulty", 3), f.get("team_a_difficulty", 3)
+
+        lookup.setdefault(h, []).append({"is_home": True, "opponent": a, "difficulty": h_diff})
+        lookup.setdefault(a, []).append({"is_home": False, "opponent": h, "difficulty": a_diff})
     return lookup
 
-def _player_xp(p, fixture_lookup):
+def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]]) -> Tuple[float, str]:
+    """
+    Data-driven xP calculation with softened early-season minutes handling.
+    """
     status = p.get("status", "a")
-    if status == "u":
+    if status in ["i", "s", "u"]:
         return 0.0, "OUT"
-    availability = 1.0
-    note = "OK"
-    if status == "d":
-        availability = 0.5
-        note = "DOUBT"
-
-    minutes = int(p.get("minutes", 0) or 0)
-    starts = int(p.get("starts", 0) or 0)
-
-    if starts < 1 or minutes < 90:
-        return 0.0, "LOW MINS"
-
-    form = float(p.get("form", 0) or 0)
-    ppg = float(p.get("points_per_game", 0) or 0)
+    
+    # Base expected points from form, goals, assists
+    try:
+        form = float(p.get("form", 0.0) or 0.0)
+    except Exception:
+        form = 0.0
+    form = min(form, 5.0)
 
     try:
-        xg = float(p.get("expected_goals_per_90", 0) or 0)
-        xa = float(p.get("expected_assists_per_90", 0) or 0)
-    except (ValueError, TypeError):
+        xg = float(p.get("expected_goals", 0.0) or 0.0)
+        xa = float(p.get("expected_assists", 0.0) or 0.0)
+    except Exception:
         xg, xa = 0.0, 0.0
-    xgi = xg + xa
 
-    avg_mins = minutes / max(starts, 1)
-    minutes_factor = min(avg_mins / 90, 1.0)
+    pos_id = p.get("element_type")
+    # Base baseline per 90 mins
+    base_xp = 2.0 + form + (xg * 4.0 if pos_id == 4 else xg * 5.0) + (xa * 3.0)
 
-    fixtures = fixture_lookup.get(p.get("team"), [])
+    # Fixture difficulty & Home/Away adjustment
+    team_id = p.get("team")
+    fixtures = fixture_lookup.get(team_id, [])
     if fixtures:
-        nxt = fixtures[0]
-        difficulty = nxt["difficulty"]
-        venue_mult = HOME_BONUS if nxt["is_home"] else AWAY_PENALTY
-    else:
-        difficulty = 3
-        venue_mult = 1.0
-    fixture_ease = (5 - difficulty)
+        next_fix = fixtures[0]
+        diff = next_fix["difficulty"]
+        # FDR modifier: scale around 3
+        diff_mod = 1.0 + (3 - diff) * 0.10
+        base_xp *= diff_mod
 
-    capped_form = min(form, 5.0)
-    base = (xgi * 6.0) + (capped_form * 1.0) + (ppg * 1.0) + (fixture_ease * 1.5)
-    xp = base * minutes_factor * venue_mult * availability
+        if next_fix["is_home"]:
+            base_xp *= 1.10
+        else:
+            base_xp *= 0.95
 
-    return round(xp, 2), note
+    # Status modifiers
+    note = "Available"
+    if status == "d":
+        base_xp *= 0.5
+        note = "Doubtful"
 
-def rank_players_by_xp(position=None, max_price=None, limit=15) -> dict:
-    try:
-        bootstrap = _get_bootstrap()
-        players = bootstrap.get("elements", [])
-        teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
-        fixture_lookup = _build_fixture_lookup()
-        valid_teams = _valid_team_ids_by_name(bootstrap)
-        pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+    # Softened minutes penalty (early-season protection)
+    starts = int(p.get("starts", 0) or 0)
+    minutes = int(p.get("minutes", 0) or 0)
+    if starts < 1 and minutes < 90:
+        base_xp *= 0.75
+        note = "Rotation Risk"
 
-        ranked = []
-        for p in players:
-            if p.get("team") not in valid_teams:
-                continue
-            pos = pos_map.get(p.get("element_type"))
-            if position and pos != position:
-                continue
-            price = p.get("now_cost", 0) / 10
-            if max_price and price > float(max_price):
-                continue
+    return round(max(base_xp, 0.5), 2), note
 
-            xp, note = _player_xp(p, fixture_lookup)
-            if xp <= 0:
-                continue
-
-            ranked.append({
-                "id": p.get("id"),
-                "name": f"{p.get('first_name')} {p.get('second_name')}",
-                "team": teams.get(p.get("team"), "?"),
-                "position": pos,
-                "price": price,
-                "xp": xp,
-                "form": p.get("form"),
-                "status": note,
-            })
-
-        ranked.sort(key=lambda x: x["xp"], reverse=True)
-        return {"players": ranked[:int(limit)]}
-    except Exception as e:
-        return {"error": f"Failed to rank players: {str(e)}"}
-
-def score_my_squad(manager_id, gameweek) -> dict:
-    try:
-        manager_id = int(manager_id)
-        gameweek = int(gameweek)
-
-        bootstrap = _get_bootstrap()
-        players_by_id = {p["id"]: p for p in bootstrap["elements"]}
-        teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
-        fixture_lookup = _build_fixture_lookup()
-        pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-
-        picks_data = None
-        used_gw = gameweek
-        for gw in range(gameweek, 0, -1):
-            r = requests.get(f"{FPL_API}entry/{manager_id}/event/{gw}/picks/", headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                picks_data = r.json()
-                used_gw = gw
-                break
-        if picks_data is None:
-            return {"error": f"No saved squad found for manager {manager_id}."}
-
-        squad = []
-        for pick in picks_data.get("picks", []):
-            p = players_by_id.get(pick["element"])
-            if not p:
-                continue
-            xp, note = _player_xp(p, fixture_lookup)
-            squad.append({
-                "player_id": p["id"],
-                "name": f"{p['first_name']} {p['second_name']}",
-                "team": teams.get(p["team"], "?"),
-                "position": pos_map.get(p["element_type"]),
-                "price": p["now_cost"] / 10,
-                "xp": xp,
-                "status": note,
-                "is_captain": pick["is_captain"],
-            })
-
-        weak_links = sorted(squad, key=lambda x: x["xp"])[:4]
-        best_xi = [p for p in squad if p["xp"] > 0]
-        captain = max(best_xi, key=lambda x: x["xp"]) if best_xi else None
-
-        entry_data = requests.get(f"{FPL_API}entry/{manager_id}/", headers=HEADERS, timeout=10).json()
-        return {
-            "gameweek_used": used_gw,
-            "team_name": entry_data.get("name", "Unknown"),
-            "bank": entry_data.get("last_deadline_bank", 0) / 10,
-            "team_value": entry_data.get("last_deadline_value", 0) / 10,
-            "squad": squad,
-            "weak_links": weak_links,
-            "captain": captain,
-        }
-    except Exception as e:
-        return {"error": f"Failed to score squad: {str(e)}"}
-
-def _all_scored_players():
+def score_my_squad(manager_id: str, gw: int) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
-    players = bootstrap.get("elements", [])
-    teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
-    fixture_lookup = _build_fixture_lookup()
-    valid_teams = _valid_team_ids_by_name(bootstrap)
+    players_by_id = {p["id"]: p for p in bootstrap["elements"]}
+    teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
     pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
-    scored = []
-    for p in players:
-        if p.get("team") not in valid_teams:
+    picks_url = f"{BASE_URL}/entry/{manager_id}/event/{gw}/picks/"
+    resp = requests.get(picks_url, timeout=10)
+    if resp.status_code != 200:
+        return {"error": f"Could not fetch squad for Manager ID {manager_id} (GW {gw})."}
+
+    picks_data = resp.json()
+    fixture_lookup = _build_fixture_lookup()
+
+    squad = []
+    for pick in picks_data.get("picks", []):
+        p_data = players_by_id.get(pick["element"])
+        if not p_data:
+            continue
+        xp, note = _player_xp(p_data, fixture_lookup)
+        squad.append({
+            "player_id": p_data["id"],
+            "name": f"{p_data['first_name']} {p_data['second_name']}",
+            "team": teams_by_id.get(p_data["team"], "?"),
+            "position": pos_map.get(p_data["element_type"], "?"),
+            "price": p_data["now_cost"] / 10.0,
+            "xp": xp,
+            "status": note,
+            "is_captain": pick.get("is_captain", False),
+            "is_vice_captain": pick.get("is_vice_captain", False)
+        })
+
+    entry_url = f"{BASE_URL}/entry/{manager_id}/"
+    entry_resp = requests.get(entry_url, timeout=10)
+    entry_data = entry_resp.json() if entry_resp.status_code == 200 else {}
+
+    return {
+        "team_name": entry_data.get("name", "My Team"),
+        "bank": picks_data.get("entry_history", {}).get("bank", 0) / 10.0,
+        "team_value": picks_data.get("entry_history", {}).get("value", 1000) / 10.0,
+        "gameweek_used": gw,
+        "squad": squad
+    }
+
+def suggest_transfers_for_custom_squad(squad: List[Dict[str, Any]], bank: float, free_transfers: int) -> Dict[str, Any]:
+    bootstrap = _get_bootstrap()
+    fixture_lookup = _build_fixture_lookup()
+    teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    current_ids = {p["player_id"] for p in squad}
+    candidates = []
+    for p in bootstrap["elements"]:
+        if p["id"] in current_ids:
             continue
         xp, note = _player_xp(p, fixture_lookup)
-        if xp <= 0:
+        if xp > 3.0 and note != "OUT":
+            candidates.append({
+                "id": p["id"],
+                "name": f"{p['first_name']} {p['second_name']}",
+                "team": teams_by_id.get(p["team"], "?"),
+                "position": pos_map.get(p["element_type"], "?"),
+                "price": p["now_cost"] / 10.0,
+                "xp": xp
+            })
+
+    # Evaluate Best Single Transfer
+    best_single = None
+    max_gain = 0.0
+
+    for out_p in squad:
+        for in_p in candidates:
+            if in_p["position"] == out_p["position"]:
+                cost_diff = in_p["price"] - out_p["price"]
+                if cost_diff <= bank:
+                    gain = round(in_p["xp"] - out_p["xp"], 2)
+                    if gain > max_gain:
+                        max_gain = gain
+                        best_single = {
+                            "out": {"id": out_p["player_id"], "name": out_p["name"], "team": out_p["team"], "price": out_p["price"], "xp": out_p["xp"]},
+                            "in": in_p,
+                            "xp_gain": gain,
+                            "cost_change": round(cost_diff, 1)
+                        }
+
+    # Evaluate Best Double Transfer
+    best_double = None
+    max_double_gain = 0.0
+    if len(squad) >= 2 and len(candidates) >= 2:
+        for i in range(len(squad)):
+            for j in range(i + 1, len(squad)):
+                out1, out2 = squad[i], squad[j]
+                for c1 in candidates[:15]:
+                    if c1["position"] != out1["position"]:
+                        continue
+                    for c2 in candidates[:15]:
+                        if c2["position"] != out2["position"] or c1["id"] == c2["id"]:
+                            continue
+                        total_cost = (c1["price"] - out1["price"]) + (c2["price"] - out2["price"])
+                        if total_cost <= bank:
+                            gain1 = c1["xp"] - out1["xp"]
+                            gain2 = c2["xp"] - out2["xp"]
+                            total_gain = round(gain1 + gain2, 2)
+                            if total_gain > max_double_gain:
+                                max_double_gain = total_gain
+                                best_double = {
+                                    "moves": [
+                                        {"out": {"id": out1["player_id"], "name": out1["name"]}, "in": c1, "xp_gain": round(gain1, 2)},
+                                        {"out": {"id": out2["player_id"], "name": out2["name"]}, "in": c2, "xp_gain": round(gain2, 2)}
+                                    ],
+                                    "xp_gain": total_gain,
+                                    "cost_change": round(total_cost, 1)
+                                }
+
+    # Hit Logic Formulation
+    advice = "Hold transfers this week."
+    if free_transfers == 0:
+        if best_single and best_single["xp_gain"] >= 4.0:
+            advice = "You have 0 free transfers. Single move is worth a -4 hit (xP gain beats point cost)."
+        else:
+            advice = "You have 0 free transfers. No move is worth a -4 hit this week — hold."
+    elif free_transfers == 1:
+        if best_double and best_single and (best_double["xp_gain"] - best_single["xp_gain"]) >= 4.0:
+            advice = "A double move (-4 hit) is mathematically worth it over a single transfer."
+        elif best_single and best_single["xp_gain"] > 0:
+            advice = "Execute 1 free transfer. A second transfer (-4 hit) is not worth it."
+    else:
+        advice = "You have 2+ free transfers — execute both moves for free."
+
+    return {
+        "best_single": best_single,
+        "best_double": best_double,
+        "hit_advice": advice
+    }
+
+def suggest_weekly_transfers(manager_id: str, gw: int, free_transfers: int) -> Dict[str, Any]:
+    squad_res = score_my_squad(manager_id, gw)
+    if "error" in squad_res:
+        return squad_res
+    transfers = suggest_transfers_for_custom_squad(squad_res["squad"], squad_res["bank"], free_transfers)
+    return {**squad_res, **transfers}
+
+def optimise_full_squad(budget: float = 100.0) -> Dict[str, Any]:
+    bootstrap = _get_bootstrap()
+    fixture_lookup = _build_fixture_lookup()
+    teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    pool = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    for p in bootstrap["elements"]:
+        pos = pos_map.get(p["element_type"])
+        if pos:
+            xp, note = _player_xp(p, fixture_lookup)
+            if note != "OUT":
+                pool[pos].append({
+                    "player_id": p["id"],
+                    "name": f"{p['first_name']} {p['second_name']}",
+                    "team": teams_by_id.get(p["team"], "?"),
+                    "position": pos,
+                    "price": p["now_cost"] / 10.0,
+                    "xp": xp
+                })
+
+    for pos in pool:
+        pool[pos].sort(key=lambda x: x["xp"] / max(x["price"], 4.0), reverse=True)
+
+    selected = pool["GK"][:2] + pool["DEF"][:5] + pool["MID"][:5] + pool["FWD"][:3]
+    total_price = round(sum(p["price"] for p in selected), 1)
+    total_xp = round(sum(p["xp"] for p in selected), 2)
+
+    return {
+        "budget": budget,
+        "total_price": total_price,
+        "total_xp": total_xp,
+        "squad": selected
+    }
+
+def rank_players_by_xp(position: str = None, max_price: float = None, limit: int = 20) -> Dict[str, Any]:
+    bootstrap = _get_bootstrap()
+    fixture_lookup = _build_fixture_lookup()
+    teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+
+    ranked = []
+    for p in bootstrap["elements"]:
+        pos = pos_map.get(p["element_type"])
+        price = p["now_cost"] / 10.0
+        if position and pos != position:
             continue
-        scored.append({
-            "id": p["id"],
+        if max_price and max_price > 0 and price > max_price:
+            continue
+
+        xp, note = _player_xp(p, fixture_lookup)
+        ranked.append({
             "name": f"{p['first_name']} {p['second_name']}",
-            "team_id": p["team"],
-            "team": teams.get(p["team"], "?"),
-            "position": pos_map.get(p["element_type"]),
-            "price": p["now_cost"] / 10,
+            "position": pos,
+            "team": teams_by_id.get(p["team"], "?"),
+            "price": price,
             "xp": xp,
+            "status": note
         })
-    return scored
 
-def optimise_full_squad(budget=100.0) -> dict:
-    try:
-        import pulp
-
-        budget = float(budget)
-        players = _all_scored_players()
-        if not players:
-            return {"error": "No players available to optimise."}
-
-        prob = pulp.LpProblem("FPL_Squad", pulp.LpMaximize)
-        choices = {p["id"]: pulp.LpVariable(f"p_{p['id']}", cat="Binary") for p in players}
-
-        prob += pulp.lpSum(choices[p["id"]] * p["xp"] for p in players)
-        prob += pulp.lpSum(choices[p["id"]] * p["price"] for p in players) <= budget
-        prob += pulp.lpSum(choices[p["id"]] for p in players) == 15
-
-        quotas = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
-        for pos, count in quotas.items():
-            prob += pulp.lpSum(choices[p["id"]] for p in players if p["position"] == pos) == count
-
-        team_ids = set(p["team_id"] for p in players)
-        for tid in team_ids:
-            prob += pulp.lpSum(choices[p["id"]] for p in players if p["team_id"] == tid) <= 3
-
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
-
-        chosen = [p for p in players if choices[p["id"]].value() == 1]
-        chosen.sort(key=lambda x: (x["position"], -x["xp"]))
-
-        total_price = round(sum(p["price"] for p in chosen), 1)
-        total_xp = round(sum(p["xp"] for p in chosen), 2)
-
-        return {
-            "squad": chosen,
-            "total_price": total_price,
-            "total_xp": total_xp,
-            "budget": budget,
-        }
-    except Exception as e:
-        return {"error": f"Optimisation failed: {str(e)}"}
-
-def suggest_weekly_transfers(manager_id, gameweek, free_transfers=1) -> dict:
-    try:
-        manager_id = int(manager_id)
-        gameweek = int(gameweek)
-        free_transfers = int(free_transfers)
-
-        bootstrap = _get_bootstrap()
-        players_by_id = {p["id"]: p for p in bootstrap["elements"]}
-        teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
-        fixture_lookup = _build_fixture_lookup()
-        valid_teams = _valid_team_ids_by_name(bootstrap)
-        pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-
-        picks_data = None
-        used_gw = gameweek
-        for gw in range(gameweek, 0, -1):
-            r = requests.get(f"{FPL_API}entry/{manager_id}/event/{gw}/picks/", headers=HEADERS, timeout=10)
-            if r.status_code == 200:
-                picks_data = r.json()
-                used_gw = gw
-                break
-        if picks_data is None:
-            return {"error": f"No saved squad found for manager {manager_id}."}
-
-        owned_ids = set()
-        squad = []
-        club_counts = {}
-        for pick in picks_data.get("picks", []):
-            p = players_by_id.get(pick["element"])
-            if not p:
-                continue
-            owned_ids.add(p["id"])
-            xp, note = _player_xp(p, fixture_lookup)
-            club_counts[p["team"]] = club_counts.get(p["team"], 0) + 1
-            squad.append({
-                "id": p["id"],
-                "name": f"{p['first_name']} {p['second_name']}",
-                "team_id": p["team"],
-                "team": teams.get(p["team"], "?"),
-                "position": pos_map.get(p["element_type"]),
-                "price": p["now_cost"] / 10,
-                "xp": xp,
-                "status": note,
-            })
-
-        entry_data = requests.get(f"{FPL_API}entry/{manager_id}/", headers=HEADERS, timeout=10).json()
-        bank = entry_data.get("last_deadline_bank", 0) / 10
-
-        pool = []
-        for p in bootstrap["elements"]:
-            if p["team"] not in valid_teams:
-                continue
-            if p["id"] in owned_ids:
-                continue
-            xp, note = _player_xp(p, fixture_lookup)
-            if xp <= 0:
-                continue
-            pool.append({
-                "id": p["id"],
-                "name": f"{p['first_name']} {p['second_name']}",
-                "team_id": p["team"],
-                "team": teams.get(p["team"], "?"),
-                "position": pos_map.get(p["element_type"]),
-                "price": p["now_cost"] / 10,
-                "xp": xp,
-            })
-
-        single_swaps = []
-        for out_p in squad:
-            spendable = bank + out_p["price"]
-            for in_p in pool:
-                if in_p["position"] != out_p["position"]:
-                    continue
-                if in_p["price"] > spendable:
-                    continue
-                new_count = club_counts.get(in_p["team_id"], 0)
-                if in_p["team_id"] == out_p["team_id"]:
-                    new_count -= 1
-                if new_count >= 3:
-                    continue
-                gain = round(in_p["xp"] - out_p["xp"], 2)
-                if gain <= 0:
-                    continue
-                single_swaps.append({
-                    "out": out_p,
-                    "in": in_p,
-                    "xp_gain": gain,
-                    "cost_change": round(in_p["price"] - out_p["price"], 1),
-                })
-
-        single_swaps.sort(key=lambda x: x["xp_gain"], reverse=True)
-        best_single = single_swaps[0] if single_swaps else None
-
-        best_double = None
-        if len(single_swaps) >= 2:
-            top = single_swaps[:15]
-            for i in range(len(top)):
-                for j in range(i + 1, len(top)):
-                    a, b = top[i], top[j]
-                    if a["out"]["id"] == b["out"]["id"]:
-                        continue
-                    if a["in"]["id"] == b["in"]["id"]:
-                        continue
-                    combined = round(a["xp_gain"] + b["xp_gain"], 2)
-                    if best_double is None or combined > best_double["xp_gain"]:
-                        best_double = {"moves": [a, b], "xp_gain": combined}
-
-        if free_transfers == 0:
-            if best_single and best_single["xp_gain"] >= 4:
-                hit_advice = "You have 0 free transfers. This move is worth a -4 hit (xP gain beats the 4-point cost)."
-            else:
-                hit_advice = "You have 0 free transfers. No move is worth a -4 hit this week - hold."
-        elif free_transfers >= 2 and best_double:
-            hit_advice = "You have 2+ free transfers - make both moves for free."
-        elif best_double and best_single and (best_double["xp_gain"] - best_single["xp_gain"]) >= 4:
-            hit_advice = "A second transfer (-4 hit) looks worth it this week."
-        else:
-            hit_advice = "Stick to one transfer - a -4 hit is not worth it this week."
-
-        return {
-            "gameweek_used": used_gw,
-            "team_name": entry_data.get("name", "Unknown"),
-            "bank": bank,
-            "best_single": best_single,
-            "best_double": best_double,
-            "hit_advice": hit_advice,
-        }
-    except Exception as e:
-        return {"error": f"Failed to suggest transfers: {str(e)}"}
-
-def suggest_transfers_for_custom_squad(squad, bank, free_transfers=1):
-    try:
-        free_transfers = int(free_transfers)
-        bootstrap = _get_bootstrap()
-        fixture_lookup = _build_fixture_lookup()
-        valid_teams = _valid_team_ids_by_name(bootstrap)
-        pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-        teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
-        players_by_id = {p["id"]: p for p in bootstrap["elements"]}
-
-        owned_ids = set()
-        club_counts = {}
-        for p in squad:
-            owned_ids.add(p["player_id"])
-            fpl_p = players_by_id.get(p["player_id"])
-            if fpl_p:
-                club_counts[fpl_p["team"]] = club_counts.get(fpl_p["team"], 0) + 1
-
-        pool = []
-        for p in bootstrap["elements"]:
-            if p["team"] not in valid_teams:
-                continue
-            if p["id"] in owned_ids:
-                continue
-            xp, note = _player_xp(p, fixture_lookup)
-            if xp <= 0:
-                continue
-            pool.append({
-                "id": p["id"],
-                "name": f"{p['first_name']} {p['second_name']}",
-                "team_id": p["team"],
-                "team": teams.get(p["team"], "?"),
-                "position": pos_map.get(p["element_type"]),
-                "price": p["now_cost"] / 10,
-                "xp": xp,
-            })
-
-        single_swaps = []
-        for out_p in squad:
-            fpl_out = players_by_id.get(out_p["player_id"])
-            if not fpl_out: continue
-            out_team_id = fpl_out["team"]
-            spendable = bank + out_p["price"]
-            
-            for in_p in pool:
-                if in_p["position"] != out_p["position"]:
-                    continue
-                if in_p["price"] > spendable:
-                    continue
-                new_count = club_counts.get(in_p["team_id"], 0)
-                if in_p["team_id"] == out_team_id:
-                    new_count -= 1
-                if new_count >= 3:
-                    continue
-                gain = round(in_p["xp"] - out_p["xp"], 2)
-                if gain <= 0:
-                    continue
-                    
-                formatted_out = {
-                    "id": out_p["player_id"],
-                    "name": out_p["name"],
-                    "team_id": out_team_id,
-                    "team": out_p["team"],
-                    "position": out_p["position"],
-                    "price": out_p["price"],
-                    "xp": out_p["xp"]
-                }
-                
-                single_swaps.append({
-                    "out": formatted_out,
-                    "in": in_p,
-                    "xp_gain": gain,
-                    "cost_change": round(in_p["price"] - formatted_out["price"], 1),
-                })
-
-        single_swaps.sort(key=lambda x: x["xp_gain"], reverse=True)
-        best_single = single_swaps[0] if single_swaps else None
-
-        best_double = None
-        if len(single_swaps) >= 2:
-            top = single_swaps[:15]
-            for i in range(len(top)):
-                for j in range(i + 1, len(top)):
-                    a, b = top[i], top[j]
-                    if a["out"]["id"] == b["out"]["id"]:
-                        continue
-                    if a["in"]["id"] == b["in"]["id"]:
-                        continue
-                    combined = round(a["xp_gain"] + b["xp_gain"], 2)
-                    if best_double is None or combined > best_double["xp_gain"]:
-                        best_double = {"moves": [a, b], "xp_gain": combined}
-
-        if free_transfers == 0:
-            if best_single and best_single["xp_gain"] >= 4:
-                hit_advice = "You have 0 free transfers. This move is worth a -4 hit (xP gain beats the 4-point cost)."
-            else:
-                hit_advice = "You have 0 free transfers. No move is worth a -4 hit this week - hold."
-        elif free_transfers >= 2 and best_double:
-            hit_advice = "You have 2+ free transfers - make both moves for free."
-        elif best_double and best_single and (best_double["xp_gain"] - best_single["xp_gain"]) >= 4:
-            hit_advice = "A second transfer (-4 hit) looks worth it this week."
-        else:
-            hit_advice = "Stick to one transfer - a -4 hit is not worth it this week."
-
-        return {
-            "team_name": "Manual Override Squad",
-            "bank": bank,
-            "best_single": best_single,
-            "best_double": best_double,
-            "hit_advice": hit_advice,
-        }
-    except Exception as e:
-        return {"error": f"Failed to suggest transfers for custom squad: {str(e)}"}
+    ranked.sort(key=lambda x: x["xp"], reverse=True)
+    return {"players": ranked[:limit]}
