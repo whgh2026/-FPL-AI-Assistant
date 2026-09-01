@@ -511,46 +511,56 @@ def suggest_transfers_for_custom_squad(
         cost_chg = round(sum(m["cost"] for m in mvs), 2)
         return mvs, hits, net_gain, cost_chg
 
-    # 1. Evaluate Standard Transfers First
+    # 1. Standard Transfers Optimization (accounting for hit penalties)
     std_selected, _ = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS}
     )
-    
     std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
-    
-    # Strictly enforce mathematical gain for standard moves
     if std_net <= 0:
         std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
 
-    final_moves, final_hits, final_net, final_cost = std_moves, std_hits, std_net, std_cost
-    
-    # 2. Evaluate Wildcard / Free Hit if requested
-    unlimited_chip = next((c for c in eval_chips if c in ("Wildcard", "Free Hit")), None)
-    unl_active = False
-    chip_advice_list = []
-    
-    if len(eval_chips) > 1:
-        chip_advice_list.append("⚠️ <b>Note:</b> FPL rules permit 1 chip per Gameweek. The system evaluated your selections simultaneously below.")
-        
-    if unlimited_chip:
+    # 2. Unlimited Transfers Optimization (for Wildcard / Free Hit)
+    unl_moves, unl_hits, unl_net, unl_cost = [], 0, 0.0, 0.0
+    if any(c in eval_chips for c in ("Wildcard", "Free Hit")):
         unl_selected, _ = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15}
         )
-        unl_moves, _, unl_net, unl_cost = _get_moves(unl_selected, True)
-        
-        delta = unl_net - std_net
-        if delta >= 12.0:
-            final_moves, final_hits, final_net, final_cost = unl_moves, 0, unl_net, unl_cost
-            unl_active = True
-            chip_advice_list.append(f"✅ <b>{unlimited_chip}</b>: Worthwhile. This full squad reset mathematically yields <b>+{delta:.1f} xP</b> over standard transfers.")
-        else:
-            chip_advice_list.append(f"❌ <b>{unlimited_chip}</b>: Save it. A full squad reset only yields <b>+{delta:.1f} xP</b> over your standard transfers (we recommend saving this chip for a gain of at least +12.0 xP). Your plan has reverted to standard transfers.")
+        unl_moves, unl_hits, unl_net, unl_cost = _get_moves(unl_selected, True)
 
-    # 3. Evaluate Bench Boost / Triple Captain based on FINAL squad
-    sold_ids = [m["out"]["id"] for m in final_moves]
-    bought_ids = [m["in"]["id"] for m in final_moves]
+    # 3. Chip Evaluations and Mathematical Recommendations
+    chip_advice_list = []
+    recommended_chip = "None (Hold Chips)"
+    best_chip_gain = 0.0
+
+    if len(eval_chips) > 1:
+        chip_advice_list.append("⚠️ <b>Official FPL Rule:</b> You may only activate 1 chip per Gameweek. The system has evaluated your selections simultaneously below:")
+
+    if "Wildcard" in eval_chips:
+        wc_delta = round(unl_net - std_net, 2)
+        if wc_delta >= 12.0:
+            chip_advice_list.append(f"✅ <b>Wildcard</b>: Strongly Recommended. A complete squad reset yields a massive <b>+{wc_delta:.1f} xP</b> over standard transfers.")
+            if wc_delta > best_chip_gain:
+                best_chip_gain = wc_delta
+                recommended_chip = "Wildcard"
+        else:
+            chip_advice_list.append(f"❌ <b>Wildcard</b>: Save it. A full reset only yields <b>+{wc_delta:.1f} xP</b> over your standard moves (recommended threshold is +12.0 xP).")
+
+    if "Free Hit" in eval_chips:
+        fh_delta = round(unl_net - std_net, 2)
+        if fh_delta >= 14.0:
+            chip_advice_list.append(f"✅ <b>Free Hit</b>: Recommended. A 1-week temporary squad yields <b>+{fh_delta:.1f} xP</b> over standard transfers.")
+            if fh_delta > best_chip_gain:
+                best_chip_gain = fh_delta
+                recommended_chip = "Free Hit"
+        else:
+            chip_advice_list.append(f"❌ <b>Free Hit</b>: Save it. Only yields <b>+{fh_delta:.1f} xP</b> gain over standard transfers. Better saved for blank/double gameweeks.")
+
+    # Project the resulting squad to evaluate Bench Boost and Triple Captain
+    eval_moves = unl_moves if recommended_chip in ("Wildcard", "Free Hit") else std_moves
+    sold_ids = [m["out"]["id"] for m in eval_moves]
+    bought_ids = [m["in"]["id"] for m in eval_moves]
     new_squad = [p for p in squad if p["player_id"] not in sold_ids]
     
     for in_id in bought_ids:
@@ -570,41 +580,48 @@ def suggest_transfers_for_custom_squad(
         })
         
     best_xi = select_starting_xi(new_squad)
-    
+
     if "Bench Boost" in eval_chips:
-        bench_xp = sum(p['xp'] for p in best_xi['bench'])
-        if bench_xp >= 10.0:
-            chip_advice_list.append(f"✅ <b>Bench Boost</b>: Worthwhile. Your algorithmically optimized bench provides a strong <b>+{bench_xp:.1f} xP</b>.")
+        bench_xp = round(sum(p['xp'] for p in best_xi['bench']), 2)
+        if bench_xp >= 12.0:
+            chip_advice_list.append(f"✅ <b>Bench Boost</b>: Strongly Recommended. Your bench provides a massive <b>+{bench_xp:.1f} xP</b> to your gameweek score.")
+            if bench_xp > best_chip_gain:
+                best_chip_gain = bench_xp
+                recommended_chip = "Bench Boost"
         else:
-            chip_advice_list.append(f"❌ <b>Bench Boost</b>: Save it. Your bench is only projected to provide <b>+{bench_xp:.1f} xP</b>.")
-            
+            chip_advice_list.append(f"❌ <b>Bench Boost</b>: Save it. Your bench is only projected for <b>+{bench_xp:.1f} xP</b> (recommended threshold is +12.0 xP).")
+
     if "Triple Captain" in eval_chips:
-        cap = best_xi['captain']
-        if cap and cap['xp'] >= 7.5:
-            chip_advice_list.append(f"✅ <b>Triple Captain</b>: Worthwhile. <b>{cap['name']}</b> has a high mathematical ceiling ({cap['xp']} xP ➞ <b>{cap['xp']*3:.1f} xP</b>).")
+        cap = best_xi.get('captain')
+        cap_xp = cap.get('xp', 0.0) if cap else 0.0
+        if cap_xp >= 8.5:
+            chip_advice_list.append(f"✅ <b>Triple Captain</b>: Recommended. <b>{cap['name']}</b> has a high ceiling ({cap_xp} xP ➞ <b>{cap_xp * 3:.1f} xP</b>).")
+            if cap_xp > best_chip_gain:
+                best_chip_gain = cap_xp
+                recommended_chip = "Triple Captain"
         else:
             c_name = cap['name'] if cap else "Captain"
-            c_xp = cap['xp'] if cap else 0.0
-            chip_advice_list.append(f"❌ <b>Triple Captain</b>: Save it. Your best mathematical option is {c_name} at only <b>{c_xp} xP</b>.")
+            chip_advice_list.append(f"❌ <b>Triple Captain</b>: Save it. Best option {c_name} projects for only <b>{cap_xp} xP</b>. Save for double gameweeks.")
 
-    # Generate Advice
-    n = len(final_moves)
+    # Advice string
+    n = len(std_moves)
     if n == 0:
         advice = "Hold — no transfers mathematically improve your expected points (xP) after penalties."
-    elif unl_active:
-        advice = f"{unlimited_chip} active — {n} transfers algorithmically optimized with 0 point penalties."
-    elif final_hits == 0:
+    elif std_hits == 0:
         advice = f"Make {n} free transfer(s) — no points hit."
     else:
-        advice = f"Make {n} transfer(s), taking {final_hits} hit(s) (-{int(hit_cost * final_hits)} pts) for a net +{final_net:.1f} xP."
+        advice = f"Make {n} transfer(s), taking {std_hits} hit(s) (-{int(hit_cost * std_hits)} pts) for a net +{std_net:.1f} xP."
 
     return {
-        "transfers": final_moves,
-        "hits": final_hits,
-        "net_gain": final_net,
-        "cost_change": final_cost,
+        "transfers": std_moves,
+        "standard_transfers": std_moves,
+        "wildcard_transfers": unl_moves,
+        "hits": std_hits,
+        "net_gain": std_net,
+        "cost_change": std_cost,
         "hit_advice": advice,
-        "chip_evaluations": chip_advice_list
+        "chip_evaluations": chip_advice_list,
+        "recommended_chip": recommended_chip
     }
 
 def rank_players_by_xp(position: str = None, max_price: float = None, limit: int = 20, event: Optional[int] = None, risk: str = "balanced") -> Dict[str, Any]:
