@@ -369,6 +369,55 @@ def get_upcoming_gameweek() -> Dict[str, Any]:
     return {"id": gw, "name": f"Gameweek {gw}", "deadline_time": None}
 
 
+def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
+    """Estimate the free transfers available for the upcoming gameweek.
+
+    Replays FPL's rollover rules from the entry history, transfers and chips feeds:
+    start the season with 1 free transfer, earn another each completed gameweek
+    (capped at 2), subtract transfers already made, and reset to 1 after a
+    Wildcard or Free Hit.
+    """
+    manager_id = _clean_manager_id(manager_id)
+    try:
+        entry = requests.get(f"{BASE_URL}/entry/{manager_id}/", timeout=10).json()
+        started_event = int(entry.get("started_event") or 1)
+        if target_gw is None:
+            target_gw = _next_gameweek(_get_bootstrap())
+
+        history = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10).json()
+        transfers = requests.get(f"{BASE_URL}/entry/{manager_id}/transfers/", timeout=10).json()
+
+        transfers_per_event: Dict[int, int] = {}
+        for t in transfers:
+            ev = t.get("event")
+            if ev is not None:
+                transfers_per_event[int(ev)] = transfers_per_event.get(int(ev), 0) + 1
+
+        reset_events = set()
+        for c in history.get("chips", []):
+            if (c.get("name") or "").lower() in ("wildcard", "freehit"):
+                reset_events.add(int(c.get("event") or 0))
+
+        ft = 1
+        # Completed gameweeks before the target deadline.
+        for ev in range(started_event, int(target_gw)):
+            if ev in reset_events:
+                ft = 1
+            else:
+                ft -= min(ft, transfers_per_event.get(ev, 0))
+                ft = min(ft + 1, 2)
+
+        # Subtract transfers the manager has already made for the upcoming gameweek.
+        if int(target_gw) in reset_events:
+            ft = 1
+        else:
+            ft -= min(ft, transfers_per_event.get(int(target_gw), 0))
+
+        return max(ft, 0)
+    except Exception:
+        return 1
+
+
 # ------------------------------------------------------------------
 # Player pool helpers
 # ------------------------------------------------------------------
@@ -488,7 +537,9 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
             "xp": xp,
             "status": note,
             "is_captain": pick.get("is_captain", False),
-            "is_vice_captain": pick.get("is_vice_captain", False)
+            "is_vice_captain": pick.get("is_vice_captain", False),
+            "multiplier": pick.get("multiplier", 1),
+            "pick_position": pick.get("position", 0),
         })
 
     entry_url = f"{BASE_URL}/entry/{manager_id}/"

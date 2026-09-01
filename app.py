@@ -1,7 +1,6 @@
 import streamlit as st
 import fpl_tools
 import squad_override
-import re
 import dateutil.parser
 
 st.set_page_config(page_title="FPL AI Manager", page_icon="⚽", layout="wide")
@@ -33,7 +32,7 @@ POS_ORDER = ["GK", "DEF", "MID", "FWD"]
 CSS = """
 <style>
   #MainMenu, footer {visibility: hidden;}
-  .block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1180px;}
+  .block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1240px;}
   .hero {background: linear-gradient(120deg, #4f46e5 0%, #6d5cf0 45%, #38bdf8 100%);
          color: #fff; border-radius: 18px; padding: 26px 28px; margin-bottom: 14px;
          box-shadow: 0 12px 30px rgba(79,70,229,0.22);}
@@ -46,7 +45,7 @@ CSS = """
   .dl-time {font-size: 1.9rem; font-weight: 800; color: #0f172a; line-height: 1.15; margin-top: 2px;}
   .dl-sub {color: #64748b; font-size: 0.9rem; margin-top: 2px;}
   .overview {background: #eef2ff; border: 1px solid #e0e7ff; border-radius: 14px; padding: 16px 20px;
-         color: #3730a3; font-size: 0.94rem; line-height: 1.55; margin-bottom: 16px;}
+         color: #3730a3; font-size: 0.94rem; line-height: 1.55; margin-bottom: 8px;}
   .overview b {color: #312e81;}
   .card {background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px;
          margin-bottom: 14px; box-shadow: 0 4px 14px rgba(15,23,42,0.05);}
@@ -81,6 +80,30 @@ CSS = """
          border-radius: 14px 14px 0 0; padding: 16px 20px; font-size: 1.15rem; font-weight: 800;
          color: #9a3412; margin-top: 26px;}
   .override-head span {color: #c2410c; font-size: 0.82rem; font-weight: 600; margin-left: 8px;}
+  .dummy-url {display:inline-block; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:6px;
+              padding:2px 8px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+              font-size:0.78rem; color:#64748b; margin-left:6px;}
+  .team-row {display:flex; gap:12px; align-items:stretch; margin-bottom:10px;}
+  .pos-col {flex:0 0 64px; display:flex; flex-direction:column; align-items:center; justify-content:center;
+            background:#f1f5f9; border-radius:10px; padding:8px;}
+  .pos-emoji {font-size:1.3rem;}
+  .pos-name {font-weight:800; font-size:0.68rem; letter-spacing:.06em; color:#475569; margin-top:2px;}
+  .starters {flex:1; display:grid; grid-template-columns:repeat(auto-fill,minmax(138px,1fr)); gap:8px; align-content:start;}
+  .subs {flex:0 0 178px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:10px; padding:8px 10px;}
+  .sub-title {font-size:0.62rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
+              color:#94a3b8; margin-bottom:4px;}
+  .sub-item {font-size:0.78rem; color:#0f172a; font-weight:600; padding:3px 0; border-bottom:1px dotted #e2e8f0;
+             display:flex; justify-content:space-between; gap:6px;}
+  .sub-item:last-child {border-bottom:none;}
+  .sub-xp {color:#64748b; font-weight:700; white-space:nowrap;}
+  .empty {color:#cbd5e1; font-size:0.8rem;}
+  .mc {border:1px solid #e2e8f0; border-left:3px solid #94a3b8; border-radius:10px; padding:8px 10px;
+       background:#fff; min-width:0;}
+  .mc .pos {display:inline-block; font-size:0.6rem; font-weight:800; letter-spacing:0.04em;
+            padding:1px 6px; border-radius:4px; color:#fff;}
+  .mc-nm {font-weight:700; font-size:0.82rem; color:#0f172a; margin-top:3px;
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .mc-meta {color:#64748b; font-size:0.7rem;}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -111,6 +134,79 @@ def _player_card(p, max_xp: float, role: str = None) -> str:
         f'<div class="bar"><div class="bar-fill" style="width:{pct}%;background:{c}"></div></div>'
         f'<div class="xp" style="color:{c}">{p.get("xp", 0)} xP</div></div>'
     )
+
+
+def _mini_card(p, role: str = None) -> str:
+    pos = p.get("position", "?")
+    c = POS_COLORS.get(pos, "#94a3b8")
+    role_html = ""
+    if role == "C":
+        role_html = '<span class="role role-c">C</span>'
+    elif role == "VC":
+        role_html = '<span class="role role-vc">VC</span>'
+    return (
+        f'<div class="mc" style="border-left-color:{c}">'
+        f'<div><span style="background:{c};" class="pos">{pos}</span>{role_html}</div>'
+        f'<div class="mc-nm" title="{p.get("name", "?")}">{p.get("name", "?")}</div>'
+        f'<div class="mc-meta">{p.get("team", "?")} · {p.get("xp", 0)} xP</div></div>'
+    )
+
+
+def _team_sheet_html(starters, bench, captain_id=None, vcap_id=None) -> str:
+    """Grouped team sheet: one row per position, with a Subs column on the right."""
+    pos_emoji = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡"}
+
+    def _sort_group(players):
+        if any((p.get("pick_position") or 0) > 0 for p in players):
+            return sorted(players, key=lambda p: p.get("pick_position", 99))
+        return sorted(players, key=lambda p: -p.get("xp", 0))
+
+    html = ""
+    for pos in POS_ORDER:
+        st_players = _sort_group([p for p in starters if p.get("position") == pos])
+        be_players = _sort_group([p for p in bench if p.get("position") == pos])
+
+        cards = ""
+        for p in st_players:
+            role = None
+            pid = _pid(p)
+            if captain_id is not None and pid == captain_id:
+                role = "C"
+            elif vcap_id is not None and pid == vcap_id:
+                role = "VC"
+            cards += _mini_card(p, role)
+        if not cards:
+            cards = '<div class="empty">—</div>'
+
+        subs_html = ""
+        if be_players:
+            subs_html = "".join(
+                f'<div class="sub-item"><span>{p.get("name", "?")}</span>'
+                f'<span class="sub-xp">{p.get("xp", 0)} xP</span></div>'
+                for p in be_players
+            )
+        else:
+            subs_html = '<div class="empty">—</div>'
+
+        html += (
+            f'<div class="team-row">'
+            f'<div class="pos-col"><div class="pos-emoji">{pos_emoji.get(pos, "⚽")}</div>'
+            f'<div class="pos-name">{pos}</div></div>'
+            f'<div class="starters">{cards}</div>'
+            f'<div class="subs"><div class="sub-title">Subs</div>{subs_html}</div>'
+            f'</div>'
+        )
+    return html
+
+
+def _api_starters_bench(squad):
+    """Split an FPL API squad into starters and bench using the multiplier field."""
+    starters = [p for p in squad if p.get("multiplier", 1) >= 1]
+    bench = [p for p in squad if p.get("multiplier", 1) == 0]
+    if len(starters) != 11 or len(bench) != 4:
+        xi = fpl_tools.select_starting_xi(squad)
+        return xi["xi"], xi["bench"]
+    return starters, bench
 
 
 def _card(inner: str, label: str = "") -> str:
@@ -176,14 +272,36 @@ st.markdown(
 st.markdown(
     '<div class="overview">'
     '<b>What this does:</b> pop in your Manager ID and we’ll pull up your current squad, work out which players are '
-    'likely to score the most points this week, and hand you a clear to-do list — who to transfer in and out, your best '
-    'starting eleven and bench order, and who to captain.'
+    'likely to score the most points this week, and hand you a clear to-do list — who to transfer in and out, your '
+    'best starting eleven and bench order, and who to captain.'
     '<br><br>'
-    '⚠️ <b>Already made a midweek transfer?</b> The official site hides those changes until the deadline, so we’ll still '
-    'see your old squad. Pop your new squad into the <b>Manual Squad Override</b> below and we’ll plan from that instead.'
+    '⚠️ <b>Already made a midweek transfer?</b> The official site hides those changes until the deadline, so we’ll '
+    'still see your old squad. Pop your changes into the <b>Manual Squad Override</b> below and we’ll plan from that instead.'
     '</div>',
     unsafe_allow_html=True,
 )
+
+with st.expander("🔍 How it works", expanded=True):
+    st.markdown(
+        """
+🧑‍💻 **Your squad.** We read your current 15 players straight from the official FPL site, along with your bank
+balance and team value. Your active captain and vice-captain are taken directly from your team.
+
+📊 **Player ratings.** Every player gets an expected-points score for the upcoming gameweek. This blends their recent
+form, expected goals and assists, clean-sheet chances, likely minutes, and how strong their opponent is — while
+respecting the official FPL scoring rules.
+
+🧠 **The plan.** A solver picks the transfers and starting eleven that give you the highest projected points while
+staying within the budget, the 2–5–5–3 squad shape, and the three-players-per-team limit. It only takes a points hit
+when the boost clearly outweighs the cost.
+
+⚖️ **Risk appetite.** The sidebar toggle changes the objective: *Conservative* leans on popular, dependable starters;
+*Balanced* is pure expected points; *Aggressive* chases low-ownership, high-upside picks and accepts more risk.
+
+🎲 **Chips.** We look ahead at double and blank gameweeks and suggest when to use your Triple Captain, Bench Boost,
+Free Hit and Wildcard.
+        """
+    )
 
 
 # ------------------------------------------------------------------
@@ -196,26 +314,31 @@ with st.container(border=True):
         "Manager ID",
         placeholder="e.g. 7261134",
         key="mid_input",
-        help="Your unique FPL ID — the number in your team-page URL "
-             "(e.g. fantasy.premierleague.com/entry/7261134/event/1). Works for any manager's ID.",
+        help="Your unique FPL ID — the number in your team-page URL.",
+    )
+    st.caption(
+        'Find your ID in your team-page URL — the number after <span class="dummy-url">/entry/</span> '
+        'e.g. <span class="dummy-url">fantasy.premierleague.com/entry/7261134/event/1</span>',
+        unsafe_allow_html=True,
     )
 
-    col_load, col_ft = st.columns([1, 1])
-    with col_load:
-        load_clicked = st.button("📋 Load my team", type="secondary", use_container_width=True, key="btn_load")
-    with col_ft:
-        free_transfers = st.number_input("Free transfers", 0, 5, 1, key="ft")
+    load_clicked = st.button("📋 Load my team", type="secondary", use_container_width=True, key="btn_load")
 
     if load_clicked:
         if not manager_id.strip():
             st.warning("Pop your Manager ID in first — it’s the number in your FPL team-page URL.")
         else:
-            with st.spinner("Fetching your current squad…"):
+            with st.spinner("Fetching your current squad and free transfers…"):
                 try:
                     preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
                     st.session_state["squad_preview"] = preview
+                    try:
+                        st.session_state["api_free_transfers"] = fpl_tools.get_free_transfers(manager_id.strip())
+                    except Exception:
+                        st.session_state["api_free_transfers"] = 1
                 except Exception as e:
                     st.session_state["squad_preview"] = {"error": str(e)}
+                    st.session_state["api_free_transfers"] = 1
 
     preview = st.session_state.get("squad_preview")
 
@@ -223,22 +346,22 @@ with st.container(border=True):
         st.error("⚠️ " + preview["error"])
         st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
     elif preview:
-        m1, m2, m3 = st.columns(3)
+        api_ft = st.session_state.get("api_free_transfers", 1)
+
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Team", preview["team_name"])
         m2.metric("Bank", f"£{preview['bank']}m")
         m3.metric("Team value", f"£{preview['team_value']}m")
+        m4.metric("Free transfers", api_ft)
 
-        pv_xp = max([p.get("xp", 0) for p in preview.get("squad", [])] + [1.0])
-        pv_html = '<div class="grid">'
-        for p in preview.get("squad", []):
-            role = "C" if p.get("is_captain") else ("VC" if p.get("is_vice_captain") else None)
-            pv_html += _player_card(p, pv_xp, role)
-        pv_html += "</div>"
-        st.markdown(_card(pv_html, "Your current squad · C = captain · VC = vice-captain"), unsafe_allow_html=True)
+        squad = preview.get("squad", [])
+        starters, bench = _api_starters_bench(squad)
+        cap = next((p for p in squad if p.get("is_captain")), None)
+        vc = next((p for p in squad if p.get("is_vice_captain")), None)
 
-        # Friendly confirmation of the active captain / vice-captain.
-        cap = next((p for p in preview.get("squad", []) if p.get("is_captain")), None)
-        vc = next((p for p in preview.get("squad", []) if p.get("is_vice_captain")), None)
+        sheet = f'<div class="team-sheet">{_team_sheet_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)}</div>'
+        st.markdown(_card(sheet, "Your current squad · C = captain · VC = vice-captain"), unsafe_allow_html=True)
+
         if cap:
             cap_line = f"**Captain:** {cap['name']} ({cap['team']})"
             if vc:
@@ -254,6 +377,13 @@ if st.button("🚀 Generate Action Plan", type="primary", use_container_width=Tr
     if not manager_id.strip():
         st.warning("Pop your Manager ID in first — it’s the number in your FPL team-page URL.")
     else:
+        free_transfers = st.session_state.get("api_free_transfers")
+        if free_transfers is None:
+            try:
+                free_transfers = fpl_tools.get_free_transfers(manager_id.strip())
+            except Exception:
+                free_transfers = 1
+
         with st.spinner("Pulling your squad, modelling points, solving transfers & line-up…"):
             try:
                 plan = fpl_tools.build_gameweek_briefing(
@@ -261,6 +391,7 @@ if st.button("🚀 Generate Action Plan", type="primary", use_container_width=Tr
                 )
                 st.session_state["plan"] = plan
                 st.session_state["squad_preview"] = plan
+                st.session_state["api_free_transfers"] = int(free_transfers)
             except Exception as e:
                 st.session_state["plan"] = {"error": str(e)}
 
@@ -272,7 +403,6 @@ if plan and "error" in plan:
 elif plan:
     st.markdown("---")
 
-    # Header metrics
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Team", plan["team_name"])
     m2.metric("Bank", f"£{plan['bank']}m")
@@ -281,7 +411,6 @@ elif plan:
 
     st.markdown("---")
 
-    # Transfers
     moves = plan.get("transfers", [])
     transfer_html = f'<h3>Transfers</h3><div style="color:#475569;margin:4px 0 8px 0;">{plan["hit_advice"]}</div>'
     if moves:
@@ -296,38 +425,12 @@ elif plan:
         transfer_html += '<div style="color:#64748b;">No transfers recommended this week — hold.</div>'
     st.markdown(_card(transfer_html, "🚀 Transfers"), unsafe_allow_html=True)
 
-    # Starting XI + Bench
     xi = plan["starting_xi"]
-    all_xp = max([p.get("xp", 0) for p in plan["squad"]] + [1.0])
-    d, m, f = xi["formation"]
-
     cap = xi.get("captain")
     vcap = xi.get("vice_captain")
-    cap_id = _pid(cap) if cap else None
-    vcap_id = _pid(vcap) if vcap else None
+    sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
+    st.markdown(_card(sheet, f'🛡️ Best starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = captain · VC = vice-captain'), unsafe_allow_html=True)
 
-    xi_html = f'<h3>Starting XI · {d}-{m}-{f}</h3><div class="grid">'
-    for p in xi["xi"]:
-        role = None
-        if cap_id is not None and _pid(p) == cap_id:
-            role = "C"
-        elif vcap_id is not None and _pid(p) == vcap_id:
-            role = "VC"
-        xi_html += _player_card(p, all_xp, role)
-    xi_html += "</div>"
-
-    bench_html = '<div class="grid">'
-    for p in xi["bench"]:
-        bench_html += _player_card(p, all_xp)
-    bench_html += "</div>"
-
-    col_xi, col_bench = st.columns([2, 1])
-    with col_xi:
-        st.markdown(_card(xi_html, "🛡️ Starting XI (C = captain · VC = vice-captain)"), unsafe_allow_html=True)
-    with col_bench:
-        st.markdown(_card(bench_html, "🪑 Bench"), unsafe_allow_html=True)
-
-    # Captaincy
     cap_html = ""
     if cap:
         cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — Captain</div><div class="xp" style="color:#f59e0b">{cap["xp"]} xP (×2 = {cap["xp"]*2:.1f})</div></div>'
@@ -336,7 +439,6 @@ elif plan:
     cap_html += "</div>"
     st.markdown(_card(cap_html, "⭐ Captaincy"), unsafe_allow_html=True)
 
-    # Chips
     chip_html = ""
     for ch in plan["chips"]:
         color = _chip_action_style(ch["action"])
@@ -361,11 +463,9 @@ st.markdown(
 with st.container(border=True):
     st.info(
         "Changed your team since the last gameweek? The official FPL site hides midweek transfers until the "
-        "deadline. Upload a screenshot of your updated squad (or correct the dropdowns below) and hit "
-        "“Apply & Reanalyse” to build the plan from your new team instead."
+        "deadline. Either upload a screenshot of your new squad, or tick the box below to enter just the transfers "
+        "you made. You can also correct your free transfers and bank here."
     )
-
-    uploaded_image = st.file_uploader("Upload squad screenshot (optional)", type=["png", "jpg", "jpeg"], key="override_image")
 
     try:
         bootstrap = fpl_tools._get_bootstrap()
@@ -383,8 +483,21 @@ with st.container(border=True):
             display = f"{p['first_name']} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m"
             dropdown_options[pos].append((p["id"], display))
 
+    all_options = []
+    for pos in POS_ORDER:
+        all_options.extend(dropdown_options[pos])
+    all_options.sort(key=lambda x: x[1].lower())
+
     squad_default = (st.session_state.get("squad_preview") or {}).get("squad") or []
+
+    default_ft = st.session_state.get("api_free_transfers", 1)
     plan_bank = float((st.session_state.get("squad_preview") or {}).get("bank", 0.0))
+
+    ob1, ob2 = st.columns(2)
+    with ob1:
+        bank_override = st.number_input("Bank balance (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
+    with ob2:
+        ft_override = st.number_input("Free transfers", 0, 5, int(default_ft), key="ov_ft")
 
     default_selections = {pos: [] for pos in POS_ORDER}
     for p in squad_default:
@@ -395,102 +508,179 @@ with st.container(border=True):
                     default_selections[pos].append(idx)
                 break
 
-    image_matched = []
-    if uploaded_image:
-        file_id = f"{uploaded_image.name}_{uploaded_image.size}"
-        if st.session_state.get("last_uploaded_file") != file_id:
-            with st.spinner("Reading your squad screenshot…"):
-                extraction = squad_override.extract_squad_from_image(uploaded_image)
-            if extraction.get("success"):
-                matched, unmatched = squad_override.match_players_to_fpl(bootstrap, extraction.get("raw_players", []))
-                st.session_state["cached_image_matched"] = matched
-                st.session_state["cached_image_unmatched"] = unmatched
+    def _score_player_ids(player_ids, risk):
+        fixture_lookup = fpl_tools._build_fixture_lookup()
+        analysed = []
+        for pid in player_ids:
+            fpl_p = players_by_id.get(pid)
+            if not fpl_p:
+                continue
+            xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk)
+            analysed.append({
+                "player_id": pid,
+                "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
+                "team": teams.get(fpl_p["team"], "?"),
+                "team_id": fpl_p["team"],
+                "position": pos_map.get(fpl_p["element_type"], "?"),
+                "price": fpl_p["now_cost"] / 10.0,
+                "xp": xp,
+                "status": note,
+                "is_captain": False,
+            })
+        return analysed
+
+    def _store_override(team_name, analysed, bank, ft):
+        transfers = fpl_tools.suggest_transfers_for_custom_squad(
+            analysed, float(bank), int(ft), event=GW_ID, risk=risk_label.lower())
+        lineup = fpl_tools.select_starting_xi(analysed)
+        chips = fpl_tools.recommend_chips(bootstrap, analysed, fpl_tools._build_gameweek_map(), GW_ID)
+        st.session_state["override_analysis"] = {
+            "team_name": team_name, "bank": float(bank),
+            "team_value": round(sum(p["price"] for p in analysed), 1), "squad": analysed,
+            "transfers": transfers, "starting_xi": lineup, "chips": chips,
+        }
+
+    tab_full, tab_transfers = st.tabs(["📸 Full squad (screenshot)", "🔄 I’ve made transfers"])
+
+    # ---- Tab 1: full squad via screenshot / dropdowns ----
+    with tab_full:
+        uploaded_image = st.file_uploader("Upload squad screenshot (optional)", type=["png", "jpg", "jpeg"], key="override_image")
+
+        image_matched = []
+        if uploaded_image:
+            file_id = f"{uploaded_image.name}_{uploaded_image.size}"
+            if st.session_state.get("last_uploaded_file") != file_id:
+                with st.spinner("Reading your squad screenshot…"):
+                    extraction = squad_override.extract_squad_from_image(uploaded_image)
+                if extraction.get("success"):
+                    matched, unmatched = squad_override.match_players_to_fpl(bootstrap, extraction.get("raw_players", []))
+                    st.session_state["cached_image_matched"] = matched
+                    st.session_state["cached_image_unmatched"] = unmatched
+                else:
+                    st.session_state["cached_image_matched"] = []
+                    st.session_state["cached_image_unmatched"] = []
+                    st.warning(extraction.get("error", "Could not read the image."))
+                st.session_state["last_uploaded_file"] = file_id
+            image_matched = st.session_state.get("cached_image_matched", [])
+            if image_matched:
+                st.success(f"Screenshot parsed: {len(image_matched)} players matched.")
+            image_unmatched = st.session_state.get("cached_image_unmatched", [])
+            if image_unmatched:
+                st.warning(f"⚠️ {len(image_unmatched)} unmatched: {', '.join(image_unmatched)}")
+
+        image_by_pos = {pos: [] for pos in POS_ORDER}
+        for p in image_matched:
+            if p["position"] in image_by_pos:
+                image_by_pos[p["position"]].append(p)
+
+        override_squad = []
+        quotas = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
+        for pos, count in quotas.items():
+            st.markdown(f"**{pos}**")
+            cols = st.columns(min(count, 5))
+            for i in range(count):
+                with cols[i % len(cols)]:
+                    img_state = f"{uploaded_image.name}_{uploaded_image.size}" if uploaded_image else "none"
+                    key_name = f"ov_{pos}_{i}_{img_state}"
+                    idx_default = default_selections[pos][i] if i < len(default_selections[pos]) else 0
+                    if image_by_pos[pos] and i < len(image_by_pos[pos]):
+                        mp = image_by_pos[pos][i]
+                        for idx, (pid, _) in enumerate(dropdown_options[pos]):
+                            if pid == mp["player_id"]:
+                                idx_default = idx
+                                break
+                    selected = st.selectbox(
+                        f"{pos} {i+1}", options=dropdown_options[pos],
+                        format_func=lambda x: x[1],
+                        index=min(idx_default, len(dropdown_options[pos]) - 1) if dropdown_options[pos] else 0,
+                        key=key_name, label_visibility="collapsed",
+                    )
+                    if selected:
+                        override_squad.append(selected[0])
+
+        if st.button("Apply & Reanalyse", type="primary", key="btn_override"):
+            if len(override_squad) != 15:
+                st.error("Select exactly 15 players (2 GK, 5 DEF, 5 MID, 3 FWD).")
             else:
-                st.session_state["cached_image_matched"] = []
-                st.session_state["cached_image_unmatched"] = []
-                st.warning(extraction.get("error", "Could not read the image."))
-            st.session_state["last_uploaded_file"] = file_id
-        image_matched = st.session_state.get("cached_image_matched", [])
-        if image_matched:
-            st.success(f"Screenshot parsed: {len(image_matched)} players matched.")
-        image_unmatched = st.session_state.get("cached_image_unmatched", [])
-        if image_unmatched:
-            st.warning(f"⚠️ {len(image_unmatched)} unmatched: {', '.join(image_unmatched)}")
+                with st.spinner("Scoring your squad and solving transfers, line-up & chips…"):
+                    try:
+                        analysed = _score_player_ids(override_squad, risk_label.lower())
+                        _store_override("Manual Override Squad", analysed, bank_override, ft_override)
+                    except Exception as e:
+                        st.error(f"Could not analyse your squad: {e}")
 
-    ob1, ob2 = st.columns(2)
-    with ob1:
-        bank_override = st.number_input("Bank balance (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
-    with ob2:
-        ft_override = st.number_input("Free transfers", 0, 5, int(free_transfers), key="ov_ft")
-
-    image_by_pos = {pos: [] for pos in POS_ORDER}
-    for p in image_matched:
-        if p["position"] in image_by_pos:
-            image_by_pos[p["position"]].append(p)
-
-    override_squad = []
-    quotas = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
-    for pos, count in quotas.items():
-        st.markdown(f"**{pos}**")
-        cols = st.columns(min(count, 5))
-        for i in range(count):
-            with cols[i % len(cols)]:
-                img_state = f"{uploaded_image.name}_{uploaded_image.size}" if uploaded_image else "none"
-                key_name = f"ov_{pos}_{i}_{img_state}"
-                idx_default = default_selections[pos][i] if i < len(default_selections[pos]) else 0
-                if image_by_pos[pos] and i < len(image_by_pos[pos]):
-                    mp = image_by_pos[pos][i]
-                    for idx, (pid, _) in enumerate(dropdown_options[pos]):
-                        if pid == mp["player_id"]:
-                            idx_default = idx
-                            break
-                selected = st.selectbox(
-                    f"{pos} {i+1}", options=dropdown_options[pos],
-                    format_func=lambda x: x[1],
-                    index=min(idx_default, len(dropdown_options[pos]) - 1) if dropdown_options[pos] else 0,
-                    key=key_name, label_visibility="collapsed",
-                )
-                if selected:
-                    pid, display = selected
-                    team_match = re.search(r"\((.*?)\)", display)
-                    price_match = re.search(r"£([\d.]+)m", display)
-                    override_squad.append({
-                        "player_id": pid,
-                        "name": display.split(" (")[0],
-                        "team": team_match.group(1) if team_match else "?",
-                        "position": pos,
-                        "price": float(price_match.group(1)) if price_match else 0.0,
-                    })
-
-    if st.button("Apply & Reanalyse", type="primary", key="btn_override"):
-        if len(override_squad) != 15:
-            st.error("Select exactly 15 players (2 GK, 5 DEF, 5 MID, 3 FWD).")
+    # ---- Tab 2: enter just the transfers made ----
+    with tab_transfers:
+        current_squad = squad_default
+        if not current_squad:
+            st.info("Load your team first (section 1) so we know which players you had before your midweek transfers.")
         else:
-            with st.spinner("Scoring your squad and solving transfers, line-up & chips…"):
-                try:
-                    fixture_lookup = fpl_tools._build_fixture_lookup()
-                    analysed = []
-                    for p in override_squad:
-                        fpl_p = players_by_id.get(p["player_id"])
-                        if fpl_p:
-                            xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
-                            analysed.append({
-                                "player_id": p["player_id"], "name": p["name"], "team": p["team"],
-                                "team_id": fpl_p["team"], "position": p["position"], "price": p["price"],
-                                "xp": xp, "status": note, "is_captain": False,
-                            })
-                    transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                        analysed, float(bank_override), int(ft_override), event=GW_ID, risk=risk_label.lower())
-                    lineup = fpl_tools.select_starting_xi(analysed)
-                    chips = fpl_tools.recommend_chips(bootstrap, analysed, fpl_tools._build_gameweek_map(), GW_ID)
-                    st.session_state["override_analysis"] = {
-                        "team_name": "Manual Override Squad", "bank": float(bank_override),
-                        "team_value": round(sum(p["price"] for p in analysed), 1), "squad": analysed,
-                        "transfers": transfers, "starting_xi": lineup, "chips": chips,
-                    }
-                except Exception as e:
-                    st.error(f"Could not analyse your squad: {e}")
+            made_transfers = st.checkbox("✅ I made transfers this week", key="midweek_transfers")
+            if made_transfers:
+                n_moves = st.number_input("How many transfers did you make?", 1, 3, 1, key="n_moves")
 
+                cur_options = sorted(
+                    [(p["player_id"], f"{p['name']} ({p['team']})") for p in current_squad],
+                    key=lambda x: (POS_ORDER.index(next((q["position"] for q in current_squad if q["player_id"] == x[0]), "MID")), x[1]),
+                )
+                out_ids = []
+                in_ids = []
+                for i in range(int(n_moves)):
+                    c1, c2 = st.columns(2)
+                    out_sel = c1.selectbox(
+                        f"Transfer out {i+1}", options=cur_options,
+                        format_func=lambda x: x[1], key=f"mt_out_{i}",
+                        help="The player you sold.",
+                    )
+                    in_sel = c2.selectbox(
+                        f"Transfer in {i+1}", options=all_options,
+                        format_func=lambda x: x[1], key=f"mt_in_{i}",
+                        help="The player you bought.",
+                    )
+                    out_ids.append(out_sel[0])
+                    in_ids.append(in_sel[0])
+
+                if st.button("Apply transfers & reanalyse", type="primary", key="btn_apply_transfers"):
+                    errors = []
+                    if len(set(out_ids)) != len(out_ids):
+                        errors.append("Please pick a different player for each 'transfer out'.")
+                    if len(set(in_ids)) != len(in_ids):
+                        errors.append("Please pick a different player for each 'transfer in'.")
+                    for o, i in zip(out_ids, in_ids):
+                        if o == i:
+                            errors.append("A 'transfer out' and 'transfer in' can't be the same player.")
+
+                    if errors:
+                        for e in errors:
+                            st.error(e)
+                    else:
+                        new_ids = [p["player_id"] for p in current_squad]
+                        for oid in out_ids:
+                            if oid in new_ids:
+                                new_ids.remove(oid)
+                        for iid in in_ids:
+                            if iid in new_ids:
+                                errors.append("You can't transfer in a player you already own.")
+                                break
+                            new_ids.append(iid)
+
+                        if not errors:
+                            counts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
+                            for pid in new_ids:
+                                fpl_p = players_by_id.get(pid)
+                                pos = pos_map.get(fpl_p["element_type"], "?") if fpl_p else "?"
+                                counts[pos] = counts.get(pos, 0) + 1
+                            if counts != {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}:
+                                st.error("That combination doesn't make a valid 2-5-5-3 squad. Check your transfers.")
+                            else:
+                                with st.spinner("Scoring your updated squad and solving line-up & chips…"):
+                                    try:
+                                        analysed = _score_player_ids(new_ids, risk_label.lower())
+                                        _store_override("Updated squad (with my transfers)", analysed, bank_override, ft_override)
+                                    except Exception as e:
+                                        st.error(f"Could not analyse your squad: {e}")
+
+    # ---- Render the override result ----
     ov = st.session_state.get("override_analysis")
     if ov:
         st.markdown("---")
@@ -511,18 +701,11 @@ with st.container(border=True):
         st.markdown(_card(transfer_html, "🚀 Transfers"), unsafe_allow_html=True)
 
         xi = ov["starting_xi"]
-        ov_xp = max([p.get("xp", 0) for p in ov["squad"]] + [1.0])
-        d, m, f = xi["formation"]
-        xi_html = f'<h3>Starting XI · {d}-{m}-{f}</h3><div class="grid">' + "".join(_player_card(p, ov_xp) for p in xi["xi"]) + "</div>"
-        bench_html = '<div class="grid">' + "".join(_player_card(p, ov_xp) for p in xi["bench"]) + "</div>"
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.markdown(_card(xi_html, "🛡️ Starting XI"), unsafe_allow_html=True)
-        with c2:
-            st.markdown(_card(bench_html, "🪑 Bench"), unsafe_allow_html=True)
-
         cap = xi["captain"]
         vcap = xi["vice_captain"]
+        sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
+        st.markdown(_card(sheet, f'🛡️ Best starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]}'), unsafe_allow_html=True)
+
         cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — Captain</div><div class="xp" style="color:#f59e0b">{cap["xp"]} xP (×2 = {cap["xp"]*2:.1f})</div></div>'
         if vcap:
             cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:#475569">{vcap["xp"]} xP</div></div>'
@@ -534,58 +717,6 @@ with st.container(border=True):
             for ch in ov["chips"]
         )
         st.markdown(_card(chip_html, "🎲 Chips"), unsafe_allow_html=True)
-
-
-# ------------------------------------------------------------------
-# How it works — plain English
-# ------------------------------------------------------------------
-with st.expander("🔍 How it works"):
-    st.markdown(
-        """
-**Your squad.** We read your current 15 players straight from the official FPL site, along with your bank balance
-and team value. Your active captain and vice-captain are taken directly from your team, so they’re exactly what you set.
-
-**Player ratings.** Every player gets an expected-points score for the upcoming gameweek. This blends their recent
-form, goals and assists expected, clean-sheet chances, likely minutes, and how strong their opponent is — while also
-respecting the official FPL point scoring rules.
-
-**The plan.** A solver picks the transfers and starting eleven that give you the highest projected points while staying
-within the budget, the 2–5–5–3 squad shape, and the three-players-per-team limit. It only takes a points hit when the
-boost clearly outweighs the cost.
-
-**Risk appetite.** The sidebar toggle changes the objective: *Conservative* leans on popular, dependable starters;
-*Balanced* is pure expected points; *Aggressive* chases low-ownership, high-upside picks and accepts more risk.
-
-**Chips.** We look ahead at double and blank gameweeks over the next few weeks and suggest when to use your Triple
-Captain, Bench Boost, Free Hit and Wildcard.
-        """
-    )
-
-
-# ------------------------------------------------------------------
-# Wildcard builder
-# ------------------------------------------------------------------
-with st.expander("🛠️ Build optimal squad (Wildcard mode)"):
-    w1, w2 = st.columns([2, 1])
-    with w1:
-        budget = st.slider("Budget (£m)", 80.0, 100.0, 100.0, 0.5, key="wc_budget")
-    with w2:
-        if st.button("Build", type="secondary", key="btn_wc"):
-            with st.spinner("Solving your optimal squad…"):
-                opt = fpl_tools.optimise_full_squad(budget=budget, risk=risk_label.lower())
-            st.session_state["wildcard"] = opt
-    opt = st.session_state.get("wildcard")
-    if opt:
-        if "error" in opt:
-            st.error(opt["error"])
-        else:
-            st.success(f"£{opt['total_price']}m / £{opt['budget']}m — {opt['total_xp']} xP")
-            ov_xp = max([p["xp"] for p in opt["squad"]] + [1.0])
-            html = '<div class="grid">'
-            for p in sorted(opt["squad"], key=lambda x: (POS_ORDER.index(x["position"]), -x["xp"])):
-                html += _player_card(p, ov_xp)
-            html += "</div>"
-            st.markdown(_card(html, "🧱 15-man squad"), unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
