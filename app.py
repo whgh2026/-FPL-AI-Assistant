@@ -2,6 +2,7 @@ import streamlit as st
 import fpl_tools
 import squad_override
 import dateutil.parser
+from dateutil import tz
 import datetime
 
 st.set_page_config(page_title="FPL AI Manager", page_icon="⚽", layout="wide")
@@ -12,14 +13,21 @@ CAVEAT_HTML = f'<div style="font-size:0.78rem;color:#64748b;margin:6px 0 10px 0;
 # ------------------------------------------------------------------
 # Auto-detect the upcoming gameweek straight from the FPL API
 # ------------------------------------------------------------------
+SAFE_TIME_STR = ""
 try:
     _gw_info = fpl_tools.get_upcoming_gameweek()
     GW_ID = int(_gw_info.get("id") or 1)
     GW_NAME = _gw_info.get("name") or f"Gameweek {GW_ID}"
     _deadline_raw = _gw_info.get("deadline_time")
     if _deadline_raw:
-        _deadline_dt = dateutil.parser.isoparse(_deadline_raw)
+        # Parse FPL UTC string and convert to UK timezone
+        uk_zone = tz.gettz('Europe/London')
+        _deadline_dt = dateutil.parser.isoparse(_deadline_raw).astimezone(uk_zone)
         DEADLINE_STR = _deadline_dt.strftime("%A, %d %B %Y · %H:%M")
+        
+        # Calculate a safe-transfer window (1 hour before deadline)
+        _safe_dt = _deadline_dt - datetime.timedelta(hours=1)
+        SAFE_TIME_STR = _safe_dt.strftime("%H:%M")
     else:
         DEADLINE_STR = "Check the official site for the confirmed deadline."
 except Exception:
@@ -48,6 +56,7 @@ CSS = """
   .dl-gw {font-size: 0.78rem; font-weight: 800; letter-spacing: 0.14em; color: #4f46e5; text-transform: uppercase;}
   .dl-time {font-size: 1.9rem; font-weight: 800; color: #0f172a; line-height: 1.15; margin-top: 2px;}
   .dl-sub {color: #64748b; font-size: 0.9rem; margin-top: 2px;}
+  .dl-warning {color: #e11d48; font-size: 0.88rem; margin-top: 6px;}
   .overview {background: #eef2ff; border: 1px solid #e0e7ff; border-radius: 14px; padding: 16px 20px;
          color: #3730a3; font-size: 0.94rem; line-height: 1.55; margin-bottom: 8px;}
   .overview b {color: #312e81;}
@@ -277,16 +286,12 @@ with st.sidebar:
 # ------------------------------------------------------------------
 # Hero & Overview
 # ------------------------------------------------------------------
-st.markdown(
-    '<div class="hero"><h1>Pre-deadline dashboard</h1>'
-    '<div class="sub">Clear, definitive instructions for your FPL week — run it an hour or two before the deadline.</div></div>',
-    unsafe_allow_html=True,
-)
+safe_banner = f'<div class="dl-warning">⚠️ <b>Pro Tip:</b> Aim to confirm your transfers by <b>{SAFE_TIME_STR}</b> to avoid FPL server crashes.</div>' if SAFE_TIME_STR else ''
 
 st.markdown(
     f'<div class="deadline-hero"><div class="dl-gw">⏰ {GW_NAME} deadline</div>'
     f'<div class="dl-time">{DEADLINE_STR}</div>'
-    f'<div class="dl-sub">Your plan is built around this upcoming gameweek — no manual gameweek setting needed.</div></div>',
+    f'{safe_banner}</div>',
     unsafe_allow_html=True,
 )
 
@@ -518,13 +523,27 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Run Algorithmic Optimizer", type="primary", use_container_width=True, key="btn_analyse_override"):
-            if len(override_squad) != 15:
-                st.error("⚠️ Select exactly 15 valid players (2 GK, 5 DEF, 5 MID, 3 FWD) before continuing.")
+            # If the user didn't open the expander, override_squad is empty. Default back to their baseline squad.
+            active_squad_ids = override_squad if override_squad else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
+            
+            if len(active_squad_ids) != 15:
+                st.error("⚠️ Ensure you have exactly 15 valid players selected before continuing.")
             else:
                 with st.spinner("Scoring your squad and calculating optimal transfers…"):
                     try:
                         analysed = []
-                        for pid in override_squad:
+                        
+                        # Load bootstrap if not already loaded by the expander
+                        try:
+                            bootstrap = fpl_tools._get_bootstrap()
+                            fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
+                            players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
+                            teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+                            pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+                        except Exception:
+                            pass
+                            
+                        for pid in active_squad_ids:
                             fpl_p = players_by_id.get(pid)
                             xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
                             analysed.append({
@@ -618,6 +637,23 @@ if "override_analysis" in st.session_state:
         n_moves = st.number_input("Number of transfers to apply", 0, 15, min(n_moves_default, 15), key="n_moves_manual")
         
         out_ids, in_ids = [], []
+        try:
+            bootstrap = fpl_tools._get_bootstrap()
+            players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
+            teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+            pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+            
+            all_options = [(None, "— Select Player —")]
+            for p in bootstrap.get("elements", []):
+                pos = pos_map.get(p["element_type"])
+                if pos:
+                    initial = p['first_name'][0] + "." if p.get('first_name') else ""
+                    display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m"
+                    all_options.append((p["id"], display))
+            all_options.sort(key=lambda x: x[1].lower() if x[0] else "")
+        except:
+            all_options = cur_options
+
         for i in range(int(n_moves)):
             c1, c2 = st.columns(2)
             def_out_idx = 0
@@ -663,6 +699,8 @@ if "override_analysis" in st.session_state:
                 else:
                     with st.spinner("Generating Final Lineup…"):
                         analysed_final = []
+                        fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
+                        
                         for pid in new_ids:
                             fpl_p = players_by_id.get(pid)
                             xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
