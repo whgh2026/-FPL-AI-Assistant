@@ -26,6 +26,9 @@ with tab1:
     with c3:
         ft = st.number_input("Free transfers", 0, 5, 1, key="ft_count")
 
+    gw_deadline_t1 = fpl_tools.get_gameweek_deadline(int(gw_transfer))
+    st.info(f"⏳ **Gameweek {gw_transfer} Deadline:** {gw_deadline_t1} — *Make transfers 1-2 hours before this time.*")
+
     if st.button("Find Best Transfers", type="primary", key="btn_transfers"):
         with st.spinner("Analysing your squad and the market..."):
             res = fpl_tools.suggest_weekly_transfers(mid_transfer.strip(), int(gw_transfer), int(ft))
@@ -39,7 +42,7 @@ with tab1:
         st.success(f"{res['team_name']}  -  Bank £{res['bank']}m")
         st.info(f"Advice: {res['hit_advice']}")
 
-        bs = res["best_single"]
+        bs = res.get("best_single")
         if bs:
             st.markdown("### Best Single Transfer")
             st.markdown(
@@ -50,17 +53,16 @@ with tab1:
         else:
             st.write("No beneficial single transfer found.")
 
-        bd = res["best_double"]
+        bd = res.get("best_double")
         if bd:
             st.markdown("### Best Double Transfer")
-            # Sort double transfers by highest gain priority
             sorted_bd_moves = sorted(bd["moves"], key=lambda x: x["xp_gain"], reverse=True)
             for i, m in enumerate(sorted_bd_moves, 1):
                 st.markdown(f"**Priority {i}:** OUT **{m['out']['name']}** -> IN **{m['in']['name']}** (+{m['xp_gain']} xP)")
             st.markdown(f"**Total xP gain:** +{bd['xp_gain']}")
 
 # ------------------------------------------------------------------
-# TAB 2: My Team — API + Manual Override
+# TAB 2: My Team — API + Manual Override + Sandbox
 # ------------------------------------------------------------------
 with tab2:
     st.subheader("Analyse Your Current Squad")
@@ -71,6 +73,9 @@ with tab2:
         mid_squad = st.text_input("Manager ID", "7261134", key="mid_squad")
     with c2:
         gw_squad = st.number_input("Gameweek", 1, 38, 3, key="gw_squad")
+
+    gw_deadline_t2 = fpl_tools.get_gameweek_deadline(int(gw_squad))
+    st.info(f"⏳ **Gameweek {gw_squad} Deadline:** {gw_deadline_t2} — *Make transfers 1-2 hours before this time.*")
 
     if st.button("Fetch Squad", type="primary", key="btn_fetch"):
         with st.spinner("Loading from FPL API..."):
@@ -94,11 +99,9 @@ with tab2:
         
         for pos in ["GK", "DEF", "MID", "FWD"]:
             pos_players = [p for p in squad_cards if p["position"] == pos]
-            
             if pos_players:
                 st.markdown(f"**{pos}**")
                 cols = st.columns(len(pos_players))
-                
                 for i, p in enumerate(pos_players):
                     with cols[i]:
                         pos_color = {
@@ -109,7 +112,6 @@ with tab2:
                         }.get(p["position"], "#EEEEEE")
                         
                         cap_mark = " ⭐" if p.get("is_captain") else ""
-                        
                         st.markdown(
                             f"<div style='padding:8px;border-radius:10px;background:{pos_color};font-size:0.85rem;margin-bottom:15px;'>"
                             f"<b>{p['name']}</b>{cap_mark}<br>"
@@ -121,7 +123,7 @@ with tab2:
                         )
 
         if st.session_state.get("api_summary"):
-            with st.expander("Data Science Advice (API Squad)"):
+            with st.expander("Tactical Advice (Pre-Transfer Lineup)"):
                 st.markdown(st.session_state["api_summary"])
 
     st.markdown("---")
@@ -165,7 +167,6 @@ with tab2:
     image_matched = []
     if uploaded_image:
         file_id = f"{uploaded_image.name}_{uploaded_image.size}"
-        
         if st.session_state.get("last_uploaded_file") != file_id:
             with st.spinner("Reading squad image with Gemini Vision..."):
                 extraction = squad_override.extract_squad_from_image(uploaded_image)
@@ -182,7 +183,6 @@ with tab2:
             st.session_state["last_uploaded_file"] = file_id
             
         image_matched = st.session_state.get("cached_image_matched", [])
-        
         if image_matched:
             st.success(f"Image parsed: {len(image_matched)} players matched.")
             for p in image_matched:
@@ -339,16 +339,12 @@ with tab2:
             if bd:
                 with t_col2:
                     st.markdown("#### Best Double Move")
-                    # Sort moves by priority (highest xP gain first)
                     sorted_bd_moves = sorted(bd["moves"], key=lambda x: x["xp_gain"], reverse=True)
                     for i, m in enumerate(sorted_bd_moves, 1):
                         st.markdown(f"**Priority {i}:** OUT {m['out']['name']} -> IN {m['in']['name']} (+{m['xp_gain']} xP)")
                     st.markdown(f"**Total Gain:** +{bd['xp_gain']} xP")
-                    
-                    # Disable if single is checked to prevent conflict
                     apply_bd = st.checkbox("✅ Simulate Double Move", key="chk_bd", disabled=apply_bs)
 
-            # Apply UI simulation to the active_squad memory
             if apply_bd and bd:
                 for m in bd["moves"]:
                     active_squad = [p for p in active_squad if p["player_id"] != m["out"]["id"]]
