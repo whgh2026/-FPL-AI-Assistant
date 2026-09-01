@@ -1,4 +1,5 @@
 import math
+import re
 import time
 import requests
 from typing import Dict, Any, List, Tuple, Optional
@@ -78,6 +79,20 @@ def _to_float(v: Any) -> float:
 
 def _risk_profile(risk: str) -> Dict[str, float]:
     return RISK_PROFILES.get((risk or "balanced").lower(), RISK_PROFILES["balanced"])
+
+
+def _clean_manager_id(raw: str) -> str:
+    """Normalise a manager ID: extract the entry number from a pasted URL/path, else the first digit run."""
+    raw = (raw or "").strip()
+    if not raw:
+        return raw
+    m = re.search(r"entry/(\d+)", raw)
+    if m:
+        return m.group(1)
+    m = re.search(r"\d+", raw)
+    if m:
+        return m.group(0)
+    return raw
 
 
 def _next_gameweek(bootstrap: Dict[str, Any]) -> int:
@@ -423,6 +438,7 @@ def _solve_squad(
 # Squad scoring
 # ------------------------------------------------------------------
 def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str, Any]:
+    manager_id = _clean_manager_id(manager_id)
     bootstrap = _get_bootstrap()
     players_by_id = {p["id"]: p for p in bootstrap["elements"]}
     teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}

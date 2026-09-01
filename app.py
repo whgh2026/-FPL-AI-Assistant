@@ -116,7 +116,8 @@ st.markdown('<div class="hero"><h1>Pre-Deadline Dashboard</h1><div class="sub">O
 c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
     manager_id = st.text_input("Manager ID", "7261134", key="mid",
-                               help="Found in your FPL team page URL, e.g. fantasy.premierleague.com/entry/XXXX/event/1")
+                               help="Your unique FPL ID — the number in your team-page URL "
+                                    "(e.g. fantasy.premierleague.com/entry/7261134/event/1). Works for any manager's ID.")
 with c2:
     gw = st.number_input("Gameweek", 1, 38, 3, key="gw")
 with c3:
