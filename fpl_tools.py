@@ -297,6 +297,47 @@ def get_upcoming_gameweek() -> Dict[str, Any]:
             }
     return {"id": gw, "name": f"Gameweek {gw}", "deadline_time": None}
 
+def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
+    manager_id = _clean_manager_id(manager_id)
+    try:
+        entry = requests.get(f"{BASE_URL}/entry/{manager_id}/", timeout=10).json()
+        started_event = int(entry.get("started_event") or 1)
+        if target_gw is None:
+            target_gw = _next_gameweek(_get_bootstrap())
+
+        history = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10).json()
+        transfers = requests.get(f"{BASE_URL}/entry/{manager_id}/transfers/", timeout=10).json()
+
+        transfers_per_event: Dict[int, int] = {}
+        for t in transfers:
+            ev = t.get("event")
+            if ev is not None:
+                transfers_per_event[int(ev)] = transfers_per_event.get(int(ev), 0) + 1
+
+        reset_events = set()
+        for c in history.get("chips", []):
+            if (c.get("name") or "").lower() in ("wildcard", "freehit"):
+                reset_events.add(int(c.get("event") or 0))
+
+        ft = 1
+        for ev in range(started_event, int(target_gw)):
+            if ev in reset_events:
+                ft = 1
+            else:
+                ft = min(ft + 1, 5)
+                made = transfers_per_event.get(ev, 0)
+                ft = max(ft - made, 0)
+
+        if int(target_gw) in reset_events:
+            ft = 1
+        else:
+            made_this_week = transfers_per_event.get(int(target_gw), 0)
+            ft = max(ft - made_this_week, 0)
+
+        return ft
+    except Exception:
+        return 1
+
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str) -> Dict[str, Any]:
     return {
         "id": e["id"],
@@ -493,9 +534,17 @@ def suggest_transfers_for_custom_squad(
     net_gain = round(total_gain - hit_cost * hits, 2)
     cost_change = round(sum(m["cost"] for m in moves), 2)
 
-    if n == 0:
-        advice = "Hold — no transfer improves your squad this week."
-    elif active_chip in ("Wildcard", "Free Hit"):
+    # Strictly enforce that advised transfers must mathematically increase expected points
+    if n == 0 or net_gain <= 0:
+        return {
+            "transfers": [],
+            "hits": 0,
+            "net_gain": 0.0,
+            "cost_change": 0.0,
+            "hit_advice": "Hold — no transfers mathematically improve your expected points (xP) after penalties."
+        }
+
+    if active_chip in ("Wildcard", "Free Hit"):
         advice = f"{active_chip} active — {n} transfers planned with 0 point penalties."
     elif hits == 0:
         advice = f"Make {n} free transfer(s) — no points hit."
