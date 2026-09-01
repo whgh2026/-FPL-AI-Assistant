@@ -312,7 +312,6 @@ with st.container(border=True):
 
     manager_id = st.text_input(
         "Manager ID",
-        placeholder="e.g. 7261134",
         key="mid_input",
         help="Your unique FPL ID — the number in your team-page URL.",
     )
