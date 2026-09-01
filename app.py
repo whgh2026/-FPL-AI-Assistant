@@ -282,8 +282,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-now_str = datetime.datetime.now().strftime("%d %B %Y at %H:%M")
-st.caption(f"ℹ️ *Note: Player values and expected points (xP) are calculated using live FPL API data, correct as of {now_str}.*")
+today_str = datetime.datetime.now().strftime("%d %B %Y")
+st.caption(f"ℹ️ *Note: Player values and expected points (xP) are based on the latest official FPL API data for {today_str}. Prices update once daily at midnight UK time.*")
 
 with st.expander("🔍 How it works", expanded=True):
     st.markdown(
