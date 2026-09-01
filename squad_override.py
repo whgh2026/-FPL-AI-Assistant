@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import unicodedata
 
 try:
     from google import genai
@@ -56,11 +57,16 @@ def extract_squad_from_image(uploaded_file) -> dict:
             )
         )
 
-        raw_players = json.loads(response.text)
+        raw_players = json.loads(response.text.strip('` \n').replace('json\n', ''))
         return {"success": True, "raw_players": raw_players}
 
     except Exception as e:
         return {"success": False, "error": f"Gemini OCR extraction failed: {str(e)}"}
+
+def _normalize_name(name: str) -> str:
+    """Removes accents and special characters for cleaner matching."""
+    nfkd = unicodedata.normalize('NFKD', name)
+    return u"".join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip()
 
 def match_players_to_fpl(bootstrap: dict, raw_players: list) -> tuple:
     """
@@ -72,19 +78,26 @@ def match_players_to_fpl(bootstrap: dict, raw_players: list) -> tuple:
     unmatched = []
 
     for item in raw_players:
-        ocr_name = item.get("name", "").lower().strip()
+        raw_name = item.get("name", "")
+        ocr_name = _normalize_name(raw_name)
         ocr_pos = item.get("position", "").upper().strip()
 
         best_match = None
         for p in fpl_elements:
-            web_name = p.get("web_name", "").lower()
-            second_name = p.get("second_name", "").lower()
-            first_name = p.get("first_name", "").lower()
-            full_name = f"{first_name} {second_name}".lower()
+            web_name = _normalize_name(p.get("web_name", ""))
+            second_name = _normalize_name(p.get("second_name", ""))
+            first_name = _normalize_name(p.get("first_name", ""))
+            full_name = f"{first_name} {second_name}"
 
             if ocr_name == web_name or ocr_name == second_name or ocr_name == full_name or ocr_name in full_name:
                 best_match = p
                 break
+            
+            if "." in raw_name:
+                initial, surname = raw_name.split(".", 1)
+                if _normalize_name(surname) == web_name and first_name.startswith(_normalize_name(initial)):
+                    best_match = p
+                    break
 
         if best_match:
             pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
@@ -93,6 +106,6 @@ def match_players_to_fpl(bootstrap: dict, raw_players: list) -> tuple:
                 "position": pos_map.get(best_match["element_type"], ocr_pos)
             })
         else:
-            unmatched.append(item.get("name", ""))
+            unmatched.append(raw_name)
 
     return matched_squad, unmatched
