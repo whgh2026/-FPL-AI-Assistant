@@ -22,9 +22,6 @@ except Exception:
 MODEL = "gemini-3.1-flash-lite"
 
 def extract_squad_from_image(uploaded_file) -> dict:
-    """
-    Performs OCR on the uploaded FPL squad screenshot using Gemini Flash-Lite.
-    """
     if not _GENAI_AVAILABLE or not _PIL_AVAILABLE:
         return {"success": False, "error": "Gemini OCR dependencies (google-genai, Pillow) are not installed."}
 
@@ -64,15 +61,10 @@ def extract_squad_from_image(uploaded_file) -> dict:
         return {"success": False, "error": f"Gemini OCR extraction failed: {str(e)}"}
 
 def _normalize_name(name: str) -> str:
-    """Removes accents and special characters for cleaner matching."""
     nfkd = unicodedata.normalize('NFKD', name)
     return u"".join([c for c in nfkd if not unicodedata.combining(c)]).lower().strip()
 
 def match_players_to_fpl(bootstrap: dict, raw_players: list) -> tuple:
-    """
-    Matches OCR player name strings against official FPL element records.
-    Returns (matched_squad, unmatched_names).
-    """
     fpl_elements = bootstrap.get("elements", [])
     matched_squad = []
     unmatched = []
