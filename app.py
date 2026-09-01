@@ -28,7 +28,7 @@ except Exception:
     DEADLINE_STR = "Deadline could not be loaded right now."
 
 # ------------------------------------------------------------------
-# Theme / styling
+# Styling
 # ------------------------------------------------------------------
 POS_COLORS = {"GK": "#f59e0b", "DEF": "#0ea5e9", "MID": "#10b981", "FWD": "#f43f5e"}
 POS_ORDER = ["GK", "DEF", "MID", "FWD"]
@@ -72,9 +72,6 @@ CSS = """
   .out {color: #e11d48; font-weight: 700;}
   .inn {color: #059669; font-weight: 700;}
   .gain {margin-left: auto; font-weight: 700; font-size: 0.85rem; color: #475569;}
-  .chip-row {display:flex; justify-content:space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #e2e8f0;}
-  .chip-row .det {color: #64748b; font-size: 0.82rem; text-align: right;}
-  .act {font-weight: 800; font-size: 0.8rem; padding: 2px 8px; border-radius: 6px;}
   .cap-card {border: 1px solid #fbbf24; background: #fff7ed;}
   .role {display:inline-block; font-size: 0.62rem; font-weight: 800; padding: 1px 6px; border-radius: 5px;
          margin-left: 5px; vertical-align: middle;}
@@ -83,7 +80,6 @@ CSS = """
   .stat-badge {display:inline-block; font-size:0.6rem; font-weight:700; padding:1px 5px; border-radius:4px; margin-left:4px; white-space:nowrap;}
   .stat-out {background:#fee2e2; color:#b91c1c; border:1px solid #fecaca;}
   .stat-doubt {background:#fef3c7; color:#b45309; border:1px solid #fde68a;}
-  .stat-warn {background:#fef08a; color:#854d0e; border:1px solid #fde047;}
   .override-head {background: #fff7ed; border: 1px solid #fed7aa; border-left: 6px solid #f59e0b;
          border-radius: 14px 14px 0 0; padding: 16px 20px; font-size: 1.15rem; font-weight: 800;
          color: #9a3412; margin-top: 26px;}
@@ -96,15 +92,15 @@ CSS = """
             background:#f1f5f9; border-radius:10px; padding:8px;}
   .pos-emoji {font-size:1.3rem;}
   .pos-name {font-weight:800; font-size:0.68rem; letter-spacing:.06em; color:#475569; margin-top:2px;}
-  .starters {flex:1; display:grid; grid-template-columns:repeat(auto-fill,minmax(138px,1fr)); gap:8px; align-content:start;}
-  .subs {flex:0 0 195px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:10px; padding:8px 10px;}
+  .starters {flex:1; display:grid; grid-template-columns:repeat(auto-fill,minmax(148px,1fr)); gap:8px; align-content:start;}
+  .subs {flex:0 0 205px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:10px; padding:8px 10px;}
   .sub-title {font-size:0.62rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
               color:#94a3b8; margin-bottom:4px;}
   .sub-item {font-size:0.75rem; color:#0f172a; font-weight:600; padding:4px 0; border-bottom:1px dotted #e2e8f0;
              display:flex; justify-content:space-between; align-items:center; gap:4px;}
   .sub-item:last-child {border-bottom:none;}
   .sub-meta {color:#64748b; font-size:0.68rem;}
-  .sub-xp {color:#0f172a; font-weight:700; white-space:nowrap;}
+  .sub-xp {color:#0f172a; font-weight:800; white-space:nowrap;}
   .empty {color:#cbd5e1; font-size:0.8rem;}
   .mc {border:1px solid #e2e8f0; border-left:3px solid #94a3b8; border-radius:10px; padding:8px 10px;
        background:#fff; min-width:0;}
@@ -112,7 +108,8 @@ CSS = """
             padding:1px 6px; border-radius:4px; color:#fff;}
   .mc-nm {font-weight:700; font-size:0.82rem; color:#0f172a; margin-top:3px;
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-  .mc-meta {color:#64748b; font-size:0.7rem;}
+  .mc-meta {color:#64748b; font-size:0.7rem; margin-top:1px;}
+  .mc-xp {font-weight:800; font-size:0.8rem; margin-top:3px; color:#0f172a;}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -131,10 +128,6 @@ def _status_badge(status: str) -> str:
         return ""
     if status in ("OUT", "Injured", "Suspended", "Unavailable"):
         return f'<span class="stat-badge stat-out">{status}</span>'
-    elif "Chance" in status or status == "Doubtful":
-        return f'<span class="stat-badge stat-doubt">{status}</span>'
-    elif status == "Rotation Risk":
-        return f'<span class="stat-badge stat-warn">{status}</span>'
     return f'<span class="stat-badge stat-doubt">{status}</span>'
 
 
@@ -171,7 +164,8 @@ def _mini_card(p, role: str = None) -> str:
         f'<div class="mc" style="border-left-color:{c}">'
         f'<div><span style="background:{c};" class="pos">{pos}</span>{role_html}{status_html}</div>'
         f'<div class="mc-nm" title="{p.get("name", "?")}">{p.get("name", "?")}</div>'
-        f'<div class="mc-meta">{p.get("team", "?")} · £{p.get("price", 0):.1f}m · {p.get("xp", 0)} xP</div></div>'
+        f'<div class="mc-meta">{p.get("team", "?")} · £{p.get("price", 0):.1f}m</div>'
+        f'<div class="mc-xp">{p.get("xp", 0)} xP</div></div>'
     )
 
 
@@ -241,12 +235,6 @@ def _pid(p) -> str:
     return p.get("player_id", p.get("id"))
 
 
-def _chip_action_style(action: str) -> str:
-    if action in ("Use", "Plan", "Consider"):
-        return "#059669"
-    return "#64748b"
-
-
 def _get_dropdown_index(options_list, target_id):
     if not target_id:
         return 0
@@ -286,7 +274,7 @@ with st.sidebar:
 
 
 # ------------------------------------------------------------------
-# Hero & plain-English overview
+# Hero & Overview
 # ------------------------------------------------------------------
 st.markdown(
     '<div class="hero"><h1>Pre-deadline dashboard</h1>'
@@ -365,16 +353,23 @@ with st.container(border=True):
         m2.metric("Bank", f"£{preview['bank']}m")
         m3.metric("Team value", f"£{preview['team_value']}m")
 
-        # --- Explicit Free Transfer Input ---
         st.markdown("---")
-        st.info("👋 **Almost ready!** Because FPL hides any transfers you make mid-week, please confirm exactly how many Free Transfers you have right now before generating your plan.")
+        st.info("👋 **Almost ready!** Because FPL hides any transfers you make mid-week, please confirm your current state before generating your plan.")
         
-        user_ft = st.number_input(
-            "Please enter your current free transfers",
-            min_value=0, max_value=5, value=None, placeholder="Click to enter a number...", key="step1_ft_input"
-        )
-        if user_ft is not None:
-            st.session_state["api_free_transfers"] = user_ft
+        c_ft, c_chip = st.columns(2)
+        with c_ft:
+            user_ft = st.number_input(
+                "Please enter your current free transfers",
+                min_value=0, max_value=5, value=None, placeholder="Click to enter a number...", key="step1_ft_input"
+            )
+            if user_ft is not None:
+                st.session_state["api_free_transfers"] = user_ft
+        with c_chip:
+            active_chip = st.selectbox(
+                "Active Chip for this Gameweek",
+                ["None", "Wildcard", "Free Hit", "Bench Boost", "Triple Captain"],
+                key="step1_chip_input"
+            )
 
         squad = preview.get("squad", [])
         starters, bench = _api_starters_bench(squad)
@@ -402,20 +397,26 @@ with st.container(border=True):
             else:
                 with st.spinner("Pulling your squad, modelling points, solving transfers & line-up…"):
                     try:
-                        plan = fpl_tools.build_gameweek_briefing(
-                            manager_id.strip(), GW_ID, int(user_ft), risk=risk_label.lower()
+                        transfers = fpl_tools.suggest_transfers_for_custom_squad(
+                            squad, preview["bank"], int(user_ft), active_chip=active_chip, event=GW_ID, risk=risk_label.lower()
                         )
-                        st.session_state["plan"] = plan
+                        st.session_state["step1_plan"] = {
+                            "transfers": transfers,
+                            "squad": squad,
+                            "bank": preview["bank"],
+                            "active_chip": active_chip
+                        }
                     except Exception as e:
-                        st.session_state["plan"] = {"error": str(e)}
+                        st.session_state["step1_plan"] = {"error": str(e)}
 
-    plan = st.session_state.get("plan")
-    if plan and "error" in plan:
-        st.error("⚠️ " + plan["error"])
-    elif plan:
+    s1_plan = st.session_state.get("step1_plan")
+    if s1_plan and "error" in s1_plan:
+        st.error("⚠️ " + s1_plan["error"])
+    elif s1_plan:
         st.markdown("---")
-        moves = plan.get("transfers", [])
-        transfer_html = f'<h3>Recommended Transfers</h3><div style="color:#475569;margin:4px 0 8px 0;">{plan["hit_advice"]}</div>'
+        st.markdown("### Step 1 Action Plan")
+        moves = s1_plan["transfers"].get("transfers", [])
+        transfer_html = f'<h3>Recommended Transfers</h3><div style="color:#475569;margin:4px 0 8px 0;">{s1_plan["transfers"].get("hit_advice", "")}</div>'
         if moves:
             for m in moves:
                 transfer_html += (
@@ -427,22 +428,6 @@ with st.container(border=True):
         else:
             transfer_html += '<div style="color:#64748b;">No transfers recommended this week — hold.</div>'
         st.markdown(_card(transfer_html, "🚀 Transfers"), unsafe_allow_html=True)
-
-        xi = plan["starting_xi"]
-        cap = xi.get("captain")
-        vcap = xi.get("vice_captain")
-        
-        st_xp = xi["total_xp"]
-        be_xp = round(sum(p.get("xp", 0) for p in xi["bench"]), 2)
-        tot_xp = round(st_xp + be_xp, 2)
-        x1, x2, x3 = st.columns(3)
-        x1.metric("🛡️ Optimal XI xP", f"{st_xp} xP")
-        x2.metric("🪑 Bench xP", f"{be_xp} xP")
-        x3.metric("📊 Total Squad xP", f"{tot_xp} xP")
-
-        sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
-        st.markdown(_card(sheet, f'🛡️ Best Starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · VC = Vice-Captain'), unsafe_allow_html=True)
-        st.markdown(CAVEAT_HTML, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
@@ -462,7 +447,7 @@ with st.container(border=True):
         fixture_lookup = {}
 
     players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
-    teams = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+    teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
     pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
     dropdown_options = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
@@ -470,7 +455,8 @@ with st.container(border=True):
         pos = pos_map.get(p["element_type"])
         if pos:
             xp, _ = fpl_tools._player_xp(p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
-            display = f"{p['first_name']} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m | {xp} xP"
+            initial = p['first_name'][0] + "." if p.get('first_name') else ""
+            display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m | {xp} xP"
             dropdown_options[pos].append((p["id"], display))
 
     all_options = [(None, "— Select Player —")]
@@ -550,11 +536,13 @@ with st.container(border=True):
                 if selected and selected[0] is not None:
                     override_squad.append(selected[0])
 
-    ob1, ob2 = st.columns(2)
+    ob1, ob2, ob3 = st.columns(3)
     with ob1:
         bank_override = st.number_input("Bank balance (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
     with ob2:
         ft_override = st.number_input("Free transfers remaining", 0, 5, 0, key="ov_ft")
+    with ob3:
+        chip_override = st.selectbox("Active Chip", ["None", "Wildcard", "Free Hit", "Bench Boost", "Triple Captain"], key="ov_chip")
 
     if st.button("Analyse Override Squad", type="primary", key="btn_analyse_override"):
         if len(override_squad) != 15:
@@ -574,12 +562,13 @@ with st.container(border=True):
                         })
                     
                     transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                        analysed, float(bank_override), int(ft_override), event=GW_ID, risk=risk_label.lower())
+                        analysed, float(bank_override), int(ft_override), active_chip=chip_override, event=GW_ID, risk=risk_label.lower())
                     
                     st.session_state["override_analysis"] = {
                         "analysed_squad": analysed,
                         "bank": float(bank_override),
                         "ft": int(ft_override),
+                        "chip": chip_override,
                         "transfers": transfers
                     }
                 except Exception as e:
