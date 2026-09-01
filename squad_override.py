@@ -1,9 +1,22 @@
 import os
 import io
 import json
-from google import genai
-from google.genai import types
-from PIL import Image
+
+try:
+    from google import genai
+    from google.genai import types
+    _GENAI_AVAILABLE = True
+except Exception:
+    genai = None
+    types = None
+    _GENAI_AVAILABLE = False
+
+try:
+    from PIL import Image
+    _PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    _PIL_AVAILABLE = False
 
 MODEL = "gemini-3.1-flash-lite"
 
@@ -11,6 +24,9 @@ def extract_squad_from_image(uploaded_file) -> dict:
     """
     Performs OCR on the uploaded FPL squad screenshot using Gemini Flash-Lite.
     """
+    if not _GENAI_AVAILABLE or not _PIL_AVAILABLE:
+        return {"success": False, "error": "Gemini OCR dependencies (google-genai, Pillow) are not installed."}
+
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return {"success": False, "error": "GEMINI_API_KEY environment variable not set."}
