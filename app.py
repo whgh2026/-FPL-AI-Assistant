@@ -292,7 +292,7 @@ st.markdown(
 st.markdown(
     '<div class="overview">'
     '<b>What this does:</b> Pop in your Manager ID to pull your official current squad. Then input your variables '
-    '(Free Transfers, Bank, Active Chips) and verify your actual live team. The AI will calculate the optimal '
+    '(Free Transfers, Bank, Active Chips) and verify your actual live team. The algorithm will calculate the optimal '
     'transfers to maximize expected points (xP) and generate your best starting XI, bench order, and captaincy.'
     '</div>',
     unsafe_allow_html=True,
@@ -309,7 +309,7 @@ st.markdown(
 
 with st.container(border=True):
     st.caption(
-        "Enter your Manager ID to pull your official baseline squad. This gives the AI your starting 15 players, "
+        "Enter your Manager ID to pull your official baseline squad. This gives the algorithm your starting 15 players, "
         "which you can adjust in Step 2 if you've made midweek moves."
     )
 
@@ -355,49 +355,40 @@ with st.container(border=True):
         st.error("⚠️ " + preview["error"])
         st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
     elif preview:
-        # Group ALL large metrics together before the squad
+        # Metrics Grouping
         m1, m2, m3 = st.columns(3)
         m1.metric("Team", preview["team_name"])
         m2.metric("Bank", f"£{preview['bank']}m")
         m3.metric("Team value", f"£{preview['team_value']}m")
+
+        # Underline and Variables confirmation 
+        st.markdown("---")
+        st.info("👋 **Almost ready!** Because FPL hides any transfers you make mid-week, please confirm your current state before generating your plan.")
+        
+        c_ft, c_chip = st.columns(2)
+        with c_ft:
+            user_ft = st.number_input(
+                "Please enter your current free transfers",
+                min_value=0, max_value=5, value=None, placeholder="Click to enter a number...", key="step1_ft_input"
+            )
+        with c_chip:
+            eval_chips = st.multiselect(
+                "Select Active Chip(s) to Evaluate",
+                ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"],
+                default=[],
+                key="step1_chip_input"
+            )
 
         squad = preview.get("squad", [])
         starters, bench = _api_starters_bench(squad)
         cap = next((p for p in squad if p.get("is_captain")), None)
         vc = next((p for p in squad if p.get("is_vice_captain")), None)
 
-        st_xp = round(sum(p.get("xp", 0) for p in starters), 2)
-        if cap: st_xp += cap.get("xp", 0)
-        be_xp = round(sum(p.get("xp", 0) for p in bench), 2)
-        tot_xp = round(st_xp + be_xp, 2)
-        
-        x1, x2, x3 = st.columns(3)
-        x1.metric("🛡️ Starting XI xP", f"{st_xp} xP")
-        x2.metric("🪑 Bench xP", f"{be_xp} xP")
-        x3.metric("📊 Total Squad xP", f"{tot_xp} xP")
-
-        # Baseline Team Sheet
+        # Baseline Team Sheet 
+        st.markdown("<br>", unsafe_allow_html=True)
         sheet = f'<div class="team-sheet">{_team_sheet_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)}</div>'
         st.markdown(_card(sheet, "Your Baseline Squad · C = Captain · VC = Vice-Captain"), unsafe_allow_html=True)
         st.markdown(CAVEAT_HTML, unsafe_allow_html=True)
-
-        # Underline and Variables confirmation 
-        st.markdown("---")
-        st.info("👋 **Almost ready!** Because FPL hides any transfers you make mid-week, please confirm your current state before generating your plan.")
-        
-        user_ft = st.number_input(
-            "Please enter your current free transfers",
-            min_value=0, max_value=5, value=None, placeholder="Click to enter a number...", key="step1_ft_input"
-        )
-        
-        st.write("**Active Chip for this Gameweek**")
-        active_chip = st.radio(
-            "Active Chip for this Gameweek", 
-            ["None", "Wildcard", "Free Hit", "Bench Boost", "Triple Captain"], 
-            horizontal=True, 
-            label_visibility="collapsed",
-            key="step1_chip_input"
-        )
 
 
 # ------------------------------------------------------------------
@@ -517,7 +508,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
         st.markdown("<br>", unsafe_allow_html=True)
         
         ft_val = st.session_state.get("step1_ft_input")
-        chip_val = st.session_state.get("step1_chip_input", "None")
+        chips_val = st.session_state.get("step1_chip_input", [])
 
         if st.button("Analyse Squad & Plan Transfers", type="primary", use_container_width=True, key="btn_analyse_override"):
             if ft_val is None:
@@ -539,13 +530,13 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                             })
                         
                         transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                            analysed, float(bank_override), int(ft_val), active_chip=chip_val, event=GW_ID, risk=risk_label.lower())
+                            analysed, float(bank_override), int(ft_val), eval_chips=chips_val, event=GW_ID, risk=risk_label.lower())
                         
                         st.session_state["override_analysis"] = {
                             "analysed_squad": analysed,
                             "bank": float(bank_override),
                             "ft": int(ft_val),
-                            "chip": chip_val,
+                            "chips": chips_val,
                             "transfers": transfers
                         }
                     except Exception as e:
@@ -560,17 +551,17 @@ if "override_analysis" in st.session_state:
         unsafe_allow_html=True,
     )
     with st.container(border=True):
-        st.caption(
-            "Review the AI's recommended transfers based on your variables. The dropdowns below are pre-filled with these suggestions. "
-            "You can accept them, customize them to explore other options, or hold your current squad."
-        )
         
         ov = st.session_state["override_analysis"]
         tr = ov["transfers"]
         
-        st.markdown("#### Recommended Transfers")
+        evals = tr.get("chip_evaluations", [])
+        if evals:
+            eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
+            st.markdown(_card(eval_html, "🎟️ Active Chip Analysis"), unsafe_allow_html=True)
+        
         moves = tr.get("transfers", [])
-        transfer_html = f'<div style="color:#475569;margin:4px 0 8px 0;">{tr.get("hit_advice", "")}</div>'
+        transfer_html = f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{tr.get("hit_advice", "")}</div>'
         if moves:
             for m in moves:
                 transfer_html += (
@@ -580,14 +571,18 @@ if "override_analysis" in st.session_state:
                 )
         else:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
-        st.markdown(_card(transfer_html, "🤖 AI Recommendations"), unsafe_allow_html=True)
+        st.markdown(_card(transfer_html, "⚙️ Optimized Transfers"), unsafe_allow_html=True)
 
         st.markdown("#### Confirm or Customize Transfers")
+        st.caption(
+            "Review the recommended transfers based on your variables. The dropdowns below are pre-filled with these suggestions. "
+            "You can accept them, customize them to explore other options, or hold your current squad."
+        )
         
         cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
         
         n_moves_default = len(moves)
-        n_moves = st.number_input("Number of transfers to apply", 0, 3, n_moves_default, key="n_moves_manual")
+        n_moves = st.number_input("Number of transfers to apply", 0, 15, min(n_moves_default, 15), key="n_moves_manual")
         
         out_ids, in_ids = [], []
         for i in range(int(n_moves)):
