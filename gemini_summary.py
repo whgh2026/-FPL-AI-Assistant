@@ -57,7 +57,7 @@ def _get_optimal_xi(squad):
 
 def write_summary(data: Dict[str, Any]) -> str:
     """
-    Takes 15 players and outputs the mathematically perfect lineup and bench.
+    Takes 15 players and outputs the mathematically perfect lineup, captaincy, and bench.
     """
     try:
         sections = []
@@ -79,7 +79,7 @@ def write_summary(data: Dict[str, Any]) -> str:
                     sections.append(line)
 
             total_xi_xp = sum(p["xp"] for p in xi)
-            sections.append(f"\n**Starting XI xP:** {total_xi_xp:.2f}\n")
+            sections.append(f"\n**Starting XI Projected Score:** {total_xi_xp:.2f} xP\n")
 
             # Captaincy
             xi_sorted = sorted(xi, key=lambda x: x["xp"], reverse=True)
@@ -94,14 +94,14 @@ def write_summary(data: Dict[str, Any]) -> str:
                 sections.append(f"• **Vice-Captain (VC):** {vcap['name']} ({vcap['team']}) — {vcap['xp']} xP\n")
 
             # Bench
-            sections.append(f"### Bench Priority")
+            sections.append(f"### Auto-Sub Bench Priority")
             sections.append("---")
             for i, p in enumerate(bench):
                 if i == 0 and p["position"] == "GK":
-                    sections.append(f"• GK Sub: {p['name']} ({p['team']}) — {p['xp']} xP")
+                    sections.append(f"• **GK Sub:** {p['name']} ({p['team']}) — {p['xp']} xP")
                 else:
                     sub_num = i if bench[0]['position'] == 'GK' else i + 1
-                    sections.append(f"• Sub {sub_num}: {p['name']} ({p['team']}) — {p['xp']} xP")
+                    sections.append(f"• **Sub {sub_num}:** {p['name']} ({p['team']}) — {p['xp']} xP")
 
         return "\n".join(sections)
 
