@@ -166,24 +166,6 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
         lookup[t].sort(key=lambda x: x["event"] if x["event"] is not None else 999)
     return lookup
 
-def _build_gameweek_map() -> Dict[int, Dict[int, int]]:
-    try:
-        fixtures = _get_fixtures()
-    except Exception:
-        return {}
-    gwm: Dict[int, Dict[int, int]] = {}
-    for f in fixtures:
-        ev = f.get("event")
-        if ev is None:
-            continue
-        gwm.setdefault(ev, {})
-        gwm[ev][f["team_h"]] = gwm[ev].get(f["team_h"], 0) + 1
-        gwm[ev][f["team_a"]] = gwm[ev].get(f["team_a"], 0) + 1
-    return gwm
-
-def _team_plays_near(gw_map: Dict[int, Dict[int, int]], team: int, ev: int) -> bool:
-    return gw_map.get(ev - 1, {}).get(team, 0) > 0 or gw_map.get(ev + 1, {}).get(team, 0) > 0
-
 def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
     chance = p.get("chance_of_playing_next_round")
     if chance is None:
@@ -289,11 +271,8 @@ def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]
     note = "Available"
     if status == "d":
         note = f"{chance_val}% Chance" if chance_val is not None else "Doubtful"
-    else:
-        if chance_val is not None and chance_val < 100:
-            note = f"{chance_val}% Chance"
-        elif min_frac < 0.7:
-            note = "Rotation Risk"
+    elif chance_val is not None and chance_val < 100:
+        note = f"{chance_val}% Chance"
 
     our_total = sum(_xp_for_fixture(p, f, 90.0 * min_frac, pos_id) for f in target)
 
@@ -305,17 +284,6 @@ def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]
 
     xp = _risk_adjust(p, xp, risk)
     return round(max(xp, 0.0), 2), note
-
-def get_gameweek_deadline(gw: int) -> str:
-    try:
-        bootstrap = _get_bootstrap()
-        for event in bootstrap.get("events", []):
-            if event["id"] == gw:
-                dt = dateutil.parser.isoparse(event["deadline_time"])
-                return dt.strftime("%A, %d %B at %H:%M")
-        return "Unknown Deadline"
-    except Exception:
-        return "Unknown Deadline"
 
 def get_upcoming_gameweek() -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
@@ -329,47 +297,6 @@ def get_upcoming_gameweek() -> Dict[str, Any]:
             }
     return {"id": gw, "name": f"Gameweek {gw}", "deadline_time": None}
 
-def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
-    manager_id = _clean_manager_id(manager_id)
-    try:
-        entry = requests.get(f"{BASE_URL}/entry/{manager_id}/", timeout=10).json()
-        started_event = int(entry.get("started_event") or 1)
-        if target_gw is None:
-            target_gw = _next_gameweek(_get_bootstrap())
-
-        history = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10).json()
-        transfers = requests.get(f"{BASE_URL}/entry/{manager_id}/transfers/", timeout=10).json()
-
-        transfers_per_event: Dict[int, int] = {}
-        for t in transfers:
-            ev = t.get("event")
-            if ev is not None:
-                transfers_per_event[int(ev)] = transfers_per_event.get(int(ev), 0) + 1
-
-        reset_events = set()
-        for c in history.get("chips", []):
-            if (c.get("name") or "").lower() in ("wildcard", "freehit"):
-                reset_events.add(int(c.get("event") or 0))
-
-        ft = 1
-        for ev in range(started_event, int(target_gw)):
-            if ev in reset_events:
-                ft = 1
-            else:
-                ft = min(ft + 1, 5)
-                made = transfers_per_event.get(ev, 0)
-                ft = max(ft - made, 0)
-
-        if int(target_gw) in reset_events:
-            ft = 1
-        else:
-            made_this_week = transfers_per_event.get(int(target_gw), 0)
-            ft = max(ft - made_this_week, 0)
-
-        return ft
-    except Exception:
-        return 1
-
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str) -> Dict[str, Any]:
     return {
         "id": e["id"],
@@ -381,19 +308,6 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         "xp": xp,
         "status": note,
     }
-
-def _build_pool(bootstrap: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: int, risk: str = "balanced") -> List[Dict[str, Any]]:
-    teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
-    pool = []
-    for p in bootstrap["elements"]:
-        pos = POS_MAP.get(p["element_type"])
-        if not pos:
-            continue
-        xp, note = _player_xp(p, fixture_lookup, event=event, risk=risk)
-        if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable"):
-            continue
-        pool.append(_pool_entry(p, teams_by_id, xp, note, pos))
-    return pool
 
 def _solve_squad(
     pool: List[Dict[str, Any]],
@@ -490,14 +404,27 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
         "squad": squad
     }
 
-def suggest_transfers_for_custom_squad(squad: List[Dict[str, Any]], bank: float, free_transfers: int, event: Optional[int] = None, risk: str = "balanced") -> Dict[str, Any]:
+def suggest_transfers_for_custom_squad(
+    squad: List[Dict[str, Any]], 
+    bank: float, 
+    free_transfers: int, 
+    active_chip: str = "None",
+    event: Optional[int] = None, 
+    risk: str = "balanced"
+) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
     fixture_lookup = _build_fixture_lookup(bootstrap)
     teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
     if event is None:
         event = _next_gameweek(bootstrap)
 
-    hit_cost = _risk_profile(risk)["hit_cost"]
+    if active_chip in ("Wildcard", "Free Hit"):
+        hit_cost = 0.0
+        free_transfers = 15
+        max_transfers = 15
+    else:
+        hit_cost = _risk_profile(risk)["hit_cost"]
+        max_transfers = free_transfers + MAX_HIT_TRANSFERS
 
     elements_by_id = {e["id"]: e for e in bootstrap["elements"]}
     current_ids = [p["player_id"] for p in squad]
@@ -532,7 +459,7 @@ def suggest_transfers_for_custom_squad(squad: List[Dict[str, Any]], bank: float,
         pool,
         budget=budget,
         must_include_ids=set(current_ids),
-        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS},
+        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": max_transfers},
     )
 
     if selected is None:
@@ -561,13 +488,15 @@ def suggest_transfers_for_custom_squad(squad: List[Dict[str, Any]], bank: float,
         })
 
     n = len(moves)
-    hits = max(0, n - free_transfers)
+    hits = 0 if active_chip in ("Wildcard", "Free Hit") else max(0, n - free_transfers)
     total_gain = round(sum(m["xp_gain"] for m in moves), 2)
     net_gain = round(total_gain - hit_cost * hits, 2)
     cost_change = round(sum(m["cost"] for m in moves), 2)
 
     if n == 0:
         advice = "Hold — no transfer improves your squad this week."
+    elif active_chip in ("Wildcard", "Free Hit"):
+        advice = f"{active_chip} active — {n} transfers planned with 0 point penalties."
     elif hits == 0:
         advice = f"Make {n} free transfer(s) — no points hit."
     else:
@@ -579,33 +508,6 @@ def suggest_transfers_for_custom_squad(squad: List[Dict[str, Any]], bank: float,
         "net_gain": net_gain,
         "cost_change": cost_change,
         "hit_advice": advice,
-    }
-
-def suggest_weekly_transfers(manager_id: str, gw: int, free_transfers: int, risk: str = "balanced") -> Dict[str, Any]:
-    squad_res = score_my_squad(manager_id, gw, risk=risk)
-    if "error" in squad_res:
-        return squad_res
-    transfers = suggest_transfers_for_custom_squad(squad_res["squad"], squad_res["bank"], free_transfers, event=gw, risk=risk)
-    return {**squad_res, **transfers}
-
-def optimise_full_squad(budget: float = 100.0, event: Optional[int] = None, risk: str = "balanced") -> Dict[str, Any]:
-    bootstrap = _get_bootstrap()
-    fixture_lookup = _build_fixture_lookup(bootstrap)
-    if event is None:
-        event = _next_gameweek(bootstrap)
-
-    pool = _build_pool(bootstrap, fixture_lookup, event, risk=risk)
-    selected, _ = _solve_squad(pool, budget=budget)
-    if selected is None:
-        return {"error": "No feasible squad under this budget (or `pulp` missing)."}
-
-    by_id = {p["id"]: p for p in pool}
-    squad = [by_id[pid] for pid in selected]
-    return {
-        "budget": budget,
-        "total_price": round(sum(p["price"] for p in squad), 1),
-        "total_xp": round(sum(p["xp"] for p in squad), 2),
-        "squad": squad,
     }
 
 def rank_players_by_xp(position: str = None, max_price: float = None, limit: int = 20, event: Optional[int] = None, risk: str = "balanced") -> Dict[str, Any]:
@@ -698,112 +600,4 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
         "captain": captain,
         "vice_captain": vice,
         "total_xp": round(sum(p.get("xp", 0) for p in best_xi), 2),
-    }
-
-def recommend_chips(bootstrap: Dict[str, Any], squad: List[Dict[str, Any]], gw_map: Dict[int, Dict[int, int]], event: int) -> List[Dict[str, Any]]:
-    teams = {t["id"]: t for t in bootstrap.get("teams", [])}
-    name_to_id = {t["name"].lower(): t["id"] for t in teams.values()}
-
-    upcoming = [e for e in bootstrap.get("events", []) if not e.get("finished")][:8]
-
-    dgw_events: Dict[int, List[int]] = {}
-    blank_events: Dict[int, List[int]] = {}
-    for e in upcoming:
-        ev = e["id"]
-        counts = gw_map.get(ev, {})
-        if not counts:
-            continue
-        doublers = [t for t, c in counts.items() if c >= 2]
-        if doublers:
-            dgw_events[ev] = doublers
-        blanks = [t for t in teams if counts.get(t, 0) == 0 and _team_plays_near(gw_map, t, ev)]
-        if blanks:
-            blank_events[ev] = blanks
-
-    squad_team_ids = set()
-    for p in squad:
-        tid = p.get("team_id")
-        if tid is None:
-            tid = name_to_id.get((p.get("team") or "").lower())
-        if tid is not None:
-            squad_team_ids.add(tid)
-
-    def team_of(p):
-        tid = p.get("team_id")
-        return tid if tid is not None else name_to_id.get((p.get("team") or "").lower())
-
-    chips = []
-
-    if dgw_events:
-        ev = min(dgw_events)
-        doublers = set(dgw_events[ev])
-        cands = [p for p in squad if team_of(p) in doublers]
-        cands.sort(key=lambda x: x.get("xp", 0), reverse=True)
-        if cands:
-            chips.append({"chip": "Triple Captain", "action": "Use", "gameweek": ev,
-                          "detail": f"Consider Triple Captain on {cands[0]['name']} in GW{ev} (double gameweek)."})
-        else:
-            chips.append({"chip": "Triple Captain", "action": "Hold", "gameweek": None,
-                          "detail": f"Double gameweek in GW{ev}, but none of your players doubles."})
-    else:
-        chips.append({"chip": "Triple Captain", "action": "Hold", "gameweek": None,
-                      "detail": "No double gameweek announced in the next 8 gameweeks."})
-
-    bb_ev = next((ev for ev in sorted(dgw_events) if len(dgw_events[ev]) >= 8), None)
-    if bb_ev:
-        chips.append({"chip": "Bench Boost", "action": "Plan", "gameweek": bb_ev,
-                      "detail": f"{len(dgw_events[bb_ev])} teams double in GW{bb_ev} — strong Bench Boost week."})
-    else:
-        chips.append({"chip": "Bench Boost", "action": "Hold", "gameweek": None,
-                      "detail": "No mass double gameweek detected — save Bench Boost."})
-
-    fh_ev = None
-    for ev in sorted(blank_events):
-        blanks = set(blank_events[ev])
-        if sum(1 for tid in squad_team_ids if tid in blanks) >= 3:
-            fh_ev = ev
-            break
-    if fh_ev:
-        n_blank = sum(1 for tid in squad_team_ids if tid in set(blank_events[fh_ev]))
-        chips.append({"chip": "Free Hit", "action": "Consider", "gameweek": fh_ev,
-                      "detail": f"{n_blank} of your players blank in GW{fh_ev} — Free Hit could cover them."})
-    else:
-        chips.append({"chip": "Free Hit", "action": "Hold", "gameweek": None,
-                      "detail": "No significant blank gameweek for your squad detected."})
-
-    wc_reason = None
-    if dgw_events:
-        ev = min(dgw_events)
-        n_double = sum(1 for tid in squad_team_ids if tid in set(dgw_events[ev]))
-        if n_double <= 3:
-            wc_reason = f"Only {n_double} of your players double in GW{ev} — a Wildcard could restructure for it."
-    if wc_reason:
-        chips.append({"chip": "Wildcard", "action": "Consider", "gameweek": None, "detail": wc_reason})
-    else:
-        chips.append({"chip": "Wildcard", "action": "Hold", "gameweek": None,
-                      "detail": "Squad is well-positioned; no Wildcard trigger detected."})
-
-    return chips
-
-def build_gameweek_briefing(manager_id: str, gw: int, free_transfers: int, risk: str = "balanced") -> Dict[str, Any]:
-    bootstrap = _get_bootstrap()
-    squad_res = score_my_squad(manager_id, gw, risk=risk)
-    if "error" in squad_res:
-        return squad_res
-
-    transfers = suggest_transfers_for_custom_squad(squad_res["squad"], squad_res["bank"], free_transfers, event=gw, risk=risk)
-    lineup = select_starting_xi(squad_res["squad"])
-    gw_map = _build_gameweek_map()
-    chips = recommend_chips(bootstrap, squad_res["squad"], gw_map, gw)
-
-    return {
-        **squad_res,
-        "risk": risk,
-        "transfers": transfers["transfers"],
-        "hits": transfers["hits"],
-        "net_gain": transfers["net_gain"],
-        "cost_change": transfers["cost_change"],
-        "hit_advice": transfers["hit_advice"],
-        "starting_xi": lineup,
-        "chips": chips,
     }
