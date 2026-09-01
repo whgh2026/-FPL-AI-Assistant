@@ -80,6 +80,7 @@ CSS = """
   .stat-badge {display:inline-block; font-size:0.6rem; font-weight:700; padding:1px 5px; border-radius:4px; margin-left:4px; white-space:nowrap; vertical-align: middle;}
   .stat-out {background:#fee2e2; color:#b91c1c; border:1px solid #fecaca;}
   .stat-doubt {background:#fef3c7; color:#b45309; border:1px solid #fde68a;}
+  .chip-banner {background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 5px solid #16a34a; border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; font-size: 0.9rem; color: #166534;}
   .override-head {background: #fff7ed; border: 1px solid #fed7aa; border-left: 6px solid #f59e0b;
          border-radius: 14px 14px 0 0; padding: 16px 20px; font-size: 1.15rem; font-weight: 800;
          color: #9a3412; margin-top: 26px;}
@@ -355,11 +356,27 @@ with st.container(border=True):
         st.error("⚠️ " + preview["error"])
         st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
     elif preview:
-        # Metrics Grouping
+        # Row 1 of Baseline figures
         m1, m2, m3 = st.columns(3)
         m1.metric("Team", preview["team_name"])
         m2.metric("Bank", f"£{preview['bank']}m")
         m3.metric("Team value", f"£{preview['team_value']}m")
+
+        squad = preview.get("squad", [])
+        starters, bench = _api_starters_bench(squad)
+        cap = next((p for p in squad if p.get("is_captain")), None)
+        vc = next((p for p in squad if p.get("is_vice_captain")), None)
+
+        st_xp = round(sum(p.get("xp", 0) for p in starters), 2)
+        if cap: st_xp += cap.get("xp", 0)
+        be_xp = round(sum(p.get("xp", 0) for p in bench), 2)
+        tot_xp = round(st_xp + be_xp, 2)
+        
+        # Row 2 of Baseline figures (Directly following before the divider)
+        x1, x2, x3 = st.columns(3)
+        x1.metric("🛡️ Starting XI xP", f"{st_xp} xP")
+        x2.metric("🪑 Bench xP", f"{be_xp} xP")
+        x3.metric("📊 Total Squad xP", f"{tot_xp} xP")
 
         # Underline and Variables confirmation 
         st.markdown("---")
@@ -378,11 +395,6 @@ with st.container(border=True):
                 default=[],
                 key="step1_chip_input"
             )
-
-        squad = preview.get("squad", [])
-        starters, bench = _api_starters_bench(squad)
-        cap = next((p for p in squad if p.get("is_captain")), None)
-        vc = next((p for p in squad if p.get("is_vice_captain")), None)
 
         # Baseline Team Sheet 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -551,17 +563,44 @@ if "override_analysis" in st.session_state:
         unsafe_allow_html=True,
     )
     with st.container(border=True):
-        
         ov = st.session_state["override_analysis"]
         tr = ov["transfers"]
         
+        # 1. Chip Evaluation and Mathematical Recommendation
         evals = tr.get("chip_evaluations", [])
         if evals:
             eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
-            st.markdown(_card(eval_html, "🎟️ Active Chip Analysis"), unsafe_allow_html=True)
+            st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
+
+        rec_chip = tr.get("recommended_chip", "None")
+        valid_chips = [c for c in ov.get("chips", []) if c in ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]]
+        chip_options = ["None (Hold Chips)"] + valid_chips
         
-        moves = tr.get("transfers", [])
-        transfer_html = f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{tr.get("hit_advice", "")}</div>'
+        def_chip_idx = 0
+        if rec_chip in chip_options:
+            def_chip_idx = chip_options.index(rec_chip)
+
+        st.markdown("#### Confirm Active Chip")
+        confirmed_chip = st.radio(
+            "Select which chip you will play this Gameweek (Only 1 allowed):",
+            chip_options,
+            index=def_chip_idx,
+            horizontal=True,
+            key="confirmed_chip_radio"
+        )
+        st.session_state["active_confirmed_chip"] = confirmed_chip
+
+        st.markdown("---")
+        
+        # Determine active moves based on whether a full squad reset chip was confirmed
+        if confirmed_chip in ("Wildcard", "Free Hit"):
+            moves = tr.get("wildcard_transfers", tr.get("transfers", []))
+            transfer_advice = f"<b>{confirmed_chip} Active:</b> {len(moves)} transfers planned with 0 point penalties."
+        else:
+            moves = tr.get("standard_transfers", tr.get("transfers", []))
+            transfer_advice = tr.get("hit_advice", "")
+
+        transfer_html = f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
         if moves:
             for m in moves:
                 transfer_html += (
@@ -640,6 +679,7 @@ if "override_analysis" in st.session_state:
                             })
                             
                         lineup = fpl_tools.select_starting_xi(analysed_final)
+                        lineup["confirmed_chip"] = confirmed_chip
                         st.session_state["manual_final"] = lineup
 
             if errors:
@@ -660,8 +700,26 @@ if man_final:
         xi = man_final
         cap = xi["captain"]
         vcap = xi["vice_captain"]
+        active_chip = xi.get("confirmed_chip", "None (Hold Chips)")
         
+        is_tc = "Triple Captain" in active_chip
+        is_bb = "Bench Boost" in active_chip
+        is_wc = "Wildcard" in active_chip
+        is_fh = "Free Hit" in active_chip
+
+        # Active Chip banner display
+        if is_tc:
+            st.markdown(f'<div class="chip-banner">⭐ <b>Triple Captain Active:</b> {cap["name"]}\'s score is multiplied by 3!</div>', unsafe_allow_html=True)
+        elif is_bb:
+            st.markdown('<div class="chip-banner">🚀 <b>Bench Boost Active:</b> All 4 bench players actively score points towards your Gameweek total!</div>', unsafe_allow_html=True)
+        elif is_wc or is_fh:
+            st.markdown(f'<div class="chip-banner">🃏 <b>{active_chip} Active:</b> Squad restructured with 0 transfer point hits applied.</div>', unsafe_allow_html=True)
+
         st_xp = xi["total_xp"]
+        if is_tc and cap:
+            # Add extra 1x of captain's xp (captain is normally 2x, now 3x)
+            st_xp = round(st_xp + cap.get("xp", 0), 2)
+            
         be_xp = round(sum(p.get("xp", 0) for p in xi["bench"]), 2)
         tot_xp = round(st_xp + be_xp, 2)
         
@@ -674,7 +732,11 @@ if man_final:
         st.markdown(_card(sheet, f'🛡️ Final Starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · VC = Vice-Captain'), unsafe_allow_html=True)
         st.markdown(CAVEAT_HTML, unsafe_allow_html=True)
         
-        cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — Captain</div><div class="xp" style="color:#f59e0b; margin-top:4px;">{cap["xp"]} xP (×2 = {cap["xp"]*2:.1f})</div></div>'
+        mult_str = "×3" if is_tc else "×2"
+        mult_val = cap["xp"] * 3 if is_tc else cap["xp"] * 2
+        cap_role_title = "Captain (Triple Captain Active)" if is_tc else "Captain"
+        
+        cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:#f59e0b; margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.1f} xP)</div></div>'
         if vcap:
             cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div style="margin-bottom:2px;" class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:#475569; margin-top:4px;">{vcap["xp"]} xP</div></div>'
         cap_html += "</div>"
