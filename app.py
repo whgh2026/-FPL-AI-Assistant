@@ -328,18 +328,12 @@ st.markdown(
 
 st.markdown(
     '<div class="overview">'
-    '<b>📊 Your Personal FPL Quant Engine</b><br><br>'
-    'This system operates as a fully automated quantitative analyst for your Fantasy Premier League team. '
-    'It removes human bias by combining predictive modelling, mathematical optimisation, and continuous machine learning:<br><br>'
-    '• <b>The Baseline Projections:</b> It calculates Expected Points (xP) for every player by aggregating '
-    'underlying statistics, fixture difficulty ratings, and positional baselines.<br><br>'
-    '• <b>The Optimiser:</b> It runs a linear programming algorithm (solving the &#39;knapsack problem&#39;) to find '
-    'the mathematically optimal transfers, starting XI, and captaincy — respecting your specific budget, chip '
-    'strategy, and transfer constraints.<br><br>'
-    '• <b>The Self-Learning Loop:</b> The engine is self-correcting. Every week, a background pipeline logs the '
-    'Friday xP projections, ingests the Tuesday actual real-world results, calculates its own margin of error, and '
-    'automatically rewrites its underlying mathematical weights via GitHub Actions to get continuously smarter as '
-    'the season progresses.'
+    '<b>The Self-Learning Quant Engine</b><br><br>'
+    'Most FPL tools are just static calculators. This is a living quantitative model. Every Gameweek, our '
+    'background SQL engine logs the mathematical forecasts, cross-references them against actual Premier League '
+    'results, and analyses the margin of error. It then autonomously recalibrates its own statistical weights.<br><br>'
+    'Put simply: it learns from reality. The deeper we get into the season, the smarter and more ruthless the '
+    'algorithm becomes, giving you a compounding edge over your mini-league rivals.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -1035,6 +1029,85 @@ if man_final:
 
 
 # ------------------------------------------------------------------
+# Expert AI Analysis (visible after Step 4)
+# ------------------------------------------------------------------
+with st.container(border=True):
+    st.markdown("### 🧠 Expert AI Analysis")
+    lineup = st.session_state.get("manual_final")
+    if not lineup:
+        st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
+    else:
+        run_macro = st.button("AI Summary of Changes and Forecast for the Next Gameweek", type="secondary", key="btn_deepseek")
+        if run_macro:
+            with st.spinner("Consulting the macro planner…"):
+                api_key = os.environ.get("DEEPSEEK_API_KEY")
+                if not api_key:
+                    st.warning("API key missing. Please configure the environment variable.")
+                else:
+                    try:
+                        tr = st.session_state.get("override_analysis", {}).get("transfers", {})
+                        moves = tr.get("transfers", tr.get("standard_transfers", []))
+                        hits = int(tr.get("hits", 0))
+                        hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
+                        total_hit = hits * hit_cost
+
+                        xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("xi", []))
+                        bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("bench", []))
+                        move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in moves) or "None (holding)"
+
+                        context = (
+                            f"Starting XI: {xi_str}\n"
+                            f"Bench: {bench_str}\n"
+                            f"Proposed transfers: {move_str}\n"
+                            f"Total point hit cost: -{total_hit}\n"
+                        )
+
+                        system_prompt = (
+                            "You are a former overall Fantasy Premier League winner and quantitative macro planner. "
+                            "Evaluate the user's squad over a 4-gameweek tactical window. Be concise, highly tactical, "
+                            "and data-driven. Return exactly 3-4 short bullet points."
+                        )
+                        user_prompt = (
+                            "Evaluate this FPL squad over the next 4 gameweeks and give 3-4 concise tactical bullets "
+                            "using these benchmark rules:\n"
+                            "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
+                            "validate structural health and endorse rolling the transfer for future leverage.\n"
+                            "2. 'Crisis' Benchmark (Wildcard trigger): if it recommends a -8 hit or worse, or flags "
+                            "widespread injury/suspension disruption, advise overriding the point hits and deploying the Wildcard.\n"
+                            "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
+                            "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
+                            "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
+                            "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n\n"
+                            f"Team context:\n{context}"
+                        )
+
+                        resp = requests.post(
+                            "https://api.deepseek.com/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json={
+                                "model": "deepseek-v4-flash",
+                                "messages": [
+                                    {"role": "system", "content": system_prompt},
+                                    {"role": "user", "content": user_prompt},
+                                ],
+                                "temperature": 0.4,
+                            },
+                            timeout=30,
+                        )
+                        resp.raise_for_status()
+                        st.session_state["deepseek_result"] = resp.json()["choices"][0]["message"]["content"]
+                    except Exception as e:
+                        st.error(f"API Request Failed: {str(e)}")
+
+        result = st.session_state.get("deepseek_result")
+        if result:
+            st.markdown(result)
+
+
+# ------------------------------------------------------------------
 # Player Scout
 # ------------------------------------------------------------------
 with st.expander("📊 Player Scout & xP Rankings", expanded=False):
@@ -1062,83 +1135,3 @@ with st.expander("📊 Player Scout & xP Rankings", expanded=False):
         st.markdown(_card(html, "📈 Ranked by xP"), unsafe_allow_html=True)
         st.markdown(get_caveat_html(), unsafe_allow_html=True)
 
-
-# ------------------------------------------------------------------
-# DeepSeek Macro Strategy & Schedule Intelligence
-# ------------------------------------------------------------------
-with st.expander("🧠 DeepSeek Macro Strategy & Schedule Intelligence", expanded=False):
-    lineup = st.session_state.get("manual_final")
-    if not lineup:
-        st.info("Generate your final lineup (Step 4) to unlock macro qualitative analysis.")
-    else:
-        run_macro = st.button("🧠 Generate Macro Analysis", type="secondary", key="btn_deepseek")
-        if run_macro:
-            with st.spinner("Consulting the macro planner…"):
-                try:
-                    api_key = os.environ.get("DEEPSEEK_API_KEY")
-                    if not api_key:
-                        raise RuntimeError("DEEPSEEK_API_KEY not set")
-
-                    tr = st.session_state.get("override_analysis", {}).get("transfers", {})
-                    moves = tr.get("transfers", tr.get("standard_transfers", []))
-                    hits = int(tr.get("hits", 0))
-                    hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
-                    total_hit = hits * hit_cost
-
-                    xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("xi", []))
-                    bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("bench", []))
-                    move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in moves) or "None (holding)"
-
-                    context = (
-                        f"Starting XI: {xi_str}\n"
-                        f"Bench: {bench_str}\n"
-                        f"Proposed transfers: {move_str}\n"
-                        f"Total point hit cost: -{total_hit}\n"
-                    )
-
-                    system_prompt = (
-                        "You are a former overall Fantasy Premier League winner and quantitative macro planner. "
-                        "Evaluate the user's squad over a 4-gameweek tactical window. Be concise, highly tactical, "
-                        "and data-driven. Return exactly 3-4 short bullet points."
-                    )
-                    user_prompt = (
-                        "Evaluate this FPL squad over the next 4 gameweeks and give 3-4 concise tactical bullets "
-                        "using these benchmark rules:\n"
-                        "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
-                        "validate structural health and endorse rolling the transfer for future leverage.\n"
-                        "2. 'Crisis' Benchmark (Wildcard trigger): if it recommends a -8 hit or worse, or flags "
-                        "widespread injury/suspension disruption, advise overriding the point hits and deploying the Wildcard.\n"
-                        "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
-                        "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
-                        "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
-                        "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n\n"
-                        f"Team context:\n{context}"
-                    )
-
-                    resp = requests.post(
-                        "https://api.deepseek.com/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": "deepseek-v4-flash",
-                            "messages": [
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt},
-                            ],
-                            "temperature": 0.4,
-                        },
-                        timeout=30,
-                    )
-                    resp.raise_for_status()
-                    st.session_state["deepseek_result"] = resp.json()["choices"][0]["message"]["content"]
-                except Exception:
-                    st.session_state["deepseek_result"] = "Set DEEPSEEK_API_KEY to unlock macro qualitative analysis."
-
-        result = st.session_state.get("deepseek_result")
-        if result:
-            if result == "Set DEEPSEEK_API_KEY to unlock macro qualitative analysis.":
-                st.info(result)
-            else:
-                st.markdown(result)
