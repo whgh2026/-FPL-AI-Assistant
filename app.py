@@ -122,6 +122,7 @@ CSS = """
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   .mc-meta {color:#64748b; font-size:0.7rem; margin-top:2px;}
   .mc-xp {font-weight:800; font-size:0.8rem; margin-top:3px; color:#0f172a;}
+  .alert-box {background: #fff1f2; border: 1px solid #fecdd3; border-left: 4px solid #e11d48; padding: 12px 16px; border-radius: 8px; margin: 10px 0;}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -417,12 +418,12 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
             key="ov_chips"
         )
         
-        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("#### 2. Midweek Transfers")
+        show_override = st.checkbox("🚨 **I have already made midweek transfers** (Click to manually update your squad or upload a screenshot)", key="cb_override")
         
-        # ------------------------------------------------------------------
-        # The Fast-Lane Expander
-        # ------------------------------------------------------------------
-        with st.expander("👉 🛠️ Have you already made midweek transfers? Click here to update your squad."):
+        override_squad = []
+        if show_override:
             st.caption("Upload a screenshot or adjust the dropdowns to match your live 15-man squad.")
             
             try:
@@ -488,7 +489,6 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                             default_selections[pos].append(idx)
                         break
 
-            override_squad = []
             quotas = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
             
             for pos, count in quotas.items():
@@ -522,7 +522,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Run Algorithmic Optimizer", type="primary", use_container_width=True, key="btn_analyse_override"):
             
-            active_squad_ids = override_squad if override_squad else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
+            active_squad_ids = override_squad if show_override else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
             
             if len(active_squad_ids) != 15:
                 st.error("⚠️ Ensure you have exactly 15 valid players selected before continuing.")
@@ -576,6 +576,7 @@ if "override_analysis" in st.session_state:
         ov = st.session_state["override_analysis"]
         tr = ov["transfers"]
         
+        # 1. Chip Evaluation and Mathematical Recommendation
         evals = tr.get("chip_evaluations", [])
         if evals:
             eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
@@ -623,8 +624,8 @@ if "override_analysis" in st.session_state:
 
         st.markdown("#### Confirm or Customize Transfers")
         st.caption(
-            "Review the recommended transfers based on your variables. The dropdowns below are pre-filled with these suggestions. "
-            "You can accept them, customize them to explore other options, or hold your current squad."
+            "Review the recommended transfers based on your variables. The dropdowns below default to the AI suggestions. "
+            "You can accept them, customize them, or hold your current squad."
         )
         
         cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
@@ -684,6 +685,18 @@ if "override_analysis" in st.session_state:
                     if iid in new_ids: errors.append("You already own that player.")
                     new_ids.append(iid)
 
+            if not errors and not hold_btn:
+                # Manual Budget Validation
+                try:
+                    original_cost = sum(players_by_id[p["player_id"]]["now_cost"] / 10.0 for p in ov["analysed_squad"] if p["player_id"] in players_by_id)
+                    new_cost = sum(players_by_id[pid]["now_cost"] / 10.0 for pid in new_ids if pid in players_by_id)
+                    available_budget = original_cost + ov["bank"]
+                    
+                    if new_cost > available_budget + 0.001: # Float tolerance
+                        errors.append(f"Not enough funds! Your manual transfers cost £{new_cost:.1f}m, but your maximum budget is £{available_budget:.1f}m.")
+                except Exception:
+                    pass
+
             if not errors:
                 counts = {"GK": 0, "DEF": 0, "MID": 0, "FWD": 0}
                 for pid in new_ids:
@@ -711,7 +724,7 @@ if "override_analysis" in st.session_state:
                         st.session_state["manual_final"] = lineup
 
             if errors:
-                for e in errors: st.error(e)
+                for e in errors: st.markdown(f'<div class="alert-box">{e}</div>', unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
 # Step 4 — Final Lineup Output
