@@ -328,12 +328,20 @@ st.markdown(
 
 st.markdown(
     '<div class="overview">'
-    '<b>The Self-Learning Quant Engine</b><br><br>'
-    'Most FPL tools are just static calculators. This is a living quantitative model. Every Gameweek, our '
-    'background SQL engine logs the mathematical forecasts, cross-references them against actual Premier League '
-    'results, and analyses the margin of error. It then autonomously recalibrates its own statistical weights.<br><br>'
-    'Put simply: it learns from reality. The deeper we get into the season, the smarter and more ruthless the '
-    'algorithm becomes, giving you a compounding edge over your mini-league rivals.'
+    '<b>📊 Your Personal FPL Quant Engine</b><br><br>'
+    'This system operates as a fully automated quantitative analyst for your Fantasy Premier League team. '
+    'It removes human bias by combining predictive modelling, mathematical optimisation, and continuous machine learning:<br><br>'
+    '• <b>The Baseline Projections:</b> It calculates Expected Points (xP) for every player by aggregating '
+    'underlying statistics, fixture difficulty ratings, and positional baselines.<br><br>'
+    '• <b>The Optimiser:</b> It runs a linear programming algorithm (solving the &#39;knapsack problem&#39;) to find '
+    'the mathematically optimal transfers, starting XI, and captaincy — respecting your specific budget, chip '
+    'strategy, and transfer constraints.<br><br>'
+    '• <b>The Self-Learning Quant Engine:</b> <b>Most FPL tools are just static calculators. This is a living '
+    'quantitative model.</b> Every Gameweek, our background SQL engine logs the mathematical forecasts, '
+    'cross-references them against actual Premier League results, and analyses the margin of error. It then '
+    'autonomously recalibrates its own statistical weights. Put simply: it learns from reality. The deeper we get '
+    'into the season, the smarter and more ruthless the algorithm becomes, giving you a compounding edge over your '
+    'mini-league rivals.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -353,10 +361,10 @@ risk_label = st.radio(
 )
 st.markdown(
     "- **Balanced:** Standard transfer hurdle rate; balanced risk-reward profile.\n"
-    "- **Conservative:** High hurdle rate; prioritises rolling and banking free transfers.\n"
+    "- **Conservative:** High hurdle rate; prioritises rolling and banking free transfers. (Park the Bus)\n"
     "- **Aggressive:** Lower hurdle rate; accepts point hits (-4) if immediate xP upside justifies it.\n"
     "- **Rank Protecting (Shield):** Weights effective ownership (EO) to mirror template picks and defend high ranks.\n"
-    "- **Rank Chasing (Hunting):** Deprecates template picks; targets low-ownership differentials with high underlying xGI."
+    "- **Rank Chasing (Hunting):** Deprecates template picks; targets low-ownership differentials with high underlying xGI. (Fergie Time — High risk, high reward)"
 )
 
 # ------------------------------------------------------------------
@@ -375,7 +383,7 @@ with st.container(border=True):
     col1, col2 = st.columns([3, 1])
     with col1:
         manager_id = st.text_input(
-            "Manager ID",
+            "Enter your FPL Manager ID (We promise not to laugh at your overall rank)",
             key="mid_input",
             help="Your unique FPL ID — the number in your team-page URL.",
         )
@@ -459,7 +467,7 @@ with st.container(border=True):
 # ------------------------------------------------------------------
 if st.session_state.get("squad_preview") and not "error" in st.session_state.get("squad_preview"):
     st.markdown(
-        '<div class="override-head">Step 2: Verify Variables & Midweek Changes</div>',
+        '<div class="override-head">Step 2: The Gaffer&#39;s Override (Force Players In/Out)</div>',
         unsafe_allow_html=True,
     )
 
@@ -591,7 +599,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                             override_squad.append(selected[0])
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Run Algorithmic Optimiser", type="primary", use_container_width=True, key="btn_analyse_override"):
+        if st.button("⚽ Run the Numbers (In the Engine We Trust)", type="primary", use_container_width=True, key="btn_analyse_override"):
             
             active_squad_ids = override_squad if show_override else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
             
@@ -812,8 +820,7 @@ if "override_analysis" in st.session_state:
         st.markdown("---")
         st.markdown("#### Or, Customise Your Transfers Below")
         st.caption(
-            "Review or modify the recommended moves. You can adjust the transfer count, customise individual player selections, "
-            "or accept the Quant defaults below."
+            "The Transfer Market: Where seasons are made or ruined. Lock in your moves below."
         )
 
         cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
@@ -1032,14 +1039,14 @@ if man_final:
 # Expert AI Analysis (visible after Step 4)
 # ------------------------------------------------------------------
 with st.container(border=True):
-    st.markdown("### 🧠 Expert AI Analysis")
+    st.markdown("### 🤖 AI Assistant Coach Overview")
     lineup = st.session_state.get("manual_final")
     if not lineup:
         st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
     else:
-        run_macro = st.button("AI Summary of Changes and Forecast for the Next Gameweek", type="secondary", key="btn_deepseek")
+        run_macro = st.button("AI Summary of Changes and Forecast for the Next Gameweek", type="primary", key="btn_deepseek")
         if run_macro:
-            with st.spinner("Consulting the macro planner…"):
+            with st.spinner("Consulting the AI assistant coach to get their thoughts..."):
                 api_key = os.environ.get("DEEPSEEK_API_KEY")
                 if not api_key:
                     st.warning("API key missing. Please configure the environment variable.")
