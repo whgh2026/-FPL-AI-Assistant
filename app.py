@@ -629,15 +629,43 @@ if "override_analysis" in st.session_state:
         if last_chip_tracked != confirmed_chip or "n_moves_manual" not in st.session_state:
             st.session_state["n_moves_manual"] = target_default_moves
             st.session_state["last_confirmed_chip_tracker"] = confirmed_chip
+            # Reset stale manual-transfer dropdown selections so the new chip's
+            # recommended moves re-initialise the dropdowns from scratch.
+            for k in list(st.session_state.keys()):
+                if k.startswith("man_out_") or k.startswith("man_in_"):
+                    st.session_state.pop(k, None)
 
-        c_fast1, c_fast2 = st.columns([2, 1])
+        c_fast1, c_fast2 = st.columns(2)
         with c_fast1:
             fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
+        with c_fast2:
+            accept_all = st.button("✅ Accept All AI Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
         
         if fast_hold:
             with st.spinner("Generating Final Lineup with current squad…"):
                 analysed_current = ov["analysed_squad"]
                 lineup = fpl_tools.select_starting_xi(analysed_current)
+                lineup["confirmed_chip"] = confirmed_chip
+                st.session_state["manual_final"] = lineup
+                st.rerun()
+
+        if accept_all:
+            with st.spinner("Applying AI transfers and generating final lineup…"):
+                sold_ids = {m["out"]["id"] for m in moves}
+                final_squad = [p for p in ov["analysed_squad"] if p["player_id"] not in sold_ids]
+                for m in moves:
+                    final_squad.append({
+                        "player_id": m["in"]["id"],
+                        "name": m["in"]["name"],
+                        "team": m["in"]["team"],
+                        "team_id": m["in"]["team_id"],
+                        "position": m["in"]["position"],
+                        "price": m["in"]["price"],
+                        "xp": m["in"]["xp"],
+                        "status": m["in"]["status"],
+                        "is_captain": False,
+                    })
+                lineup = fpl_tools.select_starting_xi(final_squad)
                 lineup["confirmed_chip"] = confirmed_chip
                 st.session_state["manual_final"] = lineup
                 st.rerun()
@@ -676,6 +704,8 @@ if "override_analysis" in st.session_state:
 
         cur_id_to_pos = {p["player_id"]: p["position"] for p in ov["analysed_squad"]}
 
+        # Render rows in the exact priority order of `moves` (same as the
+        # "Optimized Transfers" card). Reducing n_moves shows only the top N rows.
         for i in range(int(n_moves)):
             c1, c2 = st.columns(2)
             def_out_idx = 0

@@ -35,6 +35,9 @@ POS_COUNTS = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
 # thresholds used to model the +2 point bonus (DEF: 10 CBIT, MID/FWD: 12 CBIRT).
 DEFCON_BASE_PER90 = {2: 8.0, 3: 5.0, 4: 2.5}
 DEFCON_THRESHOLD = {2: 10, 3: 12, 4: 12}
+# Transfer friction: positional penalty applied per player sold, so the solver
+# won't churn a goalkeeper (or, to a lesser extent, a defender) for a marginal gain.
+TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 OUT_STATUSES = {"i", "s", "u", "n"}
 
 VALID_FORMATIONS = [
@@ -209,7 +212,11 @@ def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
     # injury exits / price drops. Kept deliberately small.
     tin = _to_float(p.get("transfers_in_event"))
     tout = _to_float(p.get("transfers_out_event"))
-    momentum = max(-0.3, min(0.3, (tin - tout) / 100000.0))
+    # Goalkeeper crowd momentum is noisy — nerf it to a tighter band so keeper xP
+    # isn't swung around by bandwagon transfer volume.
+    is_gk = p.get("element_type") == 1 or p.get("position") == "GK"
+    cap = 0.1 if is_gk else 0.3
+    momentum = max(-cap, min(cap, (tin - tout) / 100000.0))
     xp = max(0.0, xp + momentum)
 
     prof = _risk_profile(risk)
@@ -462,6 +469,16 @@ def _solve_squad(
         prob += pulp.lpSum(gk_bench[pid] for pid in gk_ids) == 1, "one_bench_gk"
         xp_expr += pulp.lpSum(by_id[pid]["xp"] * gk_start[pid] for pid in gk_ids)
         xp_expr += 0.1 * pulp.lpSum(by_id[pid]["xp"] * gk_bench[pid] for pid in gk_ids)
+
+    # Positional transfer friction: subtract a penalty for every player sold
+    # ((1 - x[pid]) == 1 for outgoing players). This stops the solver burning a
+    # transfer/hit on a GK (1.5) or DEF (0.5) unless the xP uplift is substantial.
+    if must_include_ids is not None:
+        friction = pulp.lpSum(
+            TRANSFER_FRICTION.get(by_id[pid]["position"], 0.0) * (1 - x[pid])
+            for pid in must_include_ids if pid in by_id
+        )
+        xp_expr = xp_expr - friction
 
     if must_include_ids is not None and hit_config is not None:
         transfers = pulp.lpSum((1 - x[pid]) for pid in must_include_ids if pid in by_id)
