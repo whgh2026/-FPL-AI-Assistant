@@ -762,12 +762,33 @@ if "override_analysis" in st.session_state:
         st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
 
         with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
-            st.markdown(
-                "* **Hit amortisation** — a -4 point hit is only worthwhile if the upgrade recovers those points across the 4-Gameweek horizon (and clears the transfer-friction hurdle).\n"
-                "* **Market momentum** — a surge of managers transferring a player in flags a likely overnight price rise, so acting early can build team value.\n"
-                "* **Late fitness gating** — doubtful players (below a 75% chance of playing) are heavily penalised so the solver avoids starting or buying risky assets near the deadline.\n"
-                "* **Goalkeeper swaps** — the 2-GK squad rule is strictly enforced: a keeper is only ever paired with another keeper, and the backup is treated as a budget enabler."
-            )
+            explainer_bullets = []
+
+            # 1. Base logic (always true).
+            explainer_bullets.append("* **Expected Value Maximisation** — the solver identified these specific moves to maximise your net Expected Points (xP) over the horizon, adjusting for positional baseline metrics.")
+
+            hits_taken = int(tr.get("hits", 0))
+
+            # 2. Hit amortisation (only if hits > 0).
+            if hits_taken > 0:
+                explainer_bullets.append(f"* **Hit amortisation** — the {-4 * hits_taken} point hit is mathematically justified. The engine calculates that these upgrades will recover the penalty points and clear the transfer-friction hurdle.")
+
+            # 3. Goalkeeper swaps (only if a GK is transferred in or out).
+            gk_involved_in_transfer = any(m["out"]["position"] == "GK" or m["in"]["position"] == "GK" for m in moves)
+            if gk_involved_in_transfer:
+                explainer_bullets.append("* **Goalkeeper structuring** — the solver navigated the strict 2-GK squad rule, ensuring your premium/budget balance in goal remains optimal.")
+
+            # 4. Late fitness gating (only if an outgoing player has a doubtful status).
+            flagged_player_transferred_out = any(m["out"].get("status", "Available") != "Available" for m in moves)
+            if flagged_player_transferred_out:
+                explainer_bullets.append("* **Late fitness gating** — doubtful assets were ruthlessly penalised in the projections, prompting the solver to eject injury risks before the deadline.")
+
+            # 5. Banked transfer (only if 0 transfers were made).
+            if len(moves) == 0:
+                explainer_bullets.append("* **Transfer Conservation** — the mathematically optimal move is no move. Rolling the transfer preserves structural flexibility and option value for next week.")
+
+            if explainer_bullets:
+                st.markdown("\n".join(explainer_bullets))
 
         target_default_moves = len(moves)
         last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
