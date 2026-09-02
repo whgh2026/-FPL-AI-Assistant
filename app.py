@@ -6,7 +6,7 @@ from dateutil import tz
 import datetime
 import time
 
-st.set_page_config(page_title="FPL AI Manager", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="FPL AI Manager", page_icon="https://img.icons8.com/?size=100&id=Ao7bhT7J2dd9&format=png&color=000000", layout="wide")
 
 def get_caveat_html():
     fetch_ts = fpl_tools.get_api_timestamp()
