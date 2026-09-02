@@ -1,10 +1,24 @@
 import math
+import os
+import json
 import re
 import time
 import requests
 from typing import Dict, Any, List, Tuple, Optional
 import dateutil.parser
-import streamlit as st
+
+try:
+    import streamlit as st
+except ImportError:
+    # Allow the CLI pipeline scripts (snapshot/ingest/auto-tune) to run without
+    # Streamlit installed (e.g. in GitHub Actions).
+    class _DummyStreamlit:
+        @staticmethod
+        def cache_data(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+    st = _DummyStreamlit()
 
 try:
     import pulp
@@ -334,6 +348,32 @@ def _defcon_expected_pts(p: Dict[str, Any], emin: float, pos_id: int) -> float:
     return 2.0 * p_meet
 
 
+_WEIGHTS_CACHE: Optional[Dict[str, float]] = None
+
+
+def _load_weights() -> Dict[str, float]:
+    """Load tunable weights from weights.json (defaulting to 1.0 on any miss)."""
+    global _WEIGHTS_CACHE
+    if _WEIGHTS_CACHE is not None:
+        return _WEIGHTS_CACHE
+    defaults = {"global_xP_modifier": 1.0, "home_advantage": 1.0, "clean_sheet_confidence": 1.0}
+    weights = dict(defaults)
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.json")
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            for k in defaults:
+                try:
+                    weights[k] = float(data.get(k, defaults[k]))
+                except (TypeError, ValueError):
+                    weights[k] = defaults[k]
+    except Exception:
+        pass
+    _WEIGHTS_CACHE = weights
+    return weights
+
+
 def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: int) -> float:
     avg = _league_averages().get(POS_MAP.get(pos_id, "MID"), {"xg": 0.3, "xa": 0.2, "xgc": 1.3, "saves": 0.5})
     minutes = _to_float(p.get("minutes"))
@@ -349,8 +389,10 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     def_adj = 3.0 / max(_to_float(f.get("opp_strength_def")), 1.0)
     att_adj = max(_to_float(f.get("opp_strength_att")), 1.0) / 3.0
-    venue_att = 1.08 if f.get("is_home") else 0.95
-    venue_def = 0.95 if f.get("is_home") else 1.05
+    _w = _load_weights()
+    home_adv = _w["home_advantage"]
+    venue_att = (1.0 + 0.08 * home_adv) if f.get("is_home") else (1.0 - 0.05 * home_adv)
+    venue_def = (1.0 - 0.05 * home_adv) if f.get("is_home") else (1.0 + 0.05 * home_adv)
 
     frac = emin / 90.0
 
@@ -360,7 +402,7 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     xgc = xgc90 * frac * att_adj * venue_def
     p_cs = math.exp(-xgc) if xgc < 10 else 0.0
-    cs_pts = CS_PTS.get(pos_id, 0) * p_cs * min(emin / 60.0, 1.0)
+    cs_pts = CS_PTS.get(pos_id, 0) * p_cs * min(emin / 60.0, 1.0) * _w["clean_sheet_confidence"]
 
     conceded_pts = -0.5 * xgc if pos_id in (1, 2) else 0.0
     saves_pts = saves90 * frac / 3.0 if pos_id == 1 else 0.0
@@ -429,7 +471,8 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
 
 def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None, risk: str = "balanced") -> Tuple[float, str]:
     raw, note = _player_xp_raw(p, fixture_lookup, event)
-    return round(max(_risk_adjust(p, raw, risk), 0.0), 2), note
+    gmod = _load_weights()["global_xP_modifier"]
+    return round(max(_risk_adjust(p, raw, risk), 0.0) * gmod, 2), note
 
 
 def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, risk: str = "balanced", n: int = 4) -> Tuple[float, str]:
@@ -460,7 +503,8 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
     elif chance_val is not None and chance_val < 100:
         note = f"{chance_val}% Chance"
 
-    return round(max(_risk_adjust(p, total, risk), 0.0), 2), note
+    gmod = _load_weights()["global_xP_modifier"]
+    return round(max(_risk_adjust(p, total, risk), 0.0) * gmod, 2), note
 
 def get_upcoming_gameweek() -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
