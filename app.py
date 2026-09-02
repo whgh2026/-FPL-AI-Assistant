@@ -281,7 +281,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown(
-        '<div class="badge"><span class="g"></span> Engineered by Waqas Hussain</div>',
+        '<div class="badge"><span class="g"></span> Built by Waqas Hussain</div>',
         unsafe_allow_html=True,
     )
 
