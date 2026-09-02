@@ -6,7 +6,7 @@ from dateutil import tz
 import datetime
 import time
 
-st.set_page_config(page_title="FPL AI Manager", page_icon="https://img.icons8.com/?size=100&id=Ao7bhT7J2dd9&format=png&color=000000", layout="wide")
+st.set_page_config(page_title="FPL Quant Manager", page_icon="https://img.icons8.com/?size=100&id=Ao7bhT7J2dd9&format=png&color=000000", layout="wide")
 
 def get_caveat_html():
     fetch_ts = fpl_tools.get_api_timestamp()
@@ -278,8 +278,8 @@ def clear_transfer_cache():
 # Sidebar
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## ⚽ FPL AI Manager")
-    st.caption("Your friendly pre-deadline assistant")
+    st.markdown("## ⚽ FPL Quant Manager")
+    st.caption("Your data-driven pre-deadline quant engine")
 
     risk_label = st.radio(
         "Strategy mode",
@@ -321,6 +321,9 @@ with st.sidebar:
 # ------------------------------------------------------------------
 safe_banner = f'<div class="dl-warning">⚠️ <b>Pro Tip:</b> Aim to confirm your transfers by <b>{SAFE_TIME_STR}</b> to avoid FPL server crashes.</div>' if SAFE_TIME_STR else ''
 
+# Spacer so the deadline banner doesn't touch the very top of the viewport.
+st.markdown("<div style='margin-top: 2rem;'></div>", unsafe_allow_html=True)
+
 st.markdown(
     f'<div class="deadline-hero"><div class="dl-gw">⏰ {GW_NAME} deadline</div>'
     f'<div class="dl-time">{DEADLINE_STR}</div>'
@@ -330,9 +333,18 @@ st.markdown(
 
 st.markdown(
     '<div class="overview">'
-    '<b>What this does:</b> Pop in your Manager ID to pull your official current squad. Then input your variables '
-    '(Free Transfers, Bank, Active Chips) and verify your actual live team. The algorithm will calculate the optimal '
-    'transfers to maximise expected points (xP) and generate your best starting XI, bench order, and captaincy.'
+    '<b>📊 Your Personal FPL Quant Engine</b><br><br>'
+    'This system operates as a fully automated quantitative analyst for your Fantasy Premier League team. '
+    'It removes human bias by combining predictive modelling, mathematical optimisation, and continuous machine learning:<br><br>'
+    '• <b>The Baseline Projections:</b> It calculates Expected Points (xP) for every player by aggregating '
+    'underlying statistics, fixture difficulty ratings, and positional baselines.<br><br>'
+    '• <b>The Optimiser:</b> It runs a linear programming algorithm (solving the &#39;knapsack problem&#39;) to find '
+    'the mathematically optimal transfers, starting XI, and captaincy — respecting your specific budget, chip '
+    'strategy, and transfer constraints.<br><br>'
+    '• <b>The Self-Learning Loop:</b> The engine is self-correcting. Every week, a background pipeline logs the '
+    'Friday xP projections, ingests the Tuesday actual real-world results, calculates its own margin of error, and '
+    'automatically rewrites its underlying mathematical weights via GitHub Actions to get continuously smarter as '
+    'the season progresses.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -748,7 +760,7 @@ if "override_analysis" in st.session_state:
 
         c_fast1, c_fast2 = st.columns(2)
         with c_fast1:
-            accept_all = st.button("✅ Accept All AI Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
+            accept_all = st.button("✅ Accept All Quant Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
         with c_fast2:
             fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
         
@@ -761,7 +773,7 @@ if "override_analysis" in st.session_state:
                 st.rerun()
 
         if accept_all:
-            with st.spinner("Applying AI transfers and generating final lineup…"):
+            with st.spinner("Applying Quant transfers and generating final lineup…"):
                 sold_ids = {m["out"]["id"] for m in moves}
                 final_squad = [p for p in ov["analysed_squad"] if p["player_id"] not in sold_ids]
                 for m in moves:
@@ -785,7 +797,7 @@ if "override_analysis" in st.session_state:
         st.markdown("#### Or, Customise Your Transfers Below")
         st.caption(
             "Review or modify the recommended moves. You can adjust the transfer count, customise individual player selections, "
-            "or accept the AI defaults below."
+            "or accept the Quant defaults below."
         )
 
         cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
