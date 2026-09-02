@@ -659,29 +659,45 @@ if "override_analysis" in st.session_state:
             players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
             teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
             pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-            
-            all_options = [(None, "— Select Player —")]
+
+            # Incoming options filtered strictly by position so the UI can never
+            # display a cross-positional swap (outgoing DEF only pairs with incoming DEF).
+            in_options_by_pos = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
             for p in bootstrap.get("elements", []):
                 pos = pos_map.get(p["element_type"])
                 if pos:
                     initial = p['first_name'][0] + "." if p.get('first_name') else ""
                     display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m"
-                    all_options.append((p["id"], display))
-            all_options.sort(key=lambda x: x[1].lower() if x[0] else "")
+                    in_options_by_pos[pos].append((p["id"], display))
+            for pos in POS_ORDER:
+                in_options_by_pos[pos].sort(key=lambda x: x[1].lower() if x[0] else "")
         except:
-            all_options = cur_options
+            in_options_by_pos = {pos: cur_options for pos in POS_ORDER}
+
+        cur_id_to_pos = {p["player_id"]: p["position"] for p in ov["analysed_squad"]}
 
         for i in range(int(n_moves)):
             c1, c2 = st.columns(2)
             def_out_idx = 0
-            def_in_idx = 0
             if i < len(moves):
                 def_out_idx = _get_dropdown_index(cur_options, moves[i]["out"]["id"])
-                def_in_idx = _get_dropdown_index(all_options, moves[i]["in"]["id"])
-                
+
             out_sel = c1.selectbox(f"Transfer Out {i+1}", options=cur_options, format_func=lambda x: x[1], index=def_out_idx, key=f"man_out_{i}")
-            in_sel = c2.selectbox(f"Transfer In {i+1}", options=all_options, format_func=lambda x: x[1], index=def_in_idx, key=f"man_in_{i}")
-            
+
+            # Lock the incoming list to the outgoing player's position.
+            out_pos = cur_id_to_pos.get(out_sel[0]) if out_sel and out_sel[0] is not None else None
+            if out_pos is None and i < len(moves):
+                out_pos = moves[i]["out"].get("position")
+            if out_pos not in in_options_by_pos:
+                out_pos = "MID"
+            in_options = in_options_by_pos[out_pos]
+
+            def_in_idx = 0
+            if i < len(moves):
+                def_in_idx = _get_dropdown_index(in_options, moves[i]["in"]["id"])
+
+            in_sel = c2.selectbox(f"Transfer In {i+1}", options=in_options, format_func=lambda x: x[1], index=def_in_idx, key=f"man_in_{i}")
+
             if out_sel[0]: out_ids.append(out_sel[0])
             if in_sel[0]: in_ids.append(in_sel[0])
 

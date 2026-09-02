@@ -28,9 +28,13 @@ RISK_PROFILES = {
 }
 
 POS_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-GOAL_PTS = {1: 6, 2: 6, 3: 5, 4: 4}
+GOAL_PTS = {1: 10, 2: 6, 3: 5, 4: 4}
 CS_PTS = {1: 4, 2: 4, 3: 1, 4: 0}
 POS_COUNTS = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
+# 2026/27 Defensive Contributions (CBIT/CBIRT): expected involvement rates and
+# thresholds used to model the +2 point bonus (DEF: 10 CBIT, MID/FWD: 12 CBIRT).
+DEFCON_BASE_PER90 = {2: 8.0, 3: 5.0, 4: 2.5}
+DEFCON_THRESHOLD = {2: 10, 3: 12, 4: 12}
 OUT_STATUSES = {"i", "s", "u", "n"}
 
 VALID_FORMATIONS = [
@@ -197,8 +201,19 @@ def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
     return max(0.0, min(1.0, frac))
 
 def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
+    if xp <= 0:
+        return xp
+
+    # Community transfer momentum (applies to every risk profile): net transfers-in
+    # flag bandwagons (price rises, fixture form) while net transfers-out flag
+    # injury exits / price drops. Kept deliberately small.
+    tin = _to_float(p.get("transfers_in_event"))
+    tout = _to_float(p.get("transfers_out_event"))
+    momentum = max(-0.3, min(0.3, (tin - tout) / 100000.0))
+    xp = max(0.0, xp + momentum)
+
     prof = _risk_profile(risk)
-    if xp <= 0 or prof["ow_weight"] == prof["threat_weight"] == prof["floor_weight"] == 0.0:
+    if prof["ow_weight"] == prof["threat_weight"] == prof["floor_weight"] == 0.0:
         return xp
 
     ow = _to_float(p.get("selected_by_percent"))
@@ -213,6 +228,38 @@ def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
         + prof["floor_weight"] * (floor - 0.7)
     )
     return max(0.0, xp + adj)
+
+def _poisson_survival(threshold: int, lam: float) -> float:
+    """P(X >= threshold) for X ~ Poisson(lam), via the lower tail CDF."""
+    if lam <= 0.0 or threshold <= 0:
+        return 0.0
+    term = math.exp(-lam)
+    cdf = term
+    for i in range(1, threshold):
+        term *= lam / i
+        cdf += term
+    return max(0.0, min(1.0, 1.0 - cdf))
+
+
+def _defcon_expected_pts(p: Dict[str, Any], emin: float, pos_id: int) -> float:
+    """Expected points from the 2026/27 Defensive Contribution bonus.
+
+    DEF: +2 points for reaching 10 CBIT actions in a match.
+    MID/FWD: +2 points for reaching 12 CBIRT actions in a match.
+    """
+    if pos_id not in DEFCON_THRESHOLD:
+        return 0.0
+    frac = emin / 90.0
+    if frac <= 0.0:
+        return 0.0
+    base = DEFCON_BASE_PER90.get(pos_id, 0.0)
+    # Influence (ICC) captures tackles/interceptions/clearances, so we nudge the
+    # involvement rate up for defensively busy roles.
+    influence = _to_float(p.get("influence"))
+    rate = base * (0.6 + 0.4 * min(influence / 60.0, 2.0))
+    p_meet = _poisson_survival(DEFCON_THRESHOLD[pos_id], rate * frac)
+    return 2.0 * p_meet
+
 
 def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: int) -> float:
     avg = _league_averages().get(POS_MAP.get(pos_id, "MID"), {"xg": 0.3, "xa": 0.2, "xgc": 1.3, "saves": 0.5})
@@ -247,10 +294,21 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     minutes_pts = 2.0 if emin >= 60 else (1.0 if emin > 0 else 0.0)
 
-    bonus_pts = (0.7 if pos_id in (3, 4) else 0.4) * frac
+    # 2026/27 BPS recalibration:
+    #  - being tackled no longer costs BPS (helps attacking mids / wing-backs)
+    #  - CBI converted at 1 BPS per 3 actions (slightly lowers centre-back bonus)
+    #  - GK saves now carry a much higher BPS weight
+    if pos_id == 1:
+        bonus_pts = min(2.0, (0.40 + 0.18 * saves90) * frac)
+    elif pos_id == 2:
+        bonus_pts = 0.34 * frac
+    else:
+        bonus_pts = 0.72 * frac
+
+    defcon_pts = _defcon_expected_pts(p, emin, pos_id)
     card_pts = -0.12 if pos_id in (2, 3) else -0.05
 
-    return max(minutes_pts + attack_pts + cs_pts + conceded_pts + saves_pts + bonus_pts + card_pts, 0.0)
+    return max(minutes_pts + attack_pts + cs_pts + conceded_pts + saves_pts + bonus_pts + defcon_pts + card_pts, 0.0)
 
 def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None, risk: str = "balanced") -> Tuple[float, str]:
     status = p.get("status", "a")
@@ -365,6 +423,7 @@ def _solve_squad(
     budget: float,
     must_include_ids: Optional[set] = None,
     hit_config: Optional[Dict[str, Any]] = None,
+    bench_boost: bool = False,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -383,7 +442,26 @@ def _solve_squad(
     for t in {by_id[pid]["team_id"] for pid in ids}:
         prob += pulp.lpSum(x[pid] for pid in ids if by_id[pid]["team_id"] == t) <= 3, f"team_{t}"
 
-    xp_expr = pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in ids)
+    # Objective. Back-up goalkeepers are heavily discounted (x0.1) so the solver
+    # treats the second GK as a budget enabler rather than a premium bench-warmer.
+    # The discount is removed when Bench Boost is active (every bench player scores).
+    gk_ids = [pid for pid in ids if by_id[pid]["position"] == "GK"]
+    xp_expr = pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in ids if by_id[pid]["position"] != "GK")
+
+    if bench_boost or not gk_ids:
+        xp_expr += pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in gk_ids)
+    else:
+        # Binary role assignment: exactly one keeper starts (1.0x xP) and exactly
+        # one keeper is the bench option (0.1x xP) — so the backup is budget fodder.
+        gk_start = pulp.LpVariable.dicts("gk_start", gk_ids, cat="Binary")
+        gk_bench = pulp.LpVariable.dicts("gk_bench", gk_ids, cat="Binary")
+        for pid in gk_ids:
+            # A selected keeper is either the starter or the bench option.
+            prob += gk_start[pid] + gk_bench[pid] == x[pid], f"gk_role_{pid}"
+        prob += pulp.lpSum(gk_start[pid] for pid in gk_ids) == 1, "one_start_gk"
+        prob += pulp.lpSum(gk_bench[pid] for pid in gk_ids) == 1, "one_bench_gk"
+        xp_expr += pulp.lpSum(by_id[pid]["xp"] * gk_start[pid] for pid in gk_ids)
+        xp_expr += 0.1 * pulp.lpSum(by_id[pid]["xp"] * gk_bench[pid] for pid in gk_ids)
 
     if must_include_ids is not None and hit_config is not None:
         transfers = pulp.lpSum((1 - x[pid]) for pid in must_include_ids if pid in by_id)
@@ -511,8 +589,8 @@ def suggest_transfers_for_custom_squad(
         
         # Positional pairing logic to avoid UI cross-positional mismatch
         for pos in ["GK", "DEF", "MID", "FWD"]:
-            sold_pos = [p for p in sold if pool_by_id[p]["position"] == pos]
-            bought_pos = [p for p in bought if pool_by_id[p]["position"] == pos]
+            sold_pos = sorted((p for p in sold if pool_by_id[p]["position"] == pos), key=lambda pid: pool_by_id[pid]["xp"])
+            bought_pos = sorted((p for p in bought if pool_by_id[p]["position"] == pos), key=lambda pid: pool_by_id[pid]["xp"])
             for o, i in zip(sold_pos, bought_pos):
                 mvs.append({
                     "out": pool_by_id[o],
@@ -532,7 +610,8 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     std_selected, _ = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
-        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS}
+        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS},
+        bench_boost=False
     )
     std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
     if std_net <= 0:
@@ -545,7 +624,8 @@ def suggest_transfers_for_custom_squad(
     if any(c in eval_chips for c in ("Wildcard", "Free Hit")):
         unl_selected, _ = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
-            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15}
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15},
+            bench_boost=("Bench Boost" in eval_chips)
         )
         unl_moves, unl_hits, unl_net, unl_cost = _get_moves(unl_selected, True)
 
@@ -682,6 +762,21 @@ def rank_players_by_xp(position: str = None, max_price: float = None, limit: int
 def _pid(p: Dict[str, Any]) -> Any:
     return p.get("player_id", p.get("id"))
 
+def _next_gw_opponents() -> Dict[Any, set]:
+    """Map team_id -> set of opponent team_ids for the upcoming gameweek."""
+    try:
+        bootstrap = _get_bootstrap()
+        gw = _next_gameweek(bootstrap)
+        opp: Dict[Any, set] = {}
+        for tid, fx_list in _build_fixture_lookup(bootstrap).items():
+            for f in fx_list:
+                if f.get("event") == gw:
+                    opp.setdefault(tid, set()).add(f.get("opponent"))
+        return opp
+    except Exception:
+        return {}
+
+
 def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     for p in squad:
@@ -720,9 +815,31 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     if captain is None:
         captain = max(best_xi, key=lambda x: x.get("xp", 0))
-    if vice is None or _pid(vice) == _pid(captain):
-        others = sorted((p for p in best_xi if _pid(p) != _pid(captain)), key=lambda x: x.get("xp", 0), reverse=True)
-        vice = others[0] if others else None
+
+    # Vice-captain must be the highest-projected OUTFIELD starter in a completely
+    # different fixture/match than the captain, mitigating correlated postponement
+    # risk (if the captain's game is called off, the VC's game should still go ahead).
+    opp_lookup = _next_gw_opponents()
+
+    def _team_key(p: Dict[str, Any]) -> Any:
+        return p.get("team_id", p.get("team"))
+
+    def _diff_fixture_outfield(p: Dict[str, Any]) -> bool:
+        k = _team_key(p)
+        return (
+            p.get("position") != "GK"
+            and _pid(p) != _pid(captain)
+            and k != _team_key(captain)
+            and k not in opp_lookup.get(_team_key(captain), set())
+        )
+
+    if vice is None or _pid(vice) == _pid(captain) or not _diff_fixture_outfield(vice):
+        candidates = [p for p in best_xi if _diff_fixture_outfield(p)]
+        if not candidates:
+            # Fall back to any other starter (different team) if no clean outfield fixture split exists.
+            candidates = [p for p in best_xi if _pid(p) != _pid(captain)]
+        candidates.sort(key=lambda x: x.get("xp", 0), reverse=True)
+        vice = candidates[0] if candidates else None
 
     xi_ids = {_pid(p) for p in best_xi}
     bench = [p for p in squad if _pid(p) not in xi_ids]
