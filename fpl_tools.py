@@ -536,21 +536,21 @@ def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
         chance = out_e.get("chance_of_playing_next_round")
     status = out_e.get("status", "a")
     if (chance is not None and _to_float(chance) < 75.0) or status in ("d", "i", "s"):
-        return "Replacing a flagged or injured player with a starter."
+        return "💡 Replacing a player carrying an injury or suspension flag to ensure you have a guaranteed starter scoring points."
 
     # 2. Downgrade to free up budget
     out_sell = _to_float(out_entry.get("sell_price", out_entry.get("price")))
     in_cost = _to_float(in_entry.get("price"))
     if out_sell - in_cost >= 1.0:
-        return "Downgrading to free up budget for other squad upgrades."
+        return "💡 Downgrading to a cheaper player to release funds into your bank, giving you the budget needed for future premium upgrades."
 
     # 3. Heavy net market momentum on the incoming player
     net = _to_float(in_e.get("transfers_in_event")) - _to_float(in_e.get("transfers_out_event"))
     if net > 100000.0:
-        return "Capitalising on heavy market momentum and a potential price rise."
+        return "💡 A massive number of managers are currently transferring this player in. Buying now helps you catch a likely overnight price rise and build your team value."
 
     # 4. Default
-    return "Direct upgrade based on superior underlying data and expected points forecast."
+    return "💡 A data-driven upgrade. This player offers better underlying stats, stronger upcoming fixtures, and a higher projected points forecast."
 
 
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,

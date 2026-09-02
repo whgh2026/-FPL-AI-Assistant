@@ -699,7 +699,7 @@ if "override_analysis" in st.session_state:
                 )
                 rationale = m.get("rationale")
                 if rationale:
-                    transfer_html += f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 6px 0;">💡 {rationale}</div>'
+                    transfer_html += f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 6px 0;">{rationale}</div>'
         else:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
         st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
