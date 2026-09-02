@@ -8,7 +8,7 @@ from dateutil import tz
 import datetime
 import time
 
-st.set_page_config(page_title="FPL Quant Manager", page_icon="https://img.icons8.com/?size=100&id=Ao7bhT7J2dd9&format=png&color=000000", layout="wide")
+st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
 def get_caveat_html():
     fetch_ts = fpl_tools.get_api_timestamp()
@@ -1052,87 +1052,111 @@ if man_final:
 
 
 # ------------------------------------------------------------------
-# Expert AI Analysis (visible after Step 4)
+# Final Boss AI Analysis (visible after Step 4)
 # ------------------------------------------------------------------
+# Initialize reactive state.
+if "ai_response" not in st.session_state:
+    st.session_state.ai_response = None
+if "last_ai_prompt" not in st.session_state:
+    st.session_state.last_ai_prompt = None
+
+lineup = st.session_state.get("manual_final")
+
+# Build the prompt signature from the current inputs (used for reactive invalidation).
+ai_prompt = None
+system_prompt = None
+if lineup:
+    tr = st.session_state.get("override_analysis", {}).get("transfers", {})
+    moves = tr.get("transfers", tr.get("standard_transfers", []))
+    hits = int(tr.get("hits", 0))
+    hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
+    total_hit = hits * hit_cost
+
+    xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("xi", []))
+    bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("bench", []))
+    move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in moves) or "None (holding)"
+
+    context = (
+        f"Starting XI: {xi_str}\n"
+        f"Bench: {bench_str}\n"
+        f"Proposed transfers: {move_str}\n"
+        f"Total point hit cost: -{total_hit}\n"
+    )
+
+    system_prompt = (
+        "You are a former overall Fantasy Premier League winner and quantitative macro planner. "
+        "Evaluate the user's squad over a 4-gameweek tactical window. Be concise, highly tactical, "
+        "and data-driven. Return exactly 3-4 short bullet points."
+    )
+    ai_prompt = (
+        "Evaluate this FPL squad over the next 4 gameweeks and give 3-4 concise tactical bullets "
+        "using these benchmark rules:\n"
+        "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
+        "validate structural health and endorse rolling the transfer for future leverage.\n"
+        "2. 'Crisis' Benchmark (Wildcard trigger): if it recommends a -8 hit or worse, or flags "
+        "widespread injury/suspension disruption, advise overriding the point hits and deploying the Wildcard.\n"
+        "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
+        "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
+        "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
+        "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n"
+        "5. Captaincy Sanity Check: validate that the armband is anchored to the highest-ceiling, most "
+        "reliable premium asset; if a differential is being captained, flag the risk.\n"
+        "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
+        "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
+        f"Team context:\n{context}"
+    )
+
 with st.container(border=True):
-    st.markdown("### 🔮 The FPL Overlord's Verdict")
-    st.markdown("Consult the FPL Overlord for a ruthless tactical breakdown of your proposed transfers.")
-    lineup = st.session_state.get("manual_final")
+    st.markdown("### 👾 The FPL Final Boss")
+    st.markdown("Step into the manager's office. Present your transfers to the Final Boss for a brutal tactical interrogation.")
+
     if not lineup:
         st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
     else:
-        run_macro = st.button("Press here to consult the FPL Overlord", type="primary")
-        if run_macro:
-            with st.spinner("Consulting the FPL Overlord... prepare for tactical judgement."):
+        if st.button("Press here to face the Final Boss (If you dare)", type="primary"):
+            with st.spinner("The Final Boss is reviewing your tactics... brace yourself for impact."):
                 api_key = os.environ.get("DEEPSEEK_API_KEY")
                 if not api_key:
                     st.warning("API key missing. Please configure the environment variable.")
                 else:
-                    try:
-                        tr = st.session_state.get("override_analysis", {}).get("transfers", {})
-                        moves = tr.get("transfers", tr.get("standard_transfers", []))
-                        hits = int(tr.get("hits", 0))
-                        hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
-                        total_hit = hits * hit_cost
+                    response_text = None
+                    for attempt in range(3):
+                        try:
+                            st.toast(f"The Final Boss is pondering deeply... ({attempt + 1}/3)")
+                            resp = requests.post(
+                                "https://api.deepseek.com/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {api_key}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "model": "deepseek-v4-flash",
+                                    "messages": [
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": ai_prompt},
+                                    ],
+                                    "temperature": 0.4,
+                                },
+                                timeout=120,
+                            )
+                            resp.raise_for_status()
+                            response_text = resp.json()["choices"][0]["message"]["content"]
+                            break
+                        except Exception as e:
+                            if attempt < 2:
+                                continue
+                            st.error(f"API Request Failed: {str(e)}")
 
-                        xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("xi", []))
-                        bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("bench", []))
-                        move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in moves) or "None (holding)"
+                    if response_text is not None:
+                        st.session_state.ai_response = response_text
+                        st.session_state.last_ai_prompt = ai_prompt
 
-                        context = (
-                            f"Starting XI: {xi_str}\n"
-                            f"Bench: {bench_str}\n"
-                            f"Proposed transfers: {move_str}\n"
-                            f"Total point hit cost: -{total_hit}\n"
-                        )
-
-                        system_prompt = (
-                            "You are a former overall Fantasy Premier League winner and quantitative macro planner. "
-                            "Evaluate the user's squad over a 4-gameweek tactical window. Be concise, highly tactical, "
-                            "and data-driven. Return exactly 3-4 short bullet points."
-                        )
-                        user_prompt = (
-                            "Evaluate this FPL squad over the next 4 gameweeks and give 3-4 concise tactical bullets "
-                            "using these benchmark rules:\n"
-                            "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
-                            "validate structural health and endorse rolling the transfer for future leverage.\n"
-                            "2. 'Crisis' Benchmark (Wildcard trigger): if it recommends a -8 hit or worse, or flags "
-                            "widespread injury/suspension disruption, advise overriding the point hits and deploying the Wildcard.\n"
-                            "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
-                            "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
-                            "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
-                            "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n"
-                            "5. Captaincy Sanity Check: validate that the armband is anchored to the highest-ceiling, most "
-                            "reliable premium asset; if a differential is being captained, flag the risk.\n"
-                            "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
-                            "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
-                            f"Team context:\n{context}"
-                        )
-
-                        resp = requests.post(
-                            "https://api.deepseek.com/chat/completions",
-                            headers={
-                                "Authorization": f"Bearer {api_key}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "model": "deepseek-v4-flash",
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt},
-                                ],
-                                "temperature": 0.4,
-                            },
-                            timeout=60,
-                        )
-                        resp.raise_for_status()
-                        st.session_state["deepseek_result"] = resp.json()["choices"][0]["message"]["content"]
-                    except Exception as e:
-                        st.error(f"API Request Failed: {str(e)}")
-
-        result = st.session_state.get("deepseek_result")
-        if result:
-            st.markdown(result)
+        # Reactive display: void the old verdict if the inputs changed.
+        if st.session_state.ai_response:
+            if st.session_state.last_ai_prompt == ai_prompt:
+                st.markdown(st.session_state.ai_response)
+            else:
+                st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
 
 
 # ------------------------------------------------------------------
