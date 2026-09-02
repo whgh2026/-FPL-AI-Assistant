@@ -508,13 +508,19 @@ def suggest_transfers_for_custom_squad(
         sold = [pid for pid in current_ids if pid not in selected_set]
         bought = [pid for pid in selected_ids if pid not in current_ids]
         mvs = []
-        for o, i in zip(sold, bought):
-            mvs.append({
-                "out": pool_by_id[o],
-                "in": pool_by_id[i],
-                "xp_gain": round(pool_by_id[i]["xp"] - pool_by_id[o]["xp"], 2),
-                "cost": round(pool_by_id[i]["price"] - pool_by_id[o]["price"], 2)
-            })
+        
+        # Positional pairing logic to avoid UI cross-positional mismatch
+        for pos in ["GK", "DEF", "MID", "FWD"]:
+            sold_pos = [p for p in sold if pool_by_id[p]["position"] == pos]
+            bought_pos = [p for p in bought if pool_by_id[p]["position"] == pos]
+            for o, i in zip(sold_pos, bought_pos):
+                mvs.append({
+                    "out": pool_by_id[o],
+                    "in": pool_by_id[i],
+                    "xp_gain": round(pool_by_id[i]["xp"] - pool_by_id[o]["xp"], 2),
+                    "cost": round(pool_by_id[i]["price"] - pool_by_id[o]["price"], 2)
+                })
+                
         hits = 0 if is_unlimited else max(0, len(mvs) - free_transfers)
         tot_gain = sum(m["xp_gain"] for m in mvs)
         net_gain = round(tot_gain - hit_cost * hits, 2)
@@ -587,7 +593,7 @@ def suggest_transfers_for_custom_squad(
     ranked_chips = sorted(chip_scores.items(), key=lambda x: x[1], reverse=True)
     
     # Ultra-Strict Compelling Reason Thresholds
-    THRESHOLDS = {"Wildcard": 20.0, "Free Hit": 18.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
+    THRESHOLDS = {"Wildcard": 25.0, "Free Hit": 18.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
     
     chip_advice_list = []
     if len(eval_chips) > 1:
@@ -600,15 +606,16 @@ def suggest_transfers_for_custom_squad(
         threshold = THRESHOLDS.get(chip_name, 99.0)
         passed_threshold = score >= threshold
         
+        # Wildcard exception: Lower xP barrier if squad is ravaged by injuries
         if chip_name == "Wildcard" and not passed_threshold:
-            if score >= 10.0 and current_out_statuses >= 4:
+            if score >= 15.0 and current_out_statuses >= 3:
                 passed_threshold = True
 
         if passed_threshold and recommended_chip == "None (Hold Chips)":
             recommended_chip = chip_name
             best_chip_gain = score
             if chip_name in ("Wildcard", "Free Hit"):
-                crisis_msg = f" Your squad has {current_out_statuses} flagged players and a reset yields <b>+{score:.1f} xP</b>." if current_out_statuses >= 4 and chip_name == "Wildcard" else f" Yields a massive <b>+{score:.1f} xP</b> over standard transfers."
+                crisis_msg = f" Your squad has {current_out_statuses} flagged players and a reset yields <b>+{score:.1f} xP</b>." if current_out_statuses >= 3 and chip_name == "Wildcard" else f" Yields a massive <b>+{score:.1f} xP</b> over standard transfers."
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended.{crisis_msg}")
             elif chip_name == "Bench Boost":
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended. Your optimized bench provides a massive <b>+{score:.1f} xP</b>.")
@@ -616,6 +623,7 @@ def suggest_transfers_for_custom_squad(
                 cap_name = cap['name'] if cap else "Captain"
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Recommended. <b>{cap_name}</b> has an elite ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")
         else:
+            # Failed threshold or lost to a better chip
             if passed_threshold:
                 chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Yields +{score:.1f} xP, but FPL limits 1 chip/wk. <b>{recommended_chip}</b> is mathematically superior right now.")
             else:
