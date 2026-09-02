@@ -299,6 +299,16 @@ with st.sidebar:
     }
     st.caption(risk_desc[risk_label])
 
+    with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
+        st.markdown(
+            "The engine projects points over a **4-Gameweek rolling window**, weighting the next gameweek "
+            "heaviest and each following week slightly less (1.0 → 0.85 → 0.70 → 0.55). "
+            "**Transfer Friction** values patience: every free transfer spent must clear a points hurdle, "
+            "so the tool prefers to **bank free transfers** (up to 5) unless an upgrade is clearly worth it. "
+            "Remember, **xP (Expected Points)** is a statistical average over many simulated outcomes — "
+            "it is a forecast, **not a guaranteed score**."
+        )
+
     st.markdown("---")
     st.markdown(
         '<div class="badge"><span class="g"></span> Built by Waqas Hussain</div>',
@@ -407,6 +417,15 @@ with st.container(border=True):
         x1.metric("🛡️ Baseline Starting XI xP", f"{st_xp} xP")
         x2.metric("🪑 Baseline Bench xP", f"{be_xp} xP")
         x3.metric("📊 Baseline Squad xP", f"{tot_xp} xP")
+
+        with st.expander("🔍 How Your Budget & Squad Value Are Calculated", expanded=False):
+            st.markdown(
+                "Your **Bank (Unspent)** reflects true FPL selling liquidity, not current market price. "
+                "When you sell a player, you only keep **50% of any profit** (rounded down to £0.1m), "
+                "so a player bought at £5.0m who rises to £5.4m sells for £5.2m. "
+                "**Team value** is your current squad's market value, but your actual spending power is "
+                "lower — the algorithm budgets using each player's **selling price**, exactly as FPL does."
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
         sheet = f'<div class="team-sheet">{_team_sheet_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)}</div>'
@@ -704,6 +723,18 @@ if "override_analysis" in st.session_state:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
         st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
 
+        with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
+            st.markdown(
+                "• **Hit amortisation** — a -4 point hit is only worthwhile if the upgrade recovers those points "
+                "across the 4-Gameweek horizon (and clears the transfer-friction hurdle).\n"
+                "• **Market momentum** — a surge of managers transferring a player in flags a likely overnight "
+                "price rise, so acting early can build team value.\n"
+                "• **Late fitness gating** — doubtful players (below a 75% chance of playing) are heavily "
+                "penalised so the solver avoids starting or buying risky assets near the deadline.\n"
+                "• **Goalkeeper swaps** — the 2-GK squad rule is strictly enforced: a keeper is only ever "
+                "paired with another keeper, and the backup is treated as a budget enabler."
+            )
+
         target_default_moves = len(moves)
         last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
         if last_chip_tracked != confirmed_chip or "n_moves_manual" not in st.session_state:
@@ -940,6 +971,16 @@ if man_final:
         y1.metric("🛡️ Final Starting XI xP", f"{st_xp:.2f} xP", f"{delta_st:+.2f} xP" if delta_st != 0 else None)
         y2.metric("🪑 Final Bench xP", f"{be_xp:.2f} xP", f"{delta_be:+.2f} xP" if delta_be != 0 else None)
         y3.metric("📊 Final Squad xP", f"{tot_xp:.2f} xP", f"{delta_tot:+.2f} xP" if delta_tot != 0 else None)
+
+        with st.expander("🛡️ How Your Starting XI, Captain & Bench Are Picked", expanded=False):
+            st.markdown(
+                "The line-up maximises projected points while **always respecting legal FPL formations** "
+                "(at least 3 defenders and 1 forward). Bench ordering prioritises legal auto-substitutions: "
+                "the **first bench slot is reserved to cover a minimum 3-DEF or 1-FWD formation** if a starter "
+                "returns zero minutes. The **backup goalkeeper is locked to Bench Slot 4** and can only replace "
+                "the starting keeper. The **captain** is your highest-projected scorer, with the **vice-captain** "
+                "chosen from a different fixture to guard against postponements."
+            )
 
         sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
         st.markdown(_card(sheet, f'🛡️ Final Starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · VC = Vice-Captain'), unsafe_allow_html=True)

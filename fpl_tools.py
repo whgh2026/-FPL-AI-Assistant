@@ -23,13 +23,13 @@ MAX_HIT_TRANSFERS = 3
 PRIOR_MINUTES = 270.0          
 
 RISK_PROFILES = {
-    "conservative": {"hit_cost": 6.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0},
-    "balanced":     {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0},
-    "aggressive":   {"hit_cost": 3.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2},
+    "conservative": {"hit_cost": 6.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0},
+    "balanced":     {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5},
+    "aggressive":   {"hit_cost": 3.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5},
     # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
     # leader (hunt low-ownership high-xGI differentials).
-    "rank_protecting": {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.5, "shield_weight": 0.8},
-    "rank_chasing":    {"hit_cost": 3.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "hunt_weight": 0.6},
+    "rank_protecting": {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.5, "shield_weight": 0.8, "ft_friction": 2.0},
+    "rank_chasing":    {"hit_cost": 3.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "hunt_weight": 0.6, "ft_friction": 0.5},
 }
 
 # Display-label aliases so the UI can pass human-readable mode names.
@@ -668,7 +668,10 @@ def _solve_squad(
             prob += transfers <= max_t, "max_transfers"
         hits = pulp.LpVariable("hits", lowBound=0, cat="Integer")
         prob += hits >= transfers - hit_config["free_transfers"], "hits_lb"
-        prob.setObjective(xp_expr - hit_config["hit_cost"] * hits)
+        # Transfer friction: each free transfer used costs ft_friction xP, so the
+        # solver values holding FTs. Hits stack the -4 penalty on top.
+        ft_friction = hit_config.get("ft_friction", 0.0)
+        prob.setObjective(xp_expr - hit_config["hit_cost"] * hits - ft_friction * (transfers - hits))
     else:
         prob.setObjective(xp_expr)
 
@@ -752,6 +755,7 @@ def suggest_transfers_for_custom_squad(
         event = _next_gameweek(bootstrap)
 
     hit_cost = _risk_profile(risk)["hit_cost"]
+    ft_friction = _risk_profile(risk).get("ft_friction", 1.5)
     current_ids = [p["player_id"] for p in squad]
     sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price", 0.0)) for p in squad}
     pool = []
@@ -818,8 +822,11 @@ def suggest_transfers_for_custom_squad(
                 })
                 
         hits = 0 if is_unlimited else max(0, len(mvs) - free_transfers)
+        # Value the free transfers spent: each must clear ft_friction xP.
+        free_used = 0 if is_unlimited else (len(mvs) - hits)
+        friction_penalty = ft_friction * free_used
         tot_gain = sum(m["xp_gain"] for m in mvs)
-        net_gain = round(tot_gain - hit_cost * hits, 2)
+        net_gain = round(tot_gain - hit_cost * hits - friction_penalty, 2)
         cost_chg = round(sum(m["cost"] for m in mvs), 2)
         return mvs, hits, net_gain, cost_chg
 
@@ -828,10 +835,12 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     std_selected, _ = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
-        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS},
+        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS, "ft_friction": ft_friction},
         bench_boost=False
     )
     std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
+    # Buffer the hold strategy: net_gain already subtracts FT friction, so a
+    # non-positive net gain means holding (banking the FT) is the better play.
     if std_net <= 0:
         std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
 
@@ -847,7 +856,7 @@ def suggest_transfers_for_custom_squad(
     if any(c in eval_chips for c in ("Wildcard", "Free Hit")):
         unl_selected, _ = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
-            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15},
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
             bench_boost=("Bench Boost" in eval_chips)
         )
         unl_moves, unl_hits, unl_net, unl_cost = _get_moves(unl_selected, True)
