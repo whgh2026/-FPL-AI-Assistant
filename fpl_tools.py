@@ -4,6 +4,7 @@ import time
 import requests
 from typing import Dict, Any, List, Tuple, Optional
 import dateutil.parser
+import streamlit as st
 
 try:
     import pulp
@@ -703,6 +704,7 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
         "squad": squad
     }
 
+@st.cache_data(ttl=300, show_spinner=False)
 def suggest_transfers_for_custom_squad(
     squad: List[Dict[str, Any]], 
     bank: float, 

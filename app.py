@@ -257,6 +257,23 @@ def _get_dropdown_index(options_list, target_id):
     return 0
 
 
+def clear_transfer_cache():
+    """Bust the solver cache and mark stored transfers as stale.
+
+    Bound to the Strategy Mode widget's on_change callback so a strategy switch
+    invalidates the cached 4-GW optimization and forces Step 3 to recalculate.
+    """
+    try:
+        fpl_tools.suggest_transfers_for_custom_squad.clear()
+    except Exception:
+        pass
+    st.session_state["_transfers_stale"] = True
+    # Drop any stale manual-transfer dropdown selections too.
+    for k in list(st.session_state.keys()):
+        if k.startswith("man_out") or k.startswith("man_in"):
+            st.session_state.pop(k, None)
+
+
 # ------------------------------------------------------------------
 # Sidebar
 # ------------------------------------------------------------------
@@ -270,6 +287,7 @@ with st.sidebar:
         index=0,
         key="risk",
         help="Tunes the recommendation style and competitive posture.",
+        on_change=clear_transfer_cache,
     )
 
     risk_desc = {
@@ -570,6 +588,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                             "chips": chips_val,
                             "transfers": transfers
                         }
+                        st.session_state["_transfers_stale"] = False
                     except Exception as e:
                         st.error(f"Could not analyse squad: {e}")
 
@@ -585,6 +604,33 @@ if "override_analysis" in st.session_state:
         
         ov = st.session_state["override_analysis"]
         tr = ov["transfers"]
+
+        # Recalculate transfers if the strategy mode changed (cache-busted via the
+        # sidebar on_change callback), so Step 3 never shows stale recommendations.
+        if st.session_state.get("_transfers_stale"):
+            with st.spinner("Recalculating optimal transfers for new strategy..."):
+                try:
+                    # Refresh per-player xP under the new strategy, then re-solve.
+                    try:
+                        _bootstrap = fpl_tools._get_bootstrap()
+                        _fl = fpl_tools._build_fixture_lookup(_bootstrap)
+                        _players = {p["id"]: p for p in _bootstrap.get("elements", [])}
+                        for _p in ov["analysed_squad"]:
+                            _fp = _players.get(_p["player_id"])
+                            if _fp:
+                                _xp, _note = fpl_tools._player_xp(_fp, _fl, event=GW_ID, risk=risk_label.lower())
+                                _p["xp"] = _xp
+                                _p["status"] = _note
+                    except Exception:
+                        pass
+                    tr = fpl_tools.suggest_transfers_for_custom_squad(
+                        ov["analysed_squad"], ov["bank"], ov["ft"],
+                        eval_chips=ov.get("chips", []), event=GW_ID, risk=risk_label.lower(),
+                    )
+                    ov["transfers"] = tr
+                except Exception as e:
+                    st.warning(f"Could not recalculate transfers: {e}")
+            st.session_state["_transfers_stale"] = False
         
         evals = tr.get("chip_evaluations", [])
         if evals:
