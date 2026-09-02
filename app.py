@@ -842,7 +842,11 @@ if "override_analysis" in st.session_state:
             "The Transfer Market: Where seasons are made or ruined. Lock in your moves below."
         )
 
-        cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
+        surname_by_id = {p["player_id"]: (p.get("name", "").strip().split() or [""])[-1].lower() for p in ov["analysed_squad"]}
+        cur_options = [(None, "— Select Player —")] + sorted(
+            [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]],
+            key=lambda x: surname_by_id.get(x[0], ""),
+        )
 
         # Dynamic cache-busting signature: changing the recommended moves (or the
         # chip) changes this signature and therefore the widget keys, forcing
