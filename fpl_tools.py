@@ -527,6 +527,32 @@ def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str,
     return out
 
 
+def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
+                        out_e: Dict[str, Any], in_e: Dict[str, Any]) -> str:
+    """Plain-English explanation for why this transfer is recommended."""
+    # 1. Flagged / injured outgoing player
+    chance = out_e.get("chance_of_playing_this_round")
+    if chance is None:
+        chance = out_e.get("chance_of_playing_next_round")
+    status = out_e.get("status", "a")
+    if (chance is not None and _to_float(chance) < 75.0) or status in ("d", "i", "s"):
+        return "Replacing a flagged or injured player with a starter."
+
+    # 2. Downgrade to free up budget
+    out_sell = _to_float(out_entry.get("sell_price", out_entry.get("price")))
+    in_cost = _to_float(in_entry.get("price"))
+    if out_sell - in_cost >= 1.0:
+        return "Downgrading to free up budget for other squad upgrades."
+
+    # 3. Heavy net market momentum on the incoming player
+    net = _to_float(in_e.get("transfers_in_event")) - _to_float(in_e.get("transfers_out_event"))
+    if net > 100000.0:
+        return "Capitalizing on heavy market momentum and a potential price rise."
+
+    # 4. Default
+    return "Direct upgrade based on superior underlying data and expected points forecast."
+
+
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,
                 selling_price: Optional[float] = None, xp_gw: Optional[float] = None,
                 fdr: Optional[List[float]] = None) -> Dict[str, Any]:
@@ -780,7 +806,11 @@ def suggest_transfers_for_custom_squad(
                     "out": pool_by_id[o],
                     "in": pool_by_id[i],
                     "xp_gain": round(pool_by_id[i]["xp"] - pool_by_id[o]["xp"], 2),
-                    "cost": round(pool_by_id[i]["price"] - pool_by_id[o].get("sell_price", pool_by_id[o]["price"]), 2)
+                    "cost": round(pool_by_id[i]["price"] - pool_by_id[o].get("sell_price", pool_by_id[o]["price"]), 2),
+                    "rationale": _transfer_rationale(
+                        pool_by_id[o], pool_by_id[i],
+                        elements_by_id.get(o, {}), elements_by_id.get(i, {}),
+                    ),
                 })
                 
         hits = 0 if is_unlimited else max(0, len(mvs) - free_transfers)

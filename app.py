@@ -291,11 +291,11 @@ with st.sidebar:
     )
 
     risk_desc = {
-        "Conservative": "Protects your rank — favours popular, reliable starters and avoids points hits.",
-        "Balanced": "Pure expected points — the highest-projected line-up, full stop.",
-        "Aggressive": "Chases gains — low-ownership differentials, high ceilings, and willing to take hits.",
-        "Rank Protecting (Shield)": "Defend a mini-league lead — overweight high-ownership (>30%) assets to minimise rank volatility.",
-        "Rank Chasing (Hunting)": "Chase leaders — penalise template ownership and overweight low-ownership (<12%) high-xGI differentials.",
+        "Balanced": "Balanced: Targets the highest projected points across the full squad — the pure expected-points optimiser.",
+        "Conservative": "Conservative: Protects your rank — favours popular, reliable starters and avoids point-costing hits.",
+        "Aggressive": "Aggressive: Chases upside — low-ownership differentials, high ceilings, and willing to take hits.",
+        "Rank Protecting (Shield)": "Rank Protecting (Shield): Defends a mini-league lead — overweight high-ownership (>30%) players to minimise rank volatility.",
+        "Rank Chasing (Hunting)": "Rank Chasing (Hunting): Targets low-ownership (<12%) differentials with high expected goal involvement to catch leaders.",
     }
     st.caption(risk_desc[risk_label])
 
@@ -684,7 +684,12 @@ if "override_analysis" in st.session_state:
         except Exception:
             pass
 
-        transfer_html = f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
+        transfer_html = (
+            '<div style="font-size:0.78rem;color:#94a3b8;font-style:italic;margin:0 0 10px 0;">'
+            'Note: xP (Expected Points) is a mathematical forecast of potential performance based on underlying data, not a guaranteed outcome.'
+            '</div>'
+            f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
+        )
         if moves:
             for m in moves:
                 transfer_html += (
@@ -692,6 +697,9 @@ if "override_analysis" in st.session_state:
                     f'<span class="arrow">→</span><span class="inn">IN {m["in"]["name"]}</span>'
                     f'<span class="gain">+{m["xp_gain"]} xP · £{m["cost"]:+}m</span></div>'
                 )
+                rationale = m.get("rationale")
+                if rationale:
+                    transfer_html += f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 6px 0;">💡 {rationale}</div>'
         else:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
         st.markdown(_card(transfer_html, "⚙️ Optimized Transfers"), unsafe_allow_html=True)
