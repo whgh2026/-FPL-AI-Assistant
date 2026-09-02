@@ -1123,7 +1123,7 @@ with st.expander("🧠 DeepSeek Macro Strategy & Schedule Intelligence", expande
                             "Content-Type": "application/json",
                         },
                         json={
-                            "model": "deepseek-chat",
+                            "model": "deepseek-v4-flash",
                             "messages": [
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_prompt},
