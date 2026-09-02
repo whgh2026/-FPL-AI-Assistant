@@ -25,7 +25,44 @@ RISK_PROFILES = {
     "conservative": {"hit_cost": 6.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0},
     "balanced":     {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0},
     "aggressive":   {"hit_cost": 3.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2},
+    # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
+    # leader (hunt low-ownership high-xGI differentials).
+    "rank_protecting": {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.5, "shield_weight": 0.8},
+    "rank_chasing":    {"hit_cost": 3.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "hunt_weight": 0.6},
 }
+
+# Display-label aliases so the UI can pass human-readable mode names.
+_RISK_ALIASES = {
+    "rank protecting (shield)": "rank_protecting",
+    "rank protecting": "rank_protecting",
+    "shield": "rank_protecting",
+    "rank chasing (hunting)": "rank_chasing",
+    "rank chasing": "rank_chasing",
+    "hunting": "rank_chasing",
+}
+
+# Objective bonus for a cohesive budget-defender rotation pair (complementary
+# easy fixtures across the 4-GW horizon).
+ROTATION_PAIR_BONUS = 0.35
+ROTATION_MAX_PRICE = 4.5
+ROTATION_EASY_FDR = 2
+
+# ======================================================================
+# FUTURE COMMERCIAL ROADMAP — remaining optimization edges (next phase)
+# ======================================================================
+# 1. Price Change Predictor: the official tool reports a "velocity" that can
+#    exceed 100% (a change is expected at the next overnight update). Wire the
+#    velocity threshold into get_market_movers() so we act on near-certain rises
+#    and falls rather than raw transfer volume alone.
+# 2. Effective Ownership (EO): discount raw selected_by_percent against an
+#    estimated dead-team baseline to recover TRUE competitive ownership — the
+#    ownership that actually matters in a specific mini-league. This makes the
+#    Rank Protecting / Rank Chasing modes sharper.
+# 3. Rotation pairing can be upgraded from a static FDR-complement bonus to a
+#    full 2-player rotation optimizer with budget-defender rotation constraints.
+# 4. Auto-sub simulation can be made exact by modelling 0-minute outcomes per
+#    starter and validating every bench permutation against formation minima.
+# ======================================================================
 
 POS_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 GOAL_PTS = {1: 10, 2: 6, 3: 5, 4: 4}
@@ -84,7 +121,9 @@ def _to_float(v: Any) -> float:
         return 0.0
 
 def _risk_profile(risk: str) -> Dict[str, float]:
-    return RISK_PROFILES.get((risk or "balanced").lower(), RISK_PROFILES["balanced"])
+    key = (risk or "balanced").lower().strip()
+    key = _RISK_ALIASES.get(key, key)
+    return RISK_PROFILES.get(key, RISK_PROFILES["balanced"])
 
 def _clean_manager_id(raw: str) -> str:
     raw = (raw or "").strip()
@@ -201,8 +240,17 @@ def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
             frac = 0.45
         else:
             frac = 0.20
-    if status == "d":
-        frac *= 0.5
+    # Deadline fitness gating: a doubtful asset (status 'd', chance < 75%, or an
+    # injury/knock in the news feed) gets a severe availability penalty so the
+    # solver aggressively avoids starting or buying it near the deadline.
+    news = (p.get("news") or "").lower()
+    flagged = (
+        status == "d"
+        or (chance is not None and _to_float(chance) < 75.0)
+        or any(kw in news for kw in ("doubt", "injur", "knock", "fitness test", "late test"))
+    )
+    if flagged:
+        frac *= 0.15
     return max(0.0, min(1.0, frac))
 
 def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
@@ -222,20 +270,35 @@ def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
     xp = max(0.0, xp + momentum)
 
     prof = _risk_profile(risk)
-    if prof["ow_weight"] == prof["threat_weight"] == prof["floor_weight"] == 0.0:
-        return xp
-
     ow = _to_float(p.get("selected_by_percent"))
-    ow_score = max(-1.0, min(1.0, (ow - 15.0) / 20.0))      
-    threat = _to_float(p.get("threat"))
-    threat_score = max(0.0, min(1.0, threat / 300.0))        
-    floor = _expected_minute_fraction(p, p.get("status", "a"))
+    adj = 0.0
 
-    adj = (
-        prof["ow_weight"] * ow_score
-        + prof["threat_weight"] * threat_score
-        + prof["floor_weight"] * (floor - 0.7)
-    )
+    if prof.get("ow_weight", 0.0) != 0.0:
+        ow_score = max(-1.0, min(1.0, (ow - 15.0) / 20.0))
+        adj += prof["ow_weight"] * ow_score
+
+    if prof.get("threat_weight", 0.0) != 0.0:
+        threat_score = max(0.0, min(1.0, _to_float(p.get("threat")) / 300.0))
+        adj += prof["threat_weight"] * threat_score
+
+    if prof.get("floor_weight", 0.0) != 0.0:
+        floor = _expected_minute_fraction(p, p.get("status", "a"))
+        adj += prof["floor_weight"] * (floor - 0.7)
+
+    # Rank Protecting (Shield): overweight high-ownership assets (>30%) to
+    # minimise rank volatility when defending a mini-league lead.
+    if prof.get("shield_weight", 0.0) != 0.0:
+        shield = max(0.0, min(1.0, (ow - 30.0) / 40.0))
+        adj += prof["shield_weight"] * shield
+
+    # Rank Chasing (Hunting): penalise template ownership and overweight
+    # low-ownership (<12%) high-xGI differentials to maximise upside when chasing.
+    if prof.get("hunt_weight", 0.0) != 0.0:
+        xgi = _to_float(p.get("expected_goals_per_90")) + _to_float(p.get("expected_assists_per_90"))
+        template_penalty = min(1.0, ow / 50.0)
+        low_ow_boost = max(0.0, (12.0 - ow) / 12.0) * min(xgi / 0.6, 1.0)
+        adj += prof["hunt_weight"] * (low_ow_boost - template_penalty)
+
     return max(0.0, xp + adj)
 
 def _poisson_survival(threshold: int, lam: float) -> float:
@@ -451,8 +514,21 @@ def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
     except Exception:
         return 1
 
+def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> List[float]:
+    """Fixture Difficulty Rating for the next n gameweeks (5 = blank/hard)."""
+    team_id = p.get("team")
+    fx = fixture_lookup.get(team_id, [])
+    out = []
+    for i in range(n):
+        ev = start_event + i
+        f = next((x for x in fx if x.get("event") == ev), None)
+        out.append(float(f.get("difficulty", 3)) if f else 5.0)
+    return out
+
+
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,
-                selling_price: Optional[float] = None, xp_gw: Optional[float] = None) -> Dict[str, Any]:
+                selling_price: Optional[float] = None, xp_gw: Optional[float] = None,
+                fdr: Optional[List[float]] = None) -> Dict[str, Any]:
     entry = {
         "id": e["id"],
         "name": f"{e['first_name']} {e['second_name']}",
@@ -467,6 +543,8 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         entry["sell_price"] = selling_price
     if xp_gw is not None:
         entry["xp_gw"] = xp_gw
+    if fdr is not None:
+        entry["fdr"] = fdr
     return entry
 
 def _solve_squad(
@@ -532,6 +610,25 @@ def _solve_squad(
             for pid in must_include_ids if pid in by_id
         )
         xp_expr = xp_expr - friction
+
+    # Automated budget rotation pairing: reward complementary budget-defender
+    # pairs (<= £4.5m) whose fixtures alternate easy (FDR 1-2) across the horizon,
+    # enabling a clean rotational bench. Linearised pairwise bonus via z = x_a & x_b.
+    budget_def_ids = [pid for pid in ids if by_id[pid]["position"] == "DEF" and by_id[pid]["price"] <= ROTATION_MAX_PRICE + 1e-9]
+    rotation_bonus = 0.0
+    for a in range(len(budget_def_ids)):
+        for b in range(a + 1, len(budget_def_ids)):
+            pa, pb = budget_def_ids[a], budget_def_ids[b]
+            fa, fb = by_id[pa].get("fdr"), by_id[pb].get("fdr")
+            if not fa or not fb or len(fa) < 4 or len(fb) < 4:
+                continue
+            if all(min(fa[i], fb[i]) <= ROTATION_EASY_FDR for i in range(4)):
+                z = pulp.LpVariable(f"rot_{pa}_{pb}", cat="Binary")
+                prob += z <= x[pa], f"rot_a_{pa}_{pb}"
+                prob += z <= x[pb], f"rot_b_{pa}_{pb}"
+                prob += z >= x[pa] + x[pb] - 1, f"rot_ge_{pa}_{pb}"
+                rotation_bonus += ROTATION_PAIR_BONUS * z
+    xp_expr = xp_expr + rotation_bonus
 
     if must_include_ids is not None and hit_config is not None:
         transfers = pulp.lpSum((1 - x[pid]) for pid in must_include_ids if pid in by_id)
@@ -637,8 +734,9 @@ def suggest_transfers_for_custom_squad(
         # for final lineup/captaincy decisions (which are per-gameweek).
         xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
+        fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
-                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw))
+                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr))
         seen.add(pid)
 
     for e in bootstrap["elements"]:
@@ -651,7 +749,8 @@ def suggest_transfers_for_custom_squad(
         if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable"):
             continue
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
-        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw))
+        fdr = _player_fdr_list(e, fixture_lookup, event)
+        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr))
         seen.add(e["id"])
 
     # Total purchasing power = Bank + sum(selling price of the current squad).

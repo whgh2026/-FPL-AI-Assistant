@@ -265,17 +265,19 @@ with st.sidebar:
     st.caption("Your friendly pre-deadline assistant")
 
     risk_label = st.radio(
-        "Risk appetite",
-        ["Conservative", "Balanced", "Aggressive"],
-        index=1,
+        "Strategy mode",
+        ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
+        index=0,
         key="risk",
-        help="Tunes the recommendation style.",
+        help="Tunes the recommendation style and competitive posture.",
     )
 
     risk_desc = {
         "Conservative": "Protects your rank — favours popular, reliable starters and avoids points hits.",
         "Balanced": "Pure expected points — the highest-projected line-up, full stop.",
         "Aggressive": "Chases gains — low-ownership differentials, high ceilings, and willing to take hits.",
+        "Rank Protecting (Shield)": "Defend a mini-league lead — overweight high-ownership (>30%) assets to minimise rank volatility.",
+        "Rank Chasing (Hunting)": "Chase leaders — penalise template ownership and overweight low-ownership (<12%) high-xGI differentials.",
     }
     st.caption(risk_desc[risk_label])
 
@@ -656,7 +658,7 @@ if "override_analysis" in st.session_state:
             # Reset stale manual-transfer dropdown selections so the new chip's
             # recommended moves re-initialise the dropdowns from scratch.
             for k in list(st.session_state.keys()):
-                if k.startswith("man_out_") or k.startswith("man_in_"):
+                if k.startswith("man_out") or k.startswith("man_in"):
                     st.session_state.pop(k, None)
 
         c_fast1, c_fast2 = st.columns(2)
@@ -702,8 +704,21 @@ if "override_analysis" in st.session_state:
         )
 
         cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
+
+        # Dynamic cache-busting signature: changing the recommended moves (or the
+        # chip) changes this signature and therefore the widget keys, forcing
+        # Streamlit to rebuild the transfer dropdowns instead of retaining stale picks.
+        moves_sig = "*".join(f"{m['out']['id']}-{m['in']['id']}" for m in moves) or "nomoves"
+
+        # Cap the transfer count to a legal range (and clamp any stale session value).
+        if confirmed_chip in ("Wildcard", "Free Hit"):
+            n_moves_max = 15
+        else:
+            n_moves_max = max(len(moves), int(ov.get("ft", 0)) + 3)
+        if int(st.session_state.get("n_moves_manual", 0)) > n_moves_max:
+            st.session_state["n_moves_manual"] = n_moves_max
         
-        n_moves = st.number_input("Number of transfers to apply", 0, 15, key="n_moves_manual")
+        n_moves = st.number_input("Number of transfers to apply", 0, n_moves_max, key="n_moves_manual")
         
         out_ids, in_ids = [], []
         try:
@@ -736,9 +751,10 @@ if "override_analysis" in st.session_state:
             if i < len(moves):
                 def_out_idx = _get_dropdown_index(cur_options, moves[i]["out"]["id"])
 
-            out_sel = c1.selectbox(f"Transfer Out {i+1}", options=cur_options, format_func=lambda x: x[1], index=def_out_idx, key=f"man_out_{i}")
+            key_out = f"man_out*{i}*{moves_sig}"
+            out_sel = c1.selectbox(f"Transfer Out {i+1}", options=cur_options, format_func=lambda x: x[1], index=def_out_idx, key=key_out)
 
-            # Lock the incoming list to the outgoing player's position.
+            # Lock the incoming list strictly to the outgoing player's position.
             out_pos = cur_id_to_pos.get(out_sel[0]) if out_sel and out_sel[0] is not None else None
             if out_pos is None and i < len(moves):
                 out_pos = moves[i]["out"].get("position")
@@ -746,11 +762,13 @@ if "override_analysis" in st.session_state:
                 out_pos = "MID"
             in_options = in_options_by_pos[out_pos]
 
+            # Locate the recommended incoming player directly in the filtered list.
             def_in_idx = 0
             if i < len(moves):
                 def_in_idx = _get_dropdown_index(in_options, moves[i]["in"]["id"])
 
-            in_sel = c2.selectbox(f"Transfer In {i+1}", options=in_options, format_func=lambda x: x[1], index=def_in_idx, key=f"man_in_{i}")
+            key_in = f"man_in*{i}_{moves_sig}"
+            in_sel = c2.selectbox(f"Transfer In {i+1}", options=in_options, format_func=lambda x: x[1], index=def_in_idx, key=key_in)
 
             if out_sel[0]: out_ids.append(out_sel[0])
             if in_sel[0]: in_ids.append(in_sel[0])
