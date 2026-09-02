@@ -364,6 +364,7 @@ with st.container(border=True):
         st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
     elif preview:
         
+        # RESTORED BASELINE SQUAD METRICS (Top 3 + Bottom 3 = 6 metrics)
         m1, m2, m3 = st.columns(3)
         m1.metric("Team", preview["team_name"])
         m2.metric("Bank (Unspent)", f"£{preview['bank']}m")
@@ -382,6 +383,11 @@ with st.container(border=True):
         st.session_state["base_st_xp"] = st_xp
         st.session_state["base_be_xp"] = be_xp
         st.session_state["base_tot_xp"] = tot_xp
+
+        x1, x2, x3 = st.columns(3)
+        x1.metric("🛡️ Baseline Starting XI xP", f"{st_xp} xP")
+        x2.metric("🪑 Baseline Bench xP", f"{be_xp} xP")
+        x3.metric("📊 Baseline Squad xP", f"{tot_xp} xP")
 
         # Baseline Team Sheet 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -622,16 +628,36 @@ if "override_analysis" in st.session_state:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
         st.markdown(_card(transfer_html, "⚙️ Optimized Transfers"), unsafe_allow_html=True)
 
-        st.markdown("#### Confirm or Customize Transfers")
-        st.caption(
-            "Review the recommended transfers based on your variables. The dropdowns below default to the AI suggestions. "
-            "You can accept them, customize them, or hold your current squad."
-        )
+        # STATE SYNCHRONIZATION: Reset input count to match moves length when chip selection changes
+        target_default_moves = len(moves)
+        last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
+        if last_chip_tracked != confirmed_chip or "n_moves_manual" not in st.session_state:
+            st.session_state["n_moves_manual"] = target_default_moves
+            st.session_state["last_confirmed_chip_tracker"] = confirmed_chip
+
+        # FAST-TRACK HOLD BUTTON (Allows skipping custom dropdowns entirely)
+        c_fast1, c_fast2 = st.columns([2, 1])
+        with c_fast1:
+            fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
         
+        if fast_hold:
+            with st.spinner("Generating Final Lineup with current squad…"):
+                analysed_current = ov["analysed_squad"]
+                lineup = fpl_tools.select_starting_xi(analysed_current)
+                lineup["confirmed_chip"] = confirmed_chip
+                st.session_state["manual_final"] = lineup
+                st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### Or, Customize Your Transfers Below")
+        st.caption(
+            "Review or modify the recommended moves. You can adjust the transfer count, customize individual player selections, "
+            "or accept the AI defaults below."
+        )
+
         cur_options = [(None, "— Select Player —")] + [(p["player_id"], f"{p['name']} ({p['team']})") for p in ov["analysed_squad"]]
         
-        n_moves_default = len(moves)
-        n_moves = st.number_input("Number of transfers to apply", 0, 15, min(n_moves_default, 15), key="n_moves_manual")
+        n_moves = st.number_input("Number of transfers to apply", 0, 15, key="n_moves_manual")
         
         out_ids, in_ids = [], []
         try:
@@ -665,34 +691,30 @@ if "override_analysis" in st.session_state:
             if out_sel[0]: out_ids.append(out_sel[0])
             if in_sel[0]: in_ids.append(in_sel[0])
 
-        colA, colB = st.columns(2)
-        with colA:
-            apply_btn = st.button("Apply Transfers & Generate Final Lineup", type="primary", use_container_width=True, key="btn_apply_man")
-        with colB:
-            hold_btn = st.button("Make No Changes (Hold)", type="secondary", use_container_width=True, key="btn_hold_man")
+        st.markdown("<br>", unsafe_allow_html=True)
+        apply_btn = st.button("Apply Custom Transfers & Generate Final Lineup", type="primary", use_container_width=True, key="btn_apply_man")
 
-        if apply_btn or hold_btn:
+        if apply_btn:
             errors = []
             new_ids = [p["player_id"] for p in ov["analysed_squad"]]
             
-            if not hold_btn:
-                if len(out_ids) != int(n_moves) or len(in_ids) != int(n_moves):
-                    errors.append("Please complete all transfer selections.")
-                
-                for oid in out_ids:
-                    if oid in new_ids: new_ids.remove(oid)
-                for iid in in_ids:
-                    if iid in new_ids: errors.append("You already own that player.")
-                    new_ids.append(iid)
+            if len(out_ids) != int(n_moves) or len(in_ids) != int(n_moves):
+                errors.append("Please complete all transfer selections.")
+            
+            for oid in out_ids:
+                if oid in new_ids: new_ids.remove(oid)
+            for iid in in_ids:
+                if iid in new_ids: errors.append("You already own that player.")
+                new_ids.append(iid)
 
-            if not errors and not hold_btn:
+            if not errors:
                 # Manual Budget Validation
                 try:
                     original_cost = sum(players_by_id[p["player_id"]]["now_cost"] / 10.0 for p in ov["analysed_squad"] if p["player_id"] in players_by_id)
                     new_cost = sum(players_by_id[pid]["now_cost"] / 10.0 for pid in new_ids if pid in players_by_id)
                     available_budget = original_cost + ov["bank"]
                     
-                    if new_cost > available_budget + 0.001: # Float tolerance
+                    if new_cost > available_budget + 0.001: 
                         errors.append(f"Not enough funds! Your manual transfers cost £{new_cost:.1f}m, but your maximum budget is £{available_budget:.1f}m.")
                 except Exception:
                     pass
@@ -722,6 +744,7 @@ if "override_analysis" in st.session_state:
                         lineup = fpl_tools.select_starting_xi(analysed_final)
                         lineup["confirmed_chip"] = confirmed_chip
                         st.session_state["manual_final"] = lineup
+                        st.rerun()
 
             if errors:
                 for e in errors: st.markdown(f'<div class="alert-box">{e}</div>', unsafe_allow_html=True)
