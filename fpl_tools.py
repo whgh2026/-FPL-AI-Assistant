@@ -547,7 +547,7 @@ def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
     # 3. Heavy net market momentum on the incoming player
     net = _to_float(in_e.get("transfers_in_event")) - _to_float(in_e.get("transfers_out_event"))
     if net > 100000.0:
-        return "Capitalizing on heavy market momentum and a potential price rise."
+        return "Capitalising on heavy market momentum and a potential price rise."
 
     # 4. Default
     return "Direct upgrade based on superior underlying data and expected points forecast."
@@ -917,7 +917,7 @@ def suggest_transfers_for_custom_squad(
                 crisis_msg = f" Your squad has {current_out_statuses} flagged players and a reset yields <b>+{score:.1f} xP</b>." if current_out_statuses >= 3 and chip_name == "Wildcard" else f" Yields a massive <b>+{score:.1f} xP</b> over standard transfers."
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended.{crisis_msg}")
             elif chip_name == "Bench Boost":
-                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended. Your optimized bench provides a massive <b>+{score:.1f} xP</b>.")
+                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended. Your optimised bench provides a massive <b>+{score:.1f} xP</b>.")
             elif chip_name == "Triple Captain":
                 cap_name = cap['name'] if cap else "Captain"
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Recommended. <b>{cap_name}</b> has an elite ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")

@@ -322,7 +322,7 @@ st.markdown(
     '<div class="overview">'
     '<b>What this does:</b> Pop in your Manager ID to pull your official current squad. Then input your variables '
     '(Free Transfers, Bank, Active Chips) and verify your actual live team. The algorithm will calculate the optimal '
-    'transfers to maximize expected points (xP) and generate your best starting XI, bench order, and captaincy.'
+    'transfers to maximise expected points (xP) and generate your best starting XI, bench order, and captaincy.'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -544,7 +544,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                             override_squad.append(selected[0])
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Run Algorithmic Optimizer", type="primary", use_container_width=True, key="btn_analyse_override"):
+        if st.button("Run Algorithmic Optimiser", type="primary", use_container_width=True, key="btn_analyse_override"):
             
             active_squad_ids = override_squad if show_override else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
             
@@ -659,7 +659,7 @@ if "override_analysis" in st.session_state:
         
         if confirmed_chip in ("Wildcard", "Free Hit"):
             moves = tr.get("wildcard_transfers", tr.get("transfers", []))
-            transfer_advice = f"<b>{confirmed_chip} Active:</b> {len(moves)} transfers optimized with 0 point penalties."
+            transfer_advice = f"<b>{confirmed_chip} Active:</b> {len(moves)} transfers optimised with 0 point penalties."
         else:
             moves = tr.get("standard_transfers", tr.get("transfers", []))
             transfer_advice = tr.get("hit_advice", "")
@@ -702,7 +702,7 @@ if "override_analysis" in st.session_state:
                     transfer_html += f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 6px 0;">💡 {rationale}</div>'
         else:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
-        st.markdown(_card(transfer_html, "⚙️ Optimized Transfers"), unsafe_allow_html=True)
+        st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
 
         target_default_moves = len(moves)
         last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
@@ -751,9 +751,9 @@ if "override_analysis" in st.session_state:
                 st.rerun()
 
         st.markdown("---")
-        st.markdown("#### Or, Customize Your Transfers Below")
+        st.markdown("#### Or, Customise Your Transfers Below")
         st.caption(
-            "Review or modify the recommended moves. You can adjust the transfer count, customize individual player selections, "
+            "Review or modify the recommended moves. You can adjust the transfer count, customise individual player selections, "
             "or accept the AI defaults below."
         )
 

@@ -37,7 +37,7 @@ def extract_squad_from_image(uploaded_file) -> dict:
         image_part = types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png")
 
         prompt = """
-        Analyze this Fantasy Premier League (FPL) squad screenshot.
+        Analyse this Fantasy Premier League (FPL) squad screenshot.
         Extract all 15 visible players.
         Return ONLY a JSON list of objects with the exact schema:
         [
