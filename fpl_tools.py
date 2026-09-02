@@ -600,7 +600,6 @@ def suggest_transfers_for_custom_squad(
         threshold = THRESHOLDS.get(chip_name, 99.0)
         passed_threshold = score >= threshold
         
-        # Wildcard exception: Lower xP barrier if squad is ravaged by injuries
         if chip_name == "Wildcard" and not passed_threshold:
             if score >= 10.0 and current_out_statuses >= 4:
                 passed_threshold = True
@@ -617,7 +616,6 @@ def suggest_transfers_for_custom_squad(
                 cap_name = cap['name'] if cap else "Captain"
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Recommended. <b>{cap_name}</b> has an elite ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")
         else:
-            # Failed threshold or lost to a better chip
             if passed_threshold:
                 chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Yields +{score:.1f} xP, but FPL limits 1 chip/wk. <b>{recommended_chip}</b> is mathematically superior right now.")
             else:
