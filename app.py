@@ -1,3 +1,5 @@
+import os
+import requests
 import streamlit as st
 import fpl_tools
 import squad_override
@@ -257,6 +259,15 @@ def _get_dropdown_index(options_list, target_id):
     return 0
 
 
+def _surname(p: dict) -> str:
+    """Sortable surname key for a player dict (falls back to the last name word)."""
+    sn = (p.get("second_name") or "").strip().lower()
+    if sn:
+        return sn
+    parts = (p.get("web_name") or "").strip().lower().split()
+    return parts[-1] if parts else ""
+
+
 def clear_transfer_cache():
     """Bust the solver cache and mark stored transfers as stale.
 
@@ -281,32 +292,17 @@ with st.sidebar:
     st.markdown("## ⚽ FPL Quant Manager")
     st.caption("Your data-driven pre-deadline quant engine")
 
-    risk_label = st.radio(
-        "Strategy mode",
-        ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
-        index=0,
-        key="risk",
-        help="Tunes the recommendation style and competitive posture.",
-        on_change=clear_transfer_cache,
-    )
-
-    risk_desc = {
-        "Balanced": "Balanced: Targets the highest projected points across the full squad — the pure expected-points optimiser.",
-        "Conservative": "Conservative: Protects your rank — favours popular, reliable starters and avoids point-costing hits.",
-        "Aggressive": "Aggressive: Chases upside — low-ownership differentials, high ceilings, and willing to take hits.",
-        "Rank Protecting (Shield)": "Rank Protecting (Shield): Defends a mini-league lead — overweight high-ownership (>30%) players to minimise rank volatility.",
-        "Rank Chasing (Hunting)": "Rank Chasing (Hunting): Targets low-ownership (<12%) differentials with high expected goal involvement to catch leaders.",
-    }
-    st.caption(risk_desc[risk_label])
-
     with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
         st.markdown(
-            "The engine projects points over a **4-Gameweek rolling window**, weighting the next gameweek "
-            "heaviest and each following week slightly less (1.0 → 0.85 → 0.70 → 0.55). "
-            "**Transfer Friction** values patience: every free transfer spent must clear a points hurdle, "
-            "so the tool prefers to **bank free transfers** (up to 5) unless an upgrade is clearly worth it. "
-            "Remember, **xP (Expected Points)** is a statistical average over many simulated outcomes — "
-            "it is a forecast, **not a guaranteed score**."
+            "**Why a 4-Gameweek Horizon?**  \n"
+            "Magic. (And a highly guarded statistical sweet spot). We could tell you exactly why the 4-week decay "
+            "curve (1.0 → 0.85 → 0.70 → 0.55) perfectly isolates expected minutes before real-world variance ruins "
+            "the signal, but then everyone would copy our math. Just trust that the engine balances immediate returns "
+            "while keeping you out of long-term fixture traps.\n\n"
+            "**Transfer Friction & Capital Preservation:**  \n"
+            "Banked free transfers are FPL gold. The model applies a strict mathematical penalty to any transfer, "
+            "refusing to spend your transfers unless the incoming player's projected xP delta decisively clears the "
+            "transaction cost."
         )
 
     st.markdown("---")
@@ -351,6 +347,26 @@ st.markdown(
 
 
 # ------------------------------------------------------------------
+# Strategy selector (prominent, above Manager ID)
+# ------------------------------------------------------------------
+st.markdown("### 🎯 Select Your Strategy")
+risk_label = st.radio(
+    "Strategy mode",
+    ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
+    index=0,
+    key="risk",
+    help="Tunes the transfer hurdle rate and competitive posture.",
+    on_change=clear_transfer_cache,
+)
+st.markdown(
+    "- **Balanced:** Standard transfer hurdle rate; balanced risk-reward profile.\n"
+    "- **Conservative:** High hurdle rate; prioritises rolling and banking free transfers.\n"
+    "- **Aggressive:** Lower hurdle rate; accepts point hits (-4) if immediate xP upside justifies it.\n"
+    "- **Rank Protecting (Shield):** Weights effective ownership (EO) to mirror template picks and defend high ranks.\n"
+    "- **Rank Chasing (Hunting):** Deprecates template picks; targets low-ownership differentials with high underlying xGI."
+)
+
+# ------------------------------------------------------------------
 # Step 1 — Your Baseline Team
 # ------------------------------------------------------------------
 st.markdown(
@@ -360,7 +376,7 @@ st.markdown(
 
 with st.container(border=True):
     st.caption(
-        "Enter your Manager ID to pull your official baseline squad. This populates your starting 15 players."
+        "Enter your Manager ID to pull your official baseline squad. This populates your current starting 11 + subs."
     )
 
     col1, col2 = st.columns([3, 1])
@@ -492,6 +508,8 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
             teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
             pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
+            surname_by_id = {p["id"]: _surname(p) for p in bootstrap.get("elements", [])}
+
             dropdown_options = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
             for p in bootstrap.get("elements", []):
                 pos = pos_map.get(p["element_type"])
@@ -501,10 +519,15 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                     display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m | {xp} xP"
                     dropdown_options[pos].append((p["id"], display))
 
+            for pos in POS_ORDER:
+                dropdown_options[pos] = [dropdown_options[pos][0]] + sorted(
+                    dropdown_options[pos][1:], key=lambda x: surname_by_id.get(x[0], "")
+                )
+
             all_options = [(None, "— Select Player —")]
             for pos in POS_ORDER:
                 all_options.extend(dropdown_options[pos][1:])
-            all_options.sort(key=lambda x: x[1].lower() if x[0] else "")
+            all_options.sort(key=lambda x: "" if x[0] is None else surname_by_id.get(x[0], ""))
 
             squad_default = st.session_state.get("squad_preview", {}).get("squad", [])
             uploaded_image = st.file_uploader("Upload screenshot to auto-fill midweek changes", type=["png", "jpg", "jpeg"], key="override_image")
@@ -833,8 +856,11 @@ if "override_analysis" in st.session_state:
                     initial = p['first_name'][0] + "." if p.get('first_name') else ""
                     display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m"
                     in_options_by_pos[pos].append((p["id"], display))
+            surname_by_id = {p["id"]: _surname(p) for p in bootstrap.get("elements", [])}
             for pos in POS_ORDER:
-                in_options_by_pos[pos].sort(key=lambda x: x[1].lower() if x[0] else "")
+                in_options_by_pos[pos] = [in_options_by_pos[pos][0]] + sorted(
+                    in_options_by_pos[pos][1:], key=lambda x: surname_by_id.get(x[0], "")
+                )
         except:
             in_options_by_pos = {pos: cur_options for pos in POS_ORDER}
 
@@ -1036,3 +1062,84 @@ with st.expander("📊 Player Scout & xP Rankings", expanded=False):
         html += "</div>"
         st.markdown(_card(html, "📈 Ranked by xP"), unsafe_allow_html=True)
         st.markdown(get_caveat_html(), unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------
+# DeepSeek Macro Strategy & Schedule Intelligence
+# ------------------------------------------------------------------
+with st.expander("🧠 DeepSeek Macro Strategy & Schedule Intelligence", expanded=False):
+    lineup = st.session_state.get("manual_final")
+    if not lineup:
+        st.info("Generate your final lineup (Step 4) to unlock macro qualitative analysis.")
+    else:
+        run_macro = st.button("🧠 Generate Macro Analysis", type="secondary", key="btn_deepseek")
+        if run_macro:
+            with st.spinner("Consulting the macro planner…"):
+                try:
+                    api_key = os.environ.get("DEEPSEEK_API_KEY")
+                    if not api_key:
+                        raise RuntimeError("DEEPSEEK_API_KEY not set")
+
+                    tr = st.session_state.get("override_analysis", {}).get("transfers", {})
+                    moves = tr.get("transfers", tr.get("standard_transfers", []))
+                    hits = int(tr.get("hits", 0))
+                    hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
+                    total_hit = hits * hit_cost
+
+                    xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("xi", []))
+                    bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("bench", []))
+                    move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in moves) or "None (holding)"
+
+                    context = (
+                        f"Starting XI: {xi_str}\n"
+                        f"Bench: {bench_str}\n"
+                        f"Proposed transfers: {move_str}\n"
+                        f"Total point hit cost: -{total_hit}\n"
+                    )
+
+                    system_prompt = (
+                        "You are a former overall Fantasy Premier League winner and quantitative macro planner. "
+                        "Evaluate the user's squad over a 4-gameweek tactical window. Be concise, highly tactical, "
+                        "and data-driven. Return exactly 3-4 short bullet points."
+                    )
+                    user_prompt = (
+                        "Evaluate this FPL squad over the next 4 gameweeks and give 3-4 concise tactical bullets "
+                        "using these benchmark rules:\n"
+                        "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
+                        "validate structural health and endorse rolling the transfer for future leverage.\n"
+                        "2. 'Crisis' Benchmark (Wildcard trigger): if it recommends a -8 hit or worse, or flags "
+                        "widespread injury/suspension disruption, advise overriding the point hits and deploying the Wildcard.\n"
+                        "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
+                        "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
+                        "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
+                        "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n\n"
+                        f"Team context:\n{context}"
+                    )
+
+                    resp = requests.post(
+                        "https://api.deepseek.com/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": "deepseek-chat",
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            "temperature": 0.4,
+                        },
+                        timeout=30,
+                    )
+                    resp.raise_for_status()
+                    st.session_state["deepseek_result"] = resp.json()["choices"][0]["message"]["content"]
+                except Exception:
+                    st.session_state["deepseek_result"] = "Set DEEPSEEK_API_KEY to unlock macro qualitative analysis."
+
+        result = st.session_state.get("deepseek_result")
+        if result:
+            if result == "Set DEEPSEEK_API_KEY to unlock macro qualitative analysis.":
+                st.info(result)
+            else:
+                st.markdown(result)
