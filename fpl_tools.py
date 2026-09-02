@@ -40,8 +40,10 @@ VALID_FORMATIONS = [
 ]
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
+_LAST_FETCH_TIME = None
 
 def _cached_json(url: str, ttl: int = 300) -> Any:
+    global _LAST_FETCH_TIME
     now = time.time()
     hit = _CACHE.get(url)
     if hit and now - hit["t"] < ttl:
@@ -50,7 +52,15 @@ def _cached_json(url: str, ttl: int = 300) -> Any:
     resp.raise_for_status()
     data = resp.json()
     _CACHE[url] = {"t": now, "data": data}
+    if "bootstrap-static" in url:
+        _LAST_FETCH_TIME = now
     return data
+
+def get_api_timestamp() -> float:
+    global _LAST_FETCH_TIME
+    if _LAST_FETCH_TIME is None:
+        _get_bootstrap()
+    return _LAST_FETCH_TIME or time.time()
 
 def _get_bootstrap() -> Dict[str, Any]:
     return _cached_json(f"{BASE_URL}/bootstrap-static/")
@@ -540,6 +550,8 @@ def suggest_transfers_for_custom_squad(
     bought_ids = [m["in"]["id"] for m in std_moves]
     std_squad = [p for p in squad if p["player_id"] not in sold_ids]
     
+    current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
+    
     for in_id in bought_ids:
         fpl_p = elements_by_id[in_id]
         pos = POS_MAP.get(fpl_p["element_type"])
@@ -559,7 +571,7 @@ def suggest_transfers_for_custom_squad(
     std_best_xi = select_starting_xi(std_squad)
 
     # ==============================================================
-    # 4. Chip Scoring & Ranking
+    # 4. Ultra-Strict Chip Scoring & Ranking
     # ==============================================================
     chip_scores = {}
     if "Wildcard" in eval_chips:
@@ -574,33 +586,42 @@ def suggest_transfers_for_custom_squad(
 
     ranked_chips = sorted(chip_scores.items(), key=lambda x: x[1], reverse=True)
     
-    THRESHOLDS = {"Wildcard": 15.0, "Free Hit": 14.0, "Bench Boost": 12.0, "Triple Captain": 8.5}
+    # Ultra-Strict Compelling Reason Thresholds
+    THRESHOLDS = {"Wildcard": 20.0, "Free Hit": 18.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
     
     chip_advice_list = []
     if len(eval_chips) > 1:
         chip_advice_list.append("⚠️ <b>Official FPL Rule:</b> You may only activate 1 chip per Gameweek. The system has ranked your selections below based on mathematical scarcity:")
 
     recommended_chip = "None (Hold Chips)"
-    winner_found = False
+    best_chip_gain = 0.0
 
     for chip_name, score in ranked_chips:
         threshold = THRESHOLDS.get(chip_name, 99.0)
-        if score >= threshold and not winner_found:
-            winner_found = True
+        passed_threshold = score >= threshold
+        
+        # Wildcard exception: Lower xP barrier if squad is ravaged by injuries
+        if chip_name == "Wildcard" and not passed_threshold:
+            if score >= 10.0 and current_out_statuses >= 4:
+                passed_threshold = True
+
+        if passed_threshold and recommended_chip == "None (Hold Chips)":
             recommended_chip = chip_name
+            best_chip_gain = score
             if chip_name in ("Wildcard", "Free Hit"):
-                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Top Recommendation. Yields a massive <b>+{score:.1f} xP</b> over standard transfers.")
+                crisis_msg = f" Your squad has {current_out_statuses} flagged players and a reset yields <b>+{score:.1f} xP</b>." if current_out_statuses >= 4 and chip_name == "Wildcard" else f" Yields a massive <b>+{score:.1f} xP</b> over standard transfers."
+                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended.{crisis_msg}")
             elif chip_name == "Bench Boost":
-                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Top Recommendation. Your optimized bench provides a massive <b>+{score:.1f} xP</b>.")
+                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Strongly Recommended. Your optimized bench provides a massive <b>+{score:.1f} xP</b>.")
             elif chip_name == "Triple Captain":
                 cap_name = cap['name'] if cap else "Captain"
-                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Top Recommendation. <b>{cap_name}</b> has a high ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")
+                chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Recommended. <b>{cap_name}</b> has an elite ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")
         else:
             # Failed threshold or lost to a better chip
-            if score >= threshold:
-                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Save it. Yields +{score:.1f} xP, but FPL limits 1 chip/wk. <b>{recommended_chip}</b> is mathematically superior right now.")
+            if passed_threshold:
+                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Yields +{score:.1f} xP, but FPL limits 1 chip/wk. <b>{recommended_chip}</b> is mathematically superior right now.")
             else:
-                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Save it. Only projects <b>+{score:.1f} xP</b> (requires +{threshold:.1f} xP to justify wasting this scarce asset).")
+                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Only projects <b>+{score:.1f} xP</b>. Save this scarce asset for a compelling Double/Blank Gameweek (requires +{threshold:.1f} xP).")
 
     # Generate Standard Advice
     n = len(std_moves)
