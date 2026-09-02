@@ -94,6 +94,8 @@ TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
 OUT_STATUSES = {"i", "s", "u", "n"}
 
+# Official FPL formation constraints: exactly 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD,
+# with 10 outfield players + 1 GK = 11 starters total.
 VALID_FORMATIONS = [
     (d, m, f)
     for d in range(3, 6) for m in range(2, 6) for f in range(1, 4)
@@ -240,32 +242,16 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
     return lookup
 
 def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
+    # Availability haircut using the official FPL API flag (chance_of_playing_*).
+    # None/100 -> retain 100%; 75 -> 0.75; 50 -> 0.50; 25 -> 0.25; 0 -> 0.0.
+    # (Injured/suspended/unavailable statuses are already zeroed upstream.)
     chance = p.get("chance_of_playing_next_round")
     if chance is None:
         chance = p.get("chance_of_playing_this_round")
     if chance is not None:
         frac = _to_float(chance) / 100.0
     else:
-        starts = _to_float(p.get("starts_per_90"))
-        if starts >= 0.9:
-            frac = 0.94
-        elif starts >= 0.6:
-            frac = 0.75
-        elif starts >= 0.3:
-            frac = 0.45
-        else:
-            frac = 0.20
-    # Deadline fitness gating: a doubtful asset (status 'd', chance < 75%, or an
-    # injury/knock in the news feed) gets a severe availability penalty so the
-    # solver aggressively avoids starting or buying it near the deadline.
-    news = (p.get("news") or "").lower()
-    flagged = (
-        status == "d"
-        or (chance is not None and _to_float(chance) < 75.0)
-        or any(kw in news for kw in ("doubt", "injur", "knock", "fitness test", "late test"))
-    )
-    if flagged:
-        frac *= 0.15
+        frac = 1.0
     return max(0.0, min(1.0, frac))
 
 def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
@@ -1113,50 +1099,9 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     if best_xi is None:
         return {"xi": [], "bench": [], "formation": None, "captain": None, "vice_captain": None, "total_xp": 0.0}
 
-    captain = next((p for p in squad if p.get("is_captain")), None)
-    vice = next((p for p in squad if p.get("is_vice_captain")), None)
-
-    flagged = [p for p in (captain, vice) if p is not None]
-    flagged_ids = {_pid(p) for p in flagged}
-    for fp in flagged:
-        if any(_pid(p) == _pid(fp) for p in best_xi):
-            continue
-        pos = fp.get("position")
-        same_pos = [p for p in best_xi if p.get("position") == pos and _pid(p) not in flagged_ids]
-        if not same_pos:
-            same_pos = [p for p in best_xi if p.get("position") == pos]
-        if not same_pos:
-            continue
-        weakest = min(same_pos, key=lambda x: x.get("xp", 0))
-        best_xi = [fp if _pid(p) == _pid(weakest) else p for p in best_xi]
-
-    if captain is None:
-        captain = max(best_xi, key=lambda x: x.get("xp", 0))
-
-    # Vice-captain must be the highest-projected OUTFIELD starter in a completely
-    # different fixture/match than the captain, mitigating correlated postponement
-    # risk (if the captain's game is called off, the VC's game should still go ahead).
-    opp_lookup = _next_gw_opponents()
-
-    def _team_key(p: Dict[str, Any]) -> Any:
-        return p.get("team_id", p.get("team"))
-
-    def _diff_fixture_outfield(p: Dict[str, Any]) -> bool:
-        k = _team_key(p)
-        return (
-            p.get("position") != "GK"
-            and _pid(p) != _pid(captain)
-            and k != _team_key(captain)
-            and k not in opp_lookup.get(_team_key(captain), set())
-        )
-
-    if vice is None or _pid(vice) == _pid(captain) or not _diff_fixture_outfield(vice):
-        candidates = [p for p in best_xi if _diff_fixture_outfield(p)]
-        if not candidates:
-            # Fall back to any other starter (different team) if no clean outfield fixture split exists.
-            candidates = [p for p in best_xi if _pid(p) != _pid(captain)]
-        candidates.sort(key=lambda x: x.get("xp", 0), reverse=True)
-        vice = candidates[0] if candidates else None
+    # Automated captaincy: (C) = highest-projected starter, (VC) = second-highest.
+    captain = max(best_xi, key=lambda x: x.get("xp", 0))
+    vice = max((p for p in best_xi if _pid(p) != _pid(captain)), key=lambda x: x.get("xp", 0), default=None)
 
     xi_ids = {_pid(p) for p in best_xi}
     bench = [p for p in squad if _pid(p) not in xi_ids]
@@ -1164,34 +1109,18 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     bench_out = [p for p in bench if p.get("position") != "GK"]
     bench_out.sort(key=lambda x: x.get("xp", 0), reverse=True)
 
-    # Formation-constrained auto-sub ordering: the first outfield bench slot must be
-    # able to legally cover a thin line (exactly 3 DEF or exactly 1 FWD) so a
-    # zero-minute starter can be auto-substituted without breaking the minimum
-    # formation (min 1 GKP / 3 DEF / 1 FWD).
-    formation_alert = None
-    d, _m, f = best_form
-    if d == 3:
-        def_idx = next((i for i, p in enumerate(bench_out) if p.get("position") == "DEF"), None)
-        if def_idx is None:
-            formation_alert = "⚠️ XI has 3 DEF but no DEF cover on the bench — a zero-minute defender cannot be auto-subbed."
-        elif def_idx != 0:
-            bench_out.insert(0, bench_out.pop(def_idx))
-    elif f == 1:
-        fwd_idx = next((i for i, p in enumerate(bench_out) if p.get("position") == "FWD"), None)
-        if fwd_idx is None:
-            formation_alert = "⚠️ XI has 1 FWD but no FWD cover on the bench — a zero-minute forward cannot be auto-subbed."
-        elif fwd_idx != 0:
-            bench_out.insert(0, bench_out.pop(fwd_idx))
-
     pos_order = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
     xi_sorted = sorted(best_xi, key=lambda x: (pos_order.get(x.get("position"), 5), -x.get("xp", 0)))
 
+    # total_xp includes the captain's doubled score (×2); the UI adds one more
+    # multiplier for Triple Captain.
+    total_xp = round(sum(p.get("xp", 0) for p in best_xi) + captain.get("xp", 0), 2)
+
     return {
         "xi": xi_sorted,
-        "bench": bench_out + bench_gk,  # outfield subs first, GK locked to bench slot 4
+        "bench": bench_gk + bench_out,  # Slot 1 = reserve GK; Slots 2-4 = outfield (descending xP)
         "formation": best_form,
         "captain": captain,
         "vice_captain": vice,
-        "formation_alert": formation_alert,
-        "total_xp": round(sum(p.get("xp", 0) for p in best_xi), 2),
+        "total_xp": total_xp,
     }

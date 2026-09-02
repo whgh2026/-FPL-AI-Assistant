@@ -982,9 +982,6 @@ if man_final:
         elif is_wc or is_fh:
             st.markdown(f'<div class="chip-banner">🃏 <b>{active_chip} Active:</b> Squad restructured with 0 transfer point hits applied.</div>', unsafe_allow_html=True)
 
-        if xi.get("formation_alert"):
-            st.markdown(f'<div class="alert-box">{xi["formation_alert"]}</div>', unsafe_allow_html=True)
-
         base_st = st.session_state.get("base_st_xp", 0.0)
         base_be = st.session_state.get("base_be_xp", 0.0)
         base_tot = st.session_state.get("base_tot_xp", 0.0)
@@ -1084,7 +1081,11 @@ with st.container(border=True):
                             "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
                             "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
                             "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
-                            "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n\n"
+                            "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n"
+                            "5. Captaincy Sanity Check: validate that the armband is anchored to the highest-ceiling, most "
+                            "reliable premium asset; if a differential is being captained, flag the risk.\n"
+                            "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
+                            "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
                             f"Team context:\n{context}"
                         )
 
