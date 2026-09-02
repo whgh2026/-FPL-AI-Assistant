@@ -534,6 +534,8 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                 with st.spinner("Scoring your squad and calculating optimal transfers…"):
                     try:
                         analysed = []
+                        preview_squad = st.session_state.get("squad_preview", {}).get("squad", [])
+                        sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price")) for p in preview_squad}
                         
                         try:
                             bootstrap = fpl_tools._get_bootstrap()
@@ -551,7 +553,9 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                                 "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
                                 "team": teams.get(fpl_p["team"], "?"), "team_id": fpl_p["team"],
                                 "position": pos_map.get(fpl_p["element_type"], "?"),
-                                "price": fpl_p["now_cost"] / 10.0, "xp": xp, "status": note, "is_captain": False
+                                "price": fpl_p["now_cost"] / 10.0,
+                                "selling_price": sell_by_id.get(pid, fpl_p["now_cost"] / 10.0),
+                                "xp": xp, "status": note, "is_captain": False
                             })
                         
                         transfers = fpl_tools.suggest_transfers_for_custom_squad(
@@ -612,6 +616,26 @@ if "override_analysis" in st.session_state:
             moves = tr.get("standard_transfers", tr.get("transfers", []))
             transfer_advice = tr.get("hit_advice", "")
 
+        # ---- Market Alert & Value Tracker (rendered above transfer recommendations) ----
+        try:
+            movers = fpl_tools.get_market_movers()
+            faller_ids = {m["id"] for m in movers.get("fallers", [])}
+            riser_ids = {m["id"] for m in movers.get("risers", [])}
+            market_rows = []
+            for p in ov["analysed_squad"]:
+                if p["player_id"] in faller_ids:
+                    market_rows.append(f'<div style="margin-bottom:4px;">⚠️ <b>Imminent Price Fall Risk:</b> {p["name"]} ({p["team"]})</div>')
+            for m in moves:
+                if m["in"]["id"] in riser_ids:
+                    market_rows.append(f'<div style="margin-bottom:4px;">📈 <b>Imminent Price Rise Target:</b> {m["in"]["name"]} ({m["in"]["team"]})</div>')
+            if market_rows:
+                market_html = '<div style="margin-bottom:6px;color:#475569;">Prices update overnight (~01:30–02:30 UK). Act before the next update:</div>' + "".join(market_rows)
+            else:
+                market_html = '<div style="color:#64748b;">No imminent price changes detected for your squad or transfer targets.</div>'
+            st.markdown(_card(market_html, "📊 Market Alert & Value Tracker"), unsafe_allow_html=True)
+        except Exception:
+            pass
+
         transfer_html = f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
         if moves:
             for m in moves:
@@ -637,9 +661,9 @@ if "override_analysis" in st.session_state:
 
         c_fast1, c_fast2 = st.columns(2)
         with c_fast1:
-            fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
-        with c_fast2:
             accept_all = st.button("✅ Accept All AI Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
+        with c_fast2:
+            fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
         
         if fast_hold:
             with st.spinner("Generating Final Lineup with current squad…"):
@@ -661,7 +685,7 @@ if "override_analysis" in st.session_state:
                         "team_id": m["in"]["team_id"],
                         "position": m["in"]["position"],
                         "price": m["in"]["price"],
-                        "xp": m["in"]["xp"],
+                        "xp": m["in"].get("xp_gw", m["in"]["xp"]),
                         "status": m["in"]["status"],
                         "is_captain": False,
                     })
@@ -816,6 +840,9 @@ if man_final:
             st.markdown('<div class="chip-banner">🚀 <b>Bench Boost Active:</b> All 4 bench players actively score points towards your Gameweek total!</div>', unsafe_allow_html=True)
         elif is_wc or is_fh:
             st.markdown(f'<div class="chip-banner">🃏 <b>{active_chip} Active:</b> Squad restructured with 0 transfer point hits applied.</div>', unsafe_allow_html=True)
+
+        if xi.get("formation_alert"):
+            st.markdown(f'<div class="alert-box">{xi["formation_alert"]}</div>', unsafe_allow_html=True)
 
         base_st = st.session_state.get("base_st_xp", 0.0)
         base_be = st.session_state.get("base_be_xp", 0.0)

@@ -38,6 +38,8 @@ DEFCON_THRESHOLD = {2: 10, 3: 12, 4: 12}
 # Transfer friction: positional penalty applied per player sold, so the solver
 # won't churn a goalkeeper (or, to a lesser extent, a defender) for a marginal gain.
 TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
+# Rolling 4-gameweek horizon weights for multi-week xP projection.
+HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
 OUT_STATUSES = {"i", "s", "u", "n"}
 
 VALID_FORMATIONS = [
@@ -317,7 +319,8 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     return max(minutes_pts + attack_pts + cs_pts + conceded_pts + saves_pts + bonus_pts + defcon_pts + card_pts, 0.0)
 
-def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None, risk: str = "balanced") -> Tuple[float, str]:
+def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None) -> Tuple[float, str]:
+    """Raw expected points for a single gameweek, before risk adjustment."""
     status = p.get("status", "a")
     chance_val = p.get("chance_of_playing_next_round")
 
@@ -357,8 +360,43 @@ def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]
     else:
         xp = our_total
 
-    xp = _risk_adjust(p, xp, risk)
-    return round(max(xp, 0.0), 2), note
+    return max(xp, 0.0), note
+
+
+def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None, risk: str = "balanced") -> Tuple[float, str]:
+    raw, note = _player_xp_raw(p, fixture_lookup, event)
+    return round(max(_risk_adjust(p, raw, risk), 0.0), 2), note
+
+
+def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, risk: str = "balanced", n: int = 4) -> Tuple[float, str]:
+    """Multi-gameweek expected points with geometric decay over the horizon.
+
+    xP_horizon = 1.0*xP(GW) + 0.85*xP(GW+1) + 0.70*xP(GW+2) + 0.55*xP(GW+3).
+    Risk adjustment is applied once to the weighted total (it is a single-GW
+    market signal). Blank gameweeks contribute 0 without flagging the player.
+    """
+    status = p.get("status", "a")
+    if status == "i":
+        return 0.0, "Injured"
+    elif status == "s":
+        return 0.0, "Suspended"
+    elif status in ("u", "n"):
+        return 0.0, "Unavailable"
+
+    weights = HORIZON_WEIGHTS[:n] if n <= len(HORIZON_WEIGHTS) else HORIZON_WEIGHTS
+    total = 0.0
+    for i, w in enumerate(weights):
+        raw, _ = _player_xp_raw(p, fixture_lookup, start_event + i)
+        total += w * raw
+
+    note = "Available"
+    chance_val = p.get("chance_of_playing_next_round")
+    if status == "d":
+        note = f"{chance_val}% Chance" if chance_val is not None else "Doubtful"
+    elif chance_val is not None and chance_val < 100:
+        note = f"{chance_val}% Chance"
+
+    return round(max(_risk_adjust(p, total, risk), 0.0), 2), note
 
 def get_upcoming_gameweek() -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
@@ -413,8 +451,9 @@ def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
     except Exception:
         return 1
 
-def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str) -> Dict[str, Any]:
-    return {
+def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,
+                selling_price: Optional[float] = None, xp_gw: Optional[float] = None) -> Dict[str, Any]:
+    entry = {
         "id": e["id"],
         "name": f"{e['first_name']} {e['second_name']}",
         "team_id": e["team"],
@@ -424,6 +463,11 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         "xp": xp,
         "status": note,
     }
+    if selling_price is not None:
+        entry["sell_price"] = selling_price
+    if xp_gw is not None:
+        entry["xp_gw"] = xp_gw
+    return entry
 
 def _solve_squad(
     pool: List[Dict[str, Any]],
@@ -441,7 +485,16 @@ def _solve_squad(
 
     prob = pulp.LpProblem("fpl_squad", pulp.LpMaximize)
 
-    prob += pulp.lpSum(by_id[pid]["price"] * x[pid] for pid in ids) <= budget, "budget"
+    # Budget: total purchasing power = Bank + sum(selling_price of current squad).
+    # Kept current players are charged at their selling price (the opportunity cost
+    # of not cashing them in); incoming players are charged at their now_cost.
+    if must_include_ids is not None:
+        prob += pulp.lpSum(
+            (by_id[pid].get("sell_price", by_id[pid]["price"]) if pid in must_include_ids else by_id[pid]["price"]) * x[pid]
+            for pid in ids
+        ) <= budget, "budget"
+    else:
+        prob += pulp.lpSum(by_id[pid]["price"] * x[pid] for pid in ids) <= budget, "budget"
 
     for pos, cnt in POS_COUNTS.items():
         prob += pulp.lpSum(x[pid] for pid in ids if by_id[pid]["position"] == pos) == cnt, f"pos_{pos}"
@@ -529,6 +582,8 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
             "team": teams_by_id.get(p_data["team"], "?"),
             "position": POS_MAP.get(p_data["element_type"], "?"),
             "price": p_data["now_cost"] / 10.0,
+            "selling_price": _to_float(pick.get("selling_price", p_data["now_cost"])) / 10.0,
+            "purchase_price": _to_float(pick.get("purchase_price", p_data["now_cost"])) / 10.0,
             "xp": xp,
             "status": note,
             "is_captain": pick.get("is_captain", False),
@@ -545,6 +600,7 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
         "team_name": entry_data.get("name", "My Team"),
         "bank": picks_data.get("entry_history", {}).get("bank", 0) / 10.0,
         "team_value": picks_data.get("entry_history", {}).get("value", 1000) / 10.0,
+        "selling_value": round(sum(p.get("selling_price", p.get("price", 0.0)) for p in squad), 2),
         "gameweek_used": gw,
         "squad_gameweek": picks_gw,
         "squad": squad
@@ -568,6 +624,7 @@ def suggest_transfers_for_custom_squad(
 
     hit_cost = _risk_profile(risk)["hit_cost"]
     current_ids = [p["player_id"] for p in squad]
+    sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price", 0.0)) for p in squad}
     pool = []
     seen = set()
     
@@ -576,8 +633,12 @@ def suggest_transfers_for_custom_squad(
         if not e:
             continue
         pos = POS_MAP.get(e["element_type"])
-        xp, note = _player_xp(e, fixture_lookup, event=event, risk=risk)
-        pool.append(_pool_entry(e, teams_by_id, xp, note, pos))
+        # Multi-GW horizon xP drives the solver; keep the single-GW xP alongside
+        # for final lineup/captaincy decisions (which are per-gameweek).
+        xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
+        xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
+        pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
+                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw))
         seen.add(pid)
 
     for e in bootstrap["elements"]:
@@ -586,14 +647,19 @@ def suggest_transfers_for_custom_squad(
         pos = POS_MAP.get(e["element_type"])
         if not pos:
             continue
-        xp, note = _player_xp(e, fixture_lookup, event=event, risk=risk)
+        xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
         if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable"):
             continue
-        pool.append(_pool_entry(e, teams_by_id, xp, note, pos))
+        xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
+        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw))
         seen.add(e["id"])
 
-    current_cost = sum(elements_by_id[pid]["now_cost"] for pid in current_ids if pid in elements_by_id) / 10.0
-    budget = current_cost + bank
+    # Total purchasing power = Bank + sum(selling price of the current squad).
+    total_sell = sum(
+        sell_by_id.get(pid, elements_by_id[pid]["now_cost"] / 10.0)
+        for pid in current_ids if pid in elements_by_id
+    )
+    budget = bank + total_sell
     pool_by_id = {p["id"]: p for p in pool}
 
     def _get_moves(selected_ids, is_unlimited):
@@ -613,7 +679,7 @@ def suggest_transfers_for_custom_squad(
                     "out": pool_by_id[o],
                     "in": pool_by_id[i],
                     "xp_gain": round(pool_by_id[i]["xp"] - pool_by_id[o]["xp"], 2),
-                    "cost": round(pool_by_id[i]["price"] - pool_by_id[o]["price"], 2)
+                    "cost": round(pool_by_id[i]["price"] - pool_by_id[o].get("sell_price", pool_by_id[o]["price"]), 2)
                 })
                 
         hits = 0 if is_unlimited else max(0, len(mvs) - free_transfers)
@@ -633,6 +699,11 @@ def suggest_transfers_for_custom_squad(
     std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
     if std_net <= 0:
         std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
+
+    # Roll Transfer decision: if no move clears the hit penalty / threshold over the
+    # 4-GW horizon, bank the free transfer (up to the 5-transfer cap).
+    roll_transfer = len(std_moves) == 0 and free_transfers < 5
+    projected_ft = min(free_transfers + 1, 5) if roll_transfer else free_transfers
 
     # ==============================================================
     # 2. Universe B: Unlimited Transfers (For Wildcard / Free Hit)
@@ -729,11 +800,14 @@ def suggest_transfers_for_custom_squad(
     # Generate Standard Advice
     n = len(std_moves)
     if n == 0:
-        advice = "Hold — no transfers mathematically improve your expected points (xP) after penalties."
+        if roll_transfer:
+            advice = f"🔄 Roll Transfer — no move clears the 4-GW hit threshold. Bank your free transfer (you'll carry {projected_ft} into next GW)."
+        else:
+            advice = "Hold — no transfers mathematically improve your expected points (xP) after penalties."
     elif std_hits == 0:
-        advice = f"Make {n} free transfer(s) — no points hit."
+        advice = f"Make {n} free transfer(s) — no points hit (4-GW horizon)."
     else:
-        advice = f"Make {n} transfer(s), taking {std_hits} hit(s) (-{int(hit_cost * std_hits)} pts) for a net +{std_net:.1f} xP."
+        advice = f"Make {n} transfer(s), taking {std_hits} hit(s) (-{int(hit_cost * std_hits)} pts) for a net +{std_net:.1f} xP over the 4-GW horizon."
 
     return {
         "transfers": std_moves,
@@ -744,8 +818,46 @@ def suggest_transfers_for_custom_squad(
         "cost_change": std_cost,
         "hit_advice": advice,
         "chip_evaluations": chip_advice_list,
-        "recommended_chip": recommended_chip
+        "recommended_chip": recommended_chip,
+        "roll_transfer": roll_transfer,
+        "projected_ft": projected_ft,
+        "horizon": 4
     }
+
+def get_market_movers(threshold: float = 50000) -> Dict[str, List[Dict[str, Any]]]:
+    """Detect players near a nightly price rise/fall from bootstrap transfer flows.
+
+    A player with net transfer-in >= threshold is a likely price rise; a player
+    with net transfer-out >= threshold is a likely price fall.
+    """
+    bootstrap = _get_bootstrap()
+    teams_by_id = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
+    risers: List[Dict[str, Any]] = []
+    fallers: List[Dict[str, Any]] = []
+    for e in bootstrap.get("elements", []):
+        tin = _to_float(e.get("transfers_in_event"))
+        tout = _to_float(e.get("transfers_out_event"))
+        net = tin - tout
+        if net >= threshold or net <= -threshold:
+            pos = POS_MAP.get(e.get("element_type"), "?")
+            item = {
+                "id": e["id"],
+                "name": f"{e['first_name']} {e['second_name']}",
+                "team": teams_by_id.get(e["team"], "?"),
+                "position": pos,
+                "price": e["now_cost"] / 10.0,
+                "transfers_in": tin,
+                "transfers_out": tout,
+                "net": net,
+            }
+            if net <= -threshold:
+                fallers.append(item)
+            else:
+                risers.append(item)
+    risers.sort(key=lambda x: x["net"], reverse=True)
+    fallers.sort(key=lambda x: x["net"])
+    return {"risers": risers[:15], "fallers": fallers[:15]}
+
 
 def rank_players_by_xp(position: str = None, max_price: float = None, limit: int = 20, event: Optional[int] = None, risk: str = "balanced") -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
@@ -864,14 +976,34 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     bench_out = [p for p in bench if p.get("position") != "GK"]
     bench_out.sort(key=lambda x: x.get("xp", 0), reverse=True)
 
+    # Formation-constrained auto-sub ordering: the first outfield bench slot must be
+    # able to legally cover a thin line (exactly 3 DEF or exactly 1 FWD) so a
+    # zero-minute starter can be auto-substituted without breaking the minimum
+    # formation (min 1 GKP / 3 DEF / 1 FWD).
+    formation_alert = None
+    d, _m, f = best_form
+    if d == 3:
+        def_idx = next((i for i, p in enumerate(bench_out) if p.get("position") == "DEF"), None)
+        if def_idx is None:
+            formation_alert = "⚠️ XI has 3 DEF but no DEF cover on the bench — a zero-minute defender cannot be auto-subbed."
+        elif def_idx != 0:
+            bench_out.insert(0, bench_out.pop(def_idx))
+    elif f == 1:
+        fwd_idx = next((i for i, p in enumerate(bench_out) if p.get("position") == "FWD"), None)
+        if fwd_idx is None:
+            formation_alert = "⚠️ XI has 1 FWD but no FWD cover on the bench — a zero-minute forward cannot be auto-subbed."
+        elif fwd_idx != 0:
+            bench_out.insert(0, bench_out.pop(fwd_idx))
+
     pos_order = {"GK": 1, "DEF": 2, "MID": 3, "FWD": 4}
     xi_sorted = sorted(best_xi, key=lambda x: (pos_order.get(x.get("position"), 5), -x.get("xp", 0)))
 
     return {
         "xi": xi_sorted,
-        "bench": bench_gk + bench_out,
+        "bench": bench_out + bench_gk,  # outfield subs first, GK locked to bench slot 4
         "formation": best_form,
         "captain": captain,
         "vice_captain": vice,
+        "formation_alert": formation_alert,
         "total_xp": round(sum(p.get("xp", 0) for p in best_xi), 2),
     }
