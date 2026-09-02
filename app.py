@@ -336,12 +336,14 @@ st.markdown(
     '• <b>The Optimiser:</b> It runs a linear programming algorithm (solving the &#39;knapsack problem&#39;) to find '
     'the mathematically optimal transfers, starting XI, and captaincy — respecting your specific budget, chip '
     'strategy, and transfer constraints.<br><br>'
-    '• <b>The Self-Learning Quant Engine:</b> <b>Most FPL tools are just static calculators. This is a living '
-    'quantitative model.</b> Every Gameweek, our background SQL engine logs the mathematical forecasts, '
-    'cross-references them against actual Premier League results, and analyses the margin of error. It then '
-    'autonomously recalibrates its own statistical weights. Put simply: it learns from reality. The deeper we get '
-    'into the season, the smarter and more ruthless the algorithm becomes, giving you a compounding edge over your '
-    'mini-league rivals.'
+    '<hr style="border:none;border-top:1px solid #c7d2fe;margin:14px 0;">'
+    '<b>🌟 The Self-Learning Quant Engine 🌟</b><br>'
+    'Most FPL tools are just static calculators. This is a living quantitative model.<br><br>'
+    'Every Gameweek, our background SQL engine logs the mathematical forecasts, cross-references them against '
+    'actual Premier League results, and analyses the margin of error. It then autonomously recalibrates its own '
+    'statistical weights.<br><br>'
+    'Put simply: it learns from reality. The deeper we get into the season, the smarter and more ruthless the '
+    'algorithm becomes, giving you a compounding edge over your mini-league rivals.'
     '</div>',
     unsafe_allow_html=True,
 )
