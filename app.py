@@ -364,7 +364,6 @@ with st.container(border=True):
         st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
     elif preview:
         
-        # RESTORED BASELINE SQUAD METRICS (Top 3 + Bottom 3 = 6 metrics)
         m1, m2, m3 = st.columns(3)
         m1.metric("Team", preview["team_name"])
         m2.metric("Bank (Unspent)", f"£{preview['bank']}m")
@@ -389,7 +388,6 @@ with st.container(border=True):
         x2.metric("🪑 Baseline Bench xP", f"{be_xp} xP")
         x3.metric("📊 Baseline Squad xP", f"{tot_xp} xP")
 
-        # Baseline Team Sheet 
         st.markdown("<br>", unsafe_allow_html=True)
         sheet = f'<div class="team-sheet">{_team_sheet_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)}</div>'
         st.markdown(_card(sheet, "Your Baseline Squad · C = Captain · VC = Vice-Captain"), unsafe_allow_html=True)
@@ -582,7 +580,6 @@ if "override_analysis" in st.session_state:
         ov = st.session_state["override_analysis"]
         tr = ov["transfers"]
         
-        # 1. Chip Evaluation and Mathematical Recommendation
         evals = tr.get("chip_evaluations", [])
         if evals:
             eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
@@ -608,7 +605,6 @@ if "override_analysis" in st.session_state:
 
         st.markdown("---")
         
-        # Determine active moves based on whether a full squad reset chip was confirmed
         if confirmed_chip in ("Wildcard", "Free Hit"):
             moves = tr.get("wildcard_transfers", tr.get("transfers", []))
             transfer_advice = f"<b>{confirmed_chip} Active:</b> {len(moves)} transfers optimized with 0 point penalties."
@@ -628,14 +624,12 @@ if "override_analysis" in st.session_state:
             transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
         st.markdown(_card(transfer_html, "⚙️ Optimized Transfers"), unsafe_allow_html=True)
 
-        # STATE SYNCHRONIZATION: Reset input count to match moves length when chip selection changes
         target_default_moves = len(moves)
         last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
         if last_chip_tracked != confirmed_chip or "n_moves_manual" not in st.session_state:
             st.session_state["n_moves_manual"] = target_default_moves
             st.session_state["last_confirmed_chip_tracker"] = confirmed_chip
 
-        # FAST-TRACK HOLD BUTTON (Allows skipping custom dropdowns entirely)
         c_fast1, c_fast2 = st.columns([2, 1])
         with c_fast1:
             fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
@@ -708,7 +702,6 @@ if "override_analysis" in st.session_state:
                 new_ids.append(iid)
 
             if not errors:
-                # Manual Budget Validation
                 try:
                     original_cost = sum(players_by_id[p["player_id"]]["now_cost"] / 10.0 for p in ov["analysed_squad"] if p["player_id"] in players_by_id)
                     new_cost = sum(players_by_id[pid]["now_cost"] / 10.0 for pid in new_ids if pid in players_by_id)
