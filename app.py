@@ -20,12 +20,9 @@ try:
     GW_NAME = _gw_info.get("name") or f"Gameweek {GW_ID}"
     _deadline_raw = _gw_info.get("deadline_time")
     if _deadline_raw:
-        # Parse FPL UTC string and convert to UK timezone
         uk_zone = tz.gettz('Europe/London')
         _deadline_dt = dateutil.parser.isoparse(_deadline_raw).astimezone(uk_zone)
         DEADLINE_STR = _deadline_dt.strftime("%A, %d %B %Y · %H:%M")
-        
-        # Calculate a safe-transfer window (1 hour before deadline)
         _safe_dt = _deadline_dt - datetime.timedelta(hours=1)
         SAFE_TIME_STR = _safe_dt.strftime("%H:%M")
     else:
@@ -360,6 +357,12 @@ with st.container(border=True):
         st.error("⚠️ " + preview["error"])
         st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
     elif preview:
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Team", preview["team_name"])
+        m2.metric("Bank", f"£{preview['bank']}m")
+        m3.metric("Team value", f"£{preview['team_value']}m")
+
         squad = preview.get("squad", [])
         starters, bench = _api_starters_bench(squad)
         cap = next((p for p in squad if p.get("is_captain")), None)
@@ -370,21 +373,12 @@ with st.container(border=True):
         be_xp = round(sum(p.get("xp", 0) for p in bench), 2)
         tot_xp = round(st_xp + be_xp, 2)
         
-        # Save baseline xP to memory for the Step 4 Delta comparison
+        # Save baseline xP silently to memory for Step 4 Delta calculation
         st.session_state["base_st_xp"] = st_xp
         st.session_state["base_be_xp"] = be_xp
         st.session_state["base_tot_xp"] = tot_xp
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Team", preview["team_name"])
-        m2.metric("Bank", f"£{preview['bank']}m")
-        m3.metric("Team value", f"£{preview['team_value']}m")
-        
-        x1, x2, x3 = st.columns(3)
-        x1.metric("🛡️ Baseline Starting XI xP", f"{st_xp} xP")
-        x2.metric("🪑 Baseline Bench xP", f"{be_xp} xP")
-        x3.metric("📊 Baseline Squad xP", f"{tot_xp} xP")
-
+        # Baseline Team Sheet 
         st.markdown("<br>", unsafe_allow_html=True)
         sheet = f'<div class="team-sheet">{_team_sheet_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)}</div>'
         st.markdown(_card(sheet, "Your Baseline Squad · C = Captain · VC = Vice-Captain"), unsafe_allow_html=True)
@@ -422,7 +416,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
         st.markdown("<br>", unsafe_allow_html=True)
         
         # ------------------------------------------------------------------
-        # The Fast-Lane Expander (Hidden unless needed)
+        # The Fast-Lane Expander
         # ------------------------------------------------------------------
         with st.expander("👉 🛠️ Have you already made midweek transfers? Click here to update your squad."):
             st.caption("Upload a screenshot or adjust the dropdowns to match your live 15-man squad.")
@@ -523,7 +517,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Run Algorithmic Optimizer", type="primary", use_container_width=True, key="btn_analyse_override"):
-            # If the user didn't open the expander, override_squad is empty. Default back to their baseline squad.
+            
             active_squad_ids = override_squad if override_squad else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
             
             if len(active_squad_ids) != 15:
@@ -533,7 +527,6 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
                     try:
                         analysed = []
                         
-                        # Load bootstrap if not already loaded by the expander
                         try:
                             bootstrap = fpl_tools._get_bootstrap()
                             fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
@@ -739,7 +732,6 @@ if man_final:
         is_wc = "Wildcard" in active_chip
         is_fh = "Free Hit" in active_chip
 
-        # Active Chip banner display
         if is_tc:
             st.markdown(f'<div class="chip-banner">⭐ <b>Triple Captain Active:</b> {cap["name"]}\'s score is multiplied by 3!</div>', unsafe_allow_html=True)
         elif is_bb:
@@ -747,30 +739,30 @@ if man_final:
         elif is_wc or is_fh:
             st.markdown(f'<div class="chip-banner">🃏 <b>{active_chip} Active:</b> Squad restructured with 0 transfer point hits applied.</div>', unsafe_allow_html=True)
 
-        # Baseline Data stored from Step 1
         base_st = st.session_state.get("base_st_xp", 0.0)
         base_be = st.session_state.get("base_be_xp", 0.0)
         base_tot = st.session_state.get("base_tot_xp", 0.0)
 
-        # Calculate Final Data
         st_xp = xi["total_xp"]
         if is_tc and cap:
-            # Add extra 1x of captain's xp (captain is normally 2x, now 3x)
             st_xp = round(st_xp + cap.get("xp", 0), 2)
             
         be_xp = round(sum(p.get("xp", 0) for p in xi["bench"]), 2)
         
         if is_bb:
             st_xp = round(st_xp + be_xp, 2)
-            be_xp = 0.0 # because bench is now active
+            be_xp = 0.0 
 
         tot_xp = round(st_xp + be_xp, 2)
         
-        # Display Delta Metrics
+        delta_st = st_xp - base_st
+        delta_be = be_xp - base_be
+        delta_tot = tot_xp - base_tot
+        
         y1, y2, y3 = st.columns(3)
-        y1.metric("🛡️ Final Starting XI xP", f"{st_xp:.2f} xP", f"{st_xp - base_st:+.2f} xP" if (st_xp - base_st) != 0 else None)
-        y2.metric("🪑 Final Bench xP", f"{be_xp:.2f} xP", f"{be_xp - base_be:+.2f} xP" if (be_xp - base_be) != 0 else None)
-        y3.metric("📊 Final Squad xP", f"{tot_xp:.2f} xP", f"{tot_xp - base_tot:+.2f} xP" if (tot_xp - base_tot) != 0 else None)
+        y1.metric("🛡️ Final Starting XI xP", f"{st_xp:.2f} xP", f"{delta_st:+.2f} xP" if delta_st != 0 else None)
+        y2.metric("🪑 Final Bench xP", f"{be_xp:.2f} xP", f"{delta_be:+.2f} xP" if delta_be != 0 else None)
+        y3.metric("📊 Final Squad xP", f"{tot_xp:.2f} xP", f"{delta_tot:+.2f} xP" if delta_tot != 0 else None)
 
         sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
         st.markdown(_card(sheet, f'🛡️ Final Starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · VC = Vice-Captain'), unsafe_allow_html=True)
@@ -780,7 +772,7 @@ if man_final:
         mult_val = cap["xp"] * 3 if is_tc else cap["xp"] * 2
         cap_role_title = "Captain (Triple Captain Active)" if is_tc else "Captain"
         
-        cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:#f59e0b; margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.1f} xP)</div></div>'
+        cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:#f59e0b; margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.2f} xP)</div></div>'
         if vcap:
             cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div style="margin-bottom:2px;" class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:#475569; margin-top:4px;">{vcap["xp"]} xP</div></div>'
         cap_html += "</div>"
