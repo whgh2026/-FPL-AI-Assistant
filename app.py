@@ -294,15 +294,14 @@ with st.sidebar:
 
     with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
         st.markdown(
-            "**Why a 4-Gameweek Horizon?**  \n"
-            "Magic. (And a highly guarded statistical sweet spot). We could tell you exactly why the 4-week decay "
-            "curve (1.0 → 0.85 → 0.70 → 0.55) perfectly isolates expected minutes before real-world variance ruins "
-            "the signal, but then everyone would copy our math. Just trust that the engine balances immediate returns "
-            "while keeping you out of long-term fixture traps.\n\n"
-            "**Transfer Friction & Capital Preservation:**  \n"
-            "Banked free transfers are FPL gold. The model applies a strict mathematical penalty to any transfer, "
-            "refusing to spend your transfers unless the incoming player's projected xP delta decisively clears the "
-            "transaction cost."
+            "**Why 4 Gameweeks?**  \n"
+            "Proprietary dark arts. Planning 10 weeks ahead sounds great until Pep roulette, hamstring tweaks, and "
+            "pure vibes derail your season. The engine models a protected 4-week tactical horizon—just far enough to "
+            "target form and fixtures without walking into a trap.\n\n"
+            "**Transfer Friction:**  \n"
+            "Step away from the knee-jerk. Banked transfers win mini-leagues. The model slaps a strict mathematical "
+            "penalty on itchy trigger fingers; unless an incoming player is a decisive, undeniable upgrade, the "
+            "engine banks the transfer and lets your rivals burn their rank."
         )
 
     st.markdown("---")
