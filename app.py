@@ -4,11 +4,16 @@ import squad_override
 import dateutil.parser
 from dateutil import tz
 import datetime
+import time
 
 st.set_page_config(page_title="FPL AI Manager", page_icon="⚽", layout="wide")
 
-TODAY_STR = datetime.datetime.now().strftime("%d %B %Y")
-CAVEAT_HTML = f'<div style="font-size:0.78rem;color:#64748b;margin:6px 0 10px 0;">ℹ️ <b>Note:</b> Player values and expected points (xP) are based on the latest official FPL API data for {TODAY_STR}. Prices update once daily at midnight UK time.</div>'
+def get_caveat_html():
+    fetch_ts = fpl_tools.get_api_timestamp()
+    uk_zone = tz.gettz('Europe/London')
+    dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(uk_zone)
+    time_str = dt.strftime("%H:%M on %d %B %Y")
+    return f'<div style="font-size:0.78rem;color:#64748b;margin:6px 0 10px 0;">ℹ️ <b>Note:</b> Player values and expected points (xP) are based on live FPL API data fetched at {time_str} UK time. Prices update once daily at roughly 01:30 UK time.</div>'
 
 # ------------------------------------------------------------------
 # Auto-detect the upcoming gameweek straight from the FPL API
@@ -360,7 +365,7 @@ with st.container(border=True):
         
         m1, m2, m3 = st.columns(3)
         m1.metric("Team", preview["team_name"])
-        m2.metric("Bank", f"£{preview['bank']}m")
+        m2.metric("Bank (Unspent)", f"£{preview['bank']}m")
         m3.metric("Team value", f"£{preview['team_value']}m")
 
         squad = preview.get("squad", [])
@@ -373,7 +378,6 @@ with st.container(border=True):
         be_xp = round(sum(p.get("xp", 0) for p in bench), 2)
         tot_xp = round(st_xp + be_xp, 2)
         
-        # Save baseline xP silently to memory for Step 4 Delta calculation
         st.session_state["base_st_xp"] = st_xp
         st.session_state["base_be_xp"] = be_xp
         st.session_state["base_tot_xp"] = tot_xp
@@ -382,7 +386,7 @@ with st.container(border=True):
         st.markdown("<br>", unsafe_allow_html=True)
         sheet = f'<div class="team-sheet">{_team_sheet_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)}</div>'
         st.markdown(_card(sheet, "Your Baseline Squad · C = Captain · VC = Vice-Captain"), unsafe_allow_html=True)
-        st.markdown(CAVEAT_HTML, unsafe_allow_html=True)
+        st.markdown(get_caveat_html(), unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
@@ -404,7 +408,7 @@ if st.session_state.get("squad_preview") and not "error" in st.session_state.get
         with var_col1:
             ft_val = st.number_input("Current Free Transfers", 0, 15, int(default_ft), key="ov_ft")
         with var_col2:
-            bank_val = st.number_input("Current Bank Balance (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
+            bank_val = st.number_input("Remaining Budget in Bank (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
             
         chips_val = st.multiselect(
             "Select Active Chip(s) to Evaluate",
@@ -572,7 +576,6 @@ if "override_analysis" in st.session_state:
         ov = st.session_state["override_analysis"]
         tr = ov["transfers"]
         
-        # 1. Chip Evaluation and Mathematical Recommendation
         evals = tr.get("chip_evaluations", [])
         if evals:
             eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
@@ -766,7 +769,7 @@ if man_final:
 
         sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
         st.markdown(_card(sheet, f'🛡️ Final Starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · VC = Vice-Captain'), unsafe_allow_html=True)
-        st.markdown(CAVEAT_HTML, unsafe_allow_html=True)
+        st.markdown(get_caveat_html(), unsafe_allow_html=True)
         
         mult_str = "×3" if is_tc else "×2"
         mult_val = cap["xp"] * 3 if is_tc else cap["xp"] * 2
@@ -805,4 +808,4 @@ with st.expander("📊 Player Scout & xP Rankings", expanded=False):
                                   "price": p["price"], "xp": p["xp"], "status": p.get("status", "")}, ov_xp)
         html += "</div>"
         st.markdown(_card(html, "📈 Ranked by xP"), unsafe_allow_html=True)
-        st.markdown(CAVEAT_HTML, unsafe_allow_html=True)
+        st.markdown(get_caveat_html(), unsafe_allow_html=True)
