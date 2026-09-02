@@ -763,14 +763,10 @@ if "override_analysis" in st.session_state:
 
         with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
             st.markdown(
-                "• **Hit amortisation** — a -4 point hit is only worthwhile if the upgrade recovers those points "
-                "across the 4-Gameweek horizon (and clears the transfer-friction hurdle).\n"
-                "• **Market momentum** — a surge of managers transferring a player in flags a likely overnight "
-                "price rise, so acting early can build team value.\n"
-                "• **Late fitness gating** — doubtful players (below a 75% chance of playing) are heavily "
-                "penalised so the solver avoids starting or buying risky assets near the deadline.\n"
-                "• **Goalkeeper swaps** — the 2-GK squad rule is strictly enforced: a keeper is only ever "
-                "paired with another keeper, and the backup is treated as a budget enabler."
+                "* **Hit amortisation** — a -4 point hit is only worthwhile if the upgrade recovers those points across the 4-Gameweek horizon (and clears the transfer-friction hurdle).\n"
+                "* **Market momentum** — a surge of managers transferring a player in flags a likely overnight price rise, so acting early can build team value.\n"
+                "* **Late fitness gating** — doubtful players (below a 75% chance of playing) are heavily penalised so the solver avoids starting or buying risky assets near the deadline.\n"
+                "* **Goalkeeper swaps** — the 2-GK squad rule is strictly enforced: a keeper is only ever paired with another keeper, and the backup is treated as a budget enabler."
             )
 
         target_default_moves = len(moves)
@@ -1038,14 +1034,15 @@ if man_final:
 # Expert AI Analysis (visible after Step 4)
 # ------------------------------------------------------------------
 with st.container(border=True):
-    st.markdown("### 🤖 AI Assistant Coach Overview")
+    st.markdown("### 🔮 The FPL Overlord's Verdict")
+    st.markdown("Consult the FPL Overlord for a ruthless tactical breakdown of your proposed transfers.")
     lineup = st.session_state.get("manual_final")
     if not lineup:
         st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
     else:
-        run_macro = st.button("AI Summary of Changes and Forecast for the Next Gameweek", type="primary", key="btn_deepseek")
+        run_macro = st.button("Press here to consult the FPL Overlord", type="primary")
         if run_macro:
-            with st.spinner("Consulting the AI assistant coach to get their thoughts..."):
+            with st.spinner("Consulting the FPL Overlord... prepare for tactical judgement."):
                 api_key = os.environ.get("DEEPSEEK_API_KEY")
                 if not api_key:
                     st.warning("API key missing. Please configure the environment variable.")
@@ -1105,7 +1102,7 @@ with st.container(border=True):
                                 ],
                                 "temperature": 0.4,
                             },
-                            timeout=30,
+                            timeout=60,
                         )
                         resp.raise_for_status()
                         st.session_state["deepseek_result"] = resp.json()["choices"][0]["message"]["content"]
