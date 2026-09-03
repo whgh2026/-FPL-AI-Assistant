@@ -749,9 +749,9 @@ def _fixture_key_html() -> str:
     """Permanent fixture-key legend rendered directly above every pitch view."""
     return (
         '<div style="font-size:0.8rem;color:#94a3b8;margin:0 0 6px 0;line-height:1.5;">'
-        'Fixture Key: 🟢 Favourable (&gt;50% Win) · 🟡 Moderate (30–50%) · 🔴 Difficult (&lt;30%)<br>'
+        'Fixture Outlook: 🟢 Favourable · 🟡 Moderate · 🔴 Difficult<br>'
         '<span style="font-size:0.68rem;font-style:italic;">'
-        '*Determined via closed-source multi-factor modelling synthesising market probabilities and tactical predictive metrics.</span>'
+        '*Ratings derived from our proprietary algorithmic model, blending live market sentiment with opponent defensive/offensive strength.</span>'
         '</div>'
     )
 
@@ -838,7 +838,7 @@ def _render_player_inspector(squad) -> None:
             f'<div class="insp-fixture">'
             f'<div style="font-weight:700;color:#E2E8F0;">{opp_name} '
             f'<span style="font-weight:600;color:#94a3b8;">({venue})</span></div>'
-            f'<div class="tc-meta">Implied win {wp_str} · FDR {fdr}</div>'
+            f'<div class="tc-meta">Implied Win Probability {wp_str} · FDR {fdr}</div>'
             f'</div>'
         )
     if not fx_rows:
