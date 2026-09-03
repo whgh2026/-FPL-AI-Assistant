@@ -449,14 +449,34 @@ def clear_transfer_cache():
 # ------------------------------------------------------------------
 # Official Premier League asset helpers
 # ------------------------------------------------------------------
-def _headshot_url(photo: str) -> str:
-    """Build the official CDN headshot URL from an FPL `photo` code."""
+@st.cache_data(ttl=86400)
+def _headshot_url(player_code: str) -> str:
+    """Return a validated CDN headshot URL, falling back to the placeholder.
+
+    Uses a fast HEAD request so a broken primary image never renders as the
+    browser's default broken-image icon (Streamlit strips the HTML `onerror`
+    attribute when `unsafe_allow_html=True`).
+    """
+    fallback_url = "https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png"
+    if not player_code:
+        return fallback_url
+    primary_url = f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{player_code}.png"
+    try:
+        if requests.head(primary_url, timeout=2).status_code == 200:
+            return primary_url
+    except Exception:
+        pass
+    return fallback_url
+
+
+def _photo_code(photo: str) -> str:
+    """Strip an FPL `photo` field down to its bare player code."""
     if not photo:
         return ""
     code = photo.split("/")[-1].replace(".jpg", "").replace(".png", "")
     if code.startswith("p"):
         code = code[1:]
-    return f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{code}.png"
+    return code
 
 
 def _badge_url(team_code) -> str:
@@ -495,7 +515,7 @@ def _headshot_img(p) -> str:
         ctx = _bootstrap_ctx()
         el = (ctx or {}).get("players_by_id", {}).get(_pid(p), {})
         photo = el.get("photo", "")
-    url = _headshot_url(photo) or "https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png"
+    url = _headshot_url(_photo_code(photo))
     badge = ""
     team_id = p.get("team_id")
     if team_id is None and isinstance(p.get("team"), int):
@@ -505,8 +525,7 @@ def _headshot_img(p) -> str:
     overlay = f'<div class="badge-overlay">{badge}</div>' if badge else ""
     return (
         f'<div class="photo-frame">'
-        f'<img class="headshot" src="{url}" alt="" loading="lazy" '
-        f'onerror="this.onerror=null; this.src=\'https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png\';">'
+        f'<img class="headshot" src="{url}" alt="" loading="lazy">'
         f'{overlay}'
         f'</div>'
     )
@@ -647,7 +666,7 @@ def _momentum_row_html(r, up: bool = True) -> str:
     arrow = "📈" if up else "📉"
     return (
         f'<div class="momentum-row">'
-        f'<img class="headshot" src="{_headshot_url(r["photo"])}" alt="" loading="lazy">'
+        f'<img class="headshot" src="{_headshot_url(_photo_code(r["photo"]))}" alt="" loading="lazy">'
         f'{_badge_img(r["team"])}'
         f'<div style="flex:1;">'
         f'<div style="font-weight:700;color:#E2E8F0;">{r["name"]}</div>'
@@ -1888,7 +1907,7 @@ with tab_radar:
             grid += (
                 f'<div class="radar-card">'
                 f'<div style="display:flex;gap:8px;align-items:flex-start;">'
-                f'<img class="headshot" src="{_headshot_url(r["photo"])}" alt="" loading="lazy">'
+                f'<img class="headshot" src="{_headshot_url(_photo_code(r["photo"]))}" alt="" loading="lazy">'
                 f'<div style="flex:1;min-width:0;">'
                 f'<div class="nm">{r["name"]}</div>'
                 f'<div class="meta">{r["pos"]} · {_badge_img(r["team"])} · £{r["price"]:.1f}m</div>'
