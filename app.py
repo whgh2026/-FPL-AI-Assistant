@@ -239,9 +239,26 @@ DARK_CSS3 = """
   .photo-frame {position: relative; display: inline-block; line-height: 0;}
   .photo-frame .badge-overlay {position: absolute; right: -3px; bottom: -3px; line-height: 0;}
   .photo-frame .badge-overlay .badge-img {width: 18px; height: 18px; border-radius: 50%; background: #0B1320; border: 1px solid #0B1320;}
-  .pitch-player {display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; width: 92px;}
-  .pitch-player .fx-dots {font-size: 0.72rem; letter-spacing: 1px;}
+
+  /* Pitch player cards: strict fixed dimensions so a 404 fallback never collapses the grid. */
+  .pitch-player {display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; width: 96px;}
+  .pitch-player .photo-frame {width: 65px; height: 85px; display: flex; align-items: center; justify-content: center;}
+  .pitch-player .headshot {width: 65px; height: 85px; object-fit: cover; border-radius: 8px; display: block;}
+  .pitch-player .nm {width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.72rem; font-weight: 700; color: #E2E8F0;}
+  .pitch-player .meta {width: 100%; font-size: 0.68rem; color: #94a3b8; white-space: nowrap;}
+  .pitch-player .fx-dots {font-size: 0.74rem; letter-spacing: 1.5px; white-space: nowrap;}
+
+  /* Pitch row position labels */
+  .pitch-row {display: flex; align-items: center; gap: 10px; margin: 14px 0;}
+  .pitch-row-label {flex: 0 0 34px; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em; text-align: center; text-transform: uppercase;}
+  .pitch-row-cards {flex: 1; display: flex; justify-content: space-around; align-items: center; gap: 8px;}
+
   .tc-head {display: flex; align-items: center; gap: 8px;}
+
+  /* Player Inspector */
+  .inspector-card {background: #0F172A; border: 1px solid #334155; border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
+  .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted #334155;}
+  .insp-fixture:last-child {border-bottom: none;}
 </style>
 """
 st.markdown(DARK_CSS3, unsafe_allow_html=True)
@@ -439,7 +456,7 @@ def _headshot_url(photo: str) -> str:
     code = photo.split("/")[-1].replace(".jpg", "").replace(".png", "")
     if code.startswith("p"):
         code = code[1:]
-    return f"https://resources.premierleague.com/premierleague/photos/players/110x140/p{code}.png"
+    return f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{code}.png"
 
 
 def _badge_url(team_code) -> str:
@@ -478,7 +495,7 @@ def _headshot_img(p) -> str:
         ctx = _bootstrap_ctx()
         el = (ctx or {}).get("players_by_id", {}).get(_pid(p), {})
         photo = el.get("photo", "")
-    url = _headshot_url(photo) or "https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png"
+    url = _headshot_url(photo) or "https://resources.premierleague.com/premierleague/photos/players/250x250/Photo-Missing.png"
     badge = ""
     team_id = p.get("team_id")
     if team_id is None and isinstance(p.get("team"), int):
@@ -489,7 +506,7 @@ def _headshot_img(p) -> str:
     return (
         f'<div class="photo-frame">'
         f'<img class="headshot" src="{url}" alt="" loading="lazy" '
-        f'onerror="this.onerror=null; this.src=\'https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png\';">'
+        f'onerror="this.onerror=null; this.src=\'https://resources.premierleague.com/premierleague/photos/players/250x250/Photo-Missing.png\';">'
         f'{overlay}'
         f'</div>'
     )
@@ -716,7 +733,8 @@ def _pitch_html(starters, bench, captain_id=None, vcap_id=None) -> str:
             _pitch_player_html(p, "C" if _pid(p) == captain_id else ("VC" if _pid(p) == vcap_id else None))
             for p in players
         ) or '<div class="empty">—</div>'
-        html += f'<div class="pitch-row">{cards}</div>'
+        c = POS_COLORS.get(pos, "#94a3b8")
+        html += f'<div class="pitch-row"><div class="pitch-row-label" style="color:{c}">{pos}</div><div class="pitch-row-cards">{cards}</div></div>'
     html += "</div>"
 
     bench_cards = "".join(_pitch_player_html(p) for p in bench) or '<div class="empty">—</div>'
@@ -728,14 +746,120 @@ def _pitch_html(starters, bench, captain_id=None, vcap_id=None) -> str:
 
 
 def _fixture_key_html() -> str:
-    """Discreet institutional fixture-key legend shown beneath pitch views."""
+    """Permanent fixture-key legend rendered directly above every pitch view."""
     return (
-        '<div style="font-size:0.72rem;color:#94a3b8;margin:2px 0 0 0;line-height:1.5;">'
-        'Fixture Outlook: 🟢 Favourable · 🟡 Moderate · 🔴 Difficult<br>'
-        '<span style="font-size:0.66rem;font-style:italic;">'
+        '<div style="font-size:0.8rem;color:#94a3b8;margin:0 0 6px 0;line-height:1.5;">'
+        'Fixture Key: 🟢 Favourable (&gt;50% Win) · 🟡 Moderate (30–50%) · 🔴 Difficult (&lt;30%)<br>'
+        '<span style="font-size:0.68rem;font-style:italic;">'
         '*Determined via closed-source multi-factor modelling synthesising market probabilities and tactical predictive metrics.</span>'
         '</div>'
     )
+
+
+def _friendly_status(status) -> str:
+    s = (status or "Available").strip()
+    if s in ("Available", "a", ""):
+        return "✅ Fit — available for selection"
+    if s == "Injured":
+        return "🔴 Injured"
+    if s == "Suspended":
+        return "🔴 Suspended"
+    if s in ("Unavailable", "OUT"):
+        return "🔴 Unavailable"
+    if s == "Doubtful":
+        return "⚠️ Doubtful"
+    if s == "No minutes":
+        return "⏱️ No minutes played this season"
+    if "% Chance" in s:
+        return f"⚠️ {s} of playing"
+    return s
+
+
+def _render_player_inspector(squad) -> None:
+    """Selectable Player Inspector shown beneath the pitch in the Transfer Planner tab."""
+    ctx = _bootstrap_ctx()
+    if not ctx or not squad:
+        return
+    lookup = ctx["lookup"]
+    teams_by_id = ctx["teams_by_id"]
+    start = ctx["start"]
+
+    seen = set()
+    options = []
+    for p in squad:
+        pid = _pid(p)
+        if pid in seen or pid is None:
+            continue
+        seen.add(pid)
+        options.append((pid, _web_name(p)))
+    if not options:
+        return
+    options.sort(key=lambda x: x[1].lower())
+    pid_options = [pid for pid, _ in options]
+    name_map = dict(options)
+
+    sel = st.selectbox(
+        "🔍 Inspect Player Profile",
+        pid_options,
+        format_func=lambda pid: name_map.get(pid, "?"),
+        key="inspector_select",
+    )
+    if sel is None:
+        return
+
+    player = next((p for p in squad if _pid(p) == sel), None)
+    team_id = player.get("team_id") if player else None
+    if team_id is None:
+        el = ctx["players_by_id"].get(sel, {})
+        team_id = el.get("team")
+        if player is None and el:
+            player = {
+                "player_id": el.get("id"),
+                "name": f"{el.get('first_name', '')} {el.get('second_name', '')}",
+                "team_id": team_id,
+                "position": fpl_tools.POS_MAP.get(el.get("element_type"), "?"),
+                "team": teams_by_id.get(team_id, {}).get("short_name", "?"),
+                "price": el.get("now_cost", 0) / 10.0,
+                "status": "Available",
+            }
+    if player is None:
+        return
+
+    fixtures = [f for f in lookup.get(team_id, []) if (f.get("event") or 0) >= start][:4]
+    fx_rows = ""
+    for fx in fixtures:
+        opp = teams_by_id.get(fx.get("opponent"), {})
+        opp_name = opp.get("name", "?")
+        venue = "H" if fx.get("is_home") else "A"
+        wp = fx.get("win_prob")
+        wp_str = f"{wp * 100:.0f}%" if wp is not None else "N/A"
+        fdr = fx.get("difficulty") or 3
+        fx_rows += (
+            f'<div class="insp-fixture">'
+            f'<div style="font-weight:700;color:#E2E8F0;">{opp_name} '
+            f'<span style="font-weight:600;color:#94a3b8;">({venue})</span></div>'
+            f'<div class="tc-meta">Implied win {wp_str} · FDR {fdr}</div>'
+            f'</div>'
+        )
+    if not fx_rows:
+        fx_rows = '<div class="empty">No upcoming fixtures found.</div>'
+
+    card = (
+        f'<div class="inspector-card">'
+        f'<div style="display:flex;gap:16px;align-items:flex-start;">'
+        f'{_headshot_img(player)}'
+        f'<div style="flex:1;min-width:0;">'
+        f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
+        f'<span style="font-weight:800;color:#E2E8F0;font-size:1.05rem;">{_web_name(player)}</span>'
+        f'{_badge_img(team_id, large=True)}'
+        f'</div>'
+        f'<div class="tc-meta">{player.get("position", "")} · {player.get("team", "")} · £{player.get("price", 0):.1f}m</div>'
+        f'<div style="margin-top:6px;font-size:0.85rem;color:#E2E8F0;">{_friendly_status(player.get("status"))}</div>'
+        f'</div></div>'
+        f'<div style="margin-top:14px;"><div class="section-label">Next 4 Fixtures</div>{fx_rows}</div>'
+        f'</div>'
+    )
+    st.markdown(card, unsafe_allow_html=True)
 
 
 def _transfer_pair_html(moves) -> str:
@@ -957,9 +1081,11 @@ with tab_planner:
                 )
     
             st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown(_fixture_key_html(), unsafe_allow_html=True)
             pitch = _pitch_html(starters, bench, _pid(cap) if cap else None, _pid(vc) if vc else None)
-            st.markdown(_card(pitch + _fixture_key_html(), "⚽ Your Baseline Pitch · C = Captain · V = Vice-Captain"), unsafe_allow_html=True)
+            st.markdown(_card(pitch, "⚽ Your Baseline Pitch · C = Captain · V = Vice-Captain"), unsafe_allow_html=True)
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
+            _render_player_inspector(starters + bench)
     
     
     # ------------------------------------------------------------------
@@ -1648,10 +1774,9 @@ with tab_planner:
                     "chosen from a different fixture to guard against postponements."
                 )
     
-            sheet = f'<div class="team-sheet">{_team_sheet_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)}</div>'
-            st.markdown(_card(sheet, f'🛡️ Final Starting XI · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · VC = Vice-Captain'), unsafe_allow_html=True)
+            st.markdown(_fixture_key_html(), unsafe_allow_html=True)
             pitch_final = _pitch_html(xi["xi"], xi["bench"], _pid(cap) if cap else None, _pid(vcap) if vcap else None)
-            st.markdown(_card(pitch_final + _fixture_key_html(), "⚽ Final Pitch View"), unsafe_allow_html=True)
+            st.markdown(_card(pitch_final, f'⚽ Final Pitch View · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · V = Vice-Captain'), unsafe_allow_html=True)
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
             
             mult_str = "×3" if is_tc else "×2"
