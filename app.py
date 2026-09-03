@@ -142,8 +142,8 @@ def _status_badge(status: str) -> str:
     if not status or status in ("Available", "a"):
         return ""
     if status in ("OUT", "Injured", "Suspended", "Unavailable"):
-        return f'<span class="stat-badge stat-out">{status}</span>'
-    return f'<span class="stat-badge stat-doubt">{status}</span>'
+        return f'<span class="stat-badge stat-out">🔴 {status}</span>'
+    return f'<span class="stat-badge stat-doubt">⚠️ {status}</span>'
 
 
 def _player_card(p, max_xp: float, role: str = None) -> str:
@@ -166,6 +166,33 @@ def _player_card(p, max_xp: float, role: str = None) -> str:
     )
 
 
+def _get_fixture_context():
+    """Cached fixture lookup + upcoming gameweek for traffic-light indicators."""
+    if "fx_context" not in st.session_state:
+        try:
+            bootstrap = fpl_tools._get_bootstrap()
+            st.session_state["fx_context"] = {
+                "lookup": fpl_tools._build_fixture_lookup(bootstrap),
+                "start_event": fpl_tools._next_gameweek(bootstrap),
+            }
+        except Exception:
+            st.session_state["fx_context"] = None
+    return st.session_state["fx_context"]
+
+
+def _name_with_fixtures(p) -> str:
+    """Append a 4-GW traffic-light string (e.g. 'B. Saka [🟢 🟡 🔴 🟢]') to a name."""
+    name = p.get("name", "?")
+    team_id = p.get("team_id")
+    if team_id is None:
+        return name
+    ctx = _get_fixture_context()
+    if not ctx:
+        return name
+    lights = fpl_tools._fixture_traffic_lights(team_id, ctx["lookup"], ctx["start_event"])
+    return f"{name} {lights}"
+
+
 def _mini_card(p, role: str = None) -> str:
     pos = p.get("position", "?")
     c = POS_COLORS.get(pos, "#94a3b8")
@@ -178,7 +205,7 @@ def _mini_card(p, role: str = None) -> str:
     return (
         f'<div class="mc" style="border-left-color:{c}">'
         f'<div style="margin-bottom:2px;"><span style="background:{c};" class="pos">{pos}</span>{role_html}{status_html}</div>'
-        f'<div class="mc-nm" title="{p.get("name", "?")}">{p.get("name", "?")}</div>'
+        f'<div class="mc-nm" title="{p.get("name", "?")}">{_name_with_fixtures(p)}</div>'
         f'<div class="mc-meta">{p.get("team", "?")} · £{p.get("price", 0):.1f}m</div>'
         f'<div class="mc-xp">{p.get("xp", 0)} xP</div></div>'
     )
@@ -213,7 +240,7 @@ def _team_sheet_html(starters, bench, captain_id=None, vcap_id=None) -> str:
         if be_players:
             subs_html = "".join(
                 f'<div class="sub-item">'
-                f'<div><div>{p.get("name", "?")} {_status_badge(p.get("status", ""))}</div>'
+                f'<div><div>{_name_with_fixtures(p)} {_status_badge(p.get("status", ""))}</div>'
                 f'<div class="sub-meta">{p.get("team", "?")} · £{p.get("price", 0):.1f}m</div></div>'
                 f'<div class="sub-xp">{p.get("xp", 0)} xP</div></div>'
                 for p in be_players
@@ -339,9 +366,9 @@ st.markdown(
     '<hr style="border:none;border-top:1px solid #c7d2fe;margin:14px 0;">'
     '<b>🌟 The Self-Learning Quant Engine 🌟</b><br>'
     'Most FPL tools are just static calculators. This is a living quantitative model.<br><br>'
-    'Every Gameweek, our background SQL engine logs the mathematical forecasts, cross-references them against '
-    'actual Premier League results, and analyses the margin of error. It then autonomously recalibrates its own '
-    'statistical weights.<br><br>'
+    '<i>Every Gameweek, our closed-loop validation engine benchmarks ex-ante projections against realised Premier '
+    'League match outcomes to assess predictive variance. The system dynamically recalibrates its underlying '
+    'statistical coefficients, ensuring continuous model refinement without exposing execution mechanics.</i><br><br>'
     'Put simply: it learns from reality. The deeper we get into the season, the smarter and more ruthless the '
     'algorithm becomes, giving you a compounding edge over your mini-league rivals.'
     '</div>',
@@ -387,7 +414,15 @@ with st.container(border=True):
         manager_id = st.text_input(
             "Enter your FPL Manager ID (We promise not to laugh at your overall rank)",
             key="mid_input",
-            help="Your unique FPL ID — the number in your team-page URL.",
+            help=(
+                "Your unique FPL ID — the number in your team-page URL. "
+                "Note: the Manager ID cannot be viewed inside the official FPL iOS or Android apps. "
+                "To find it on the web: "
+                "1) Log into fantasy.premierleague.com in a web browser. "
+                "2) Go to 'Pick Team' or 'Points', then select 'Gameweek History'. "
+                "3) Check the address bar: https://fantasy.premierleague.com/entry/XXXXXXX/history. "
+                "4) The numbers replacing XXXXXXX (e.g. 1234567) are your Manager ID."
+            ),
         )
     with col2:
         st.write("")
@@ -395,8 +430,10 @@ with st.container(border=True):
         load_clicked = st.button("📋 Load my team", type="secondary", use_container_width=True, key="btn_load")
 
     st.caption(
-        'Find your ID in your team-page URL — the number after <span class="dummy-url">/entry/</span> '
-        'e.g. <span class="dummy-url">fantasy.premierleague.com/entry/[THIS IS YOUR MANAGER ID]/event/1</span>',
+        "Manager ID not visible inside the official FPL iOS or Android apps. On a web browser, log into "
+        "fantasy.premierleague.com → 'Pick Team' or 'Points' → 'Gameweek History', then read the URL: "
+        '<span class="dummy-url">https://fantasy.premierleague.com/entry/XXXXXXX/history</span> — the '
+        "numbers replacing XXXXXXX (e.g. 1234567) are your Manager ID.",
         unsafe_allow_html=True,
     )
 
@@ -964,7 +1001,8 @@ if "override_analysis" in st.session_state:
                             xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
                             analysed_final.append({
                                 "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
-                                "team": teams.get(fpl_p["team"], "?"), "position": pos_map.get(fpl_p["element_type"], "?"),
+                                "team": teams.get(fpl_p["team"], "?"), "team_id": fpl_p["team"],
+                                "position": pos_map.get(fpl_p["element_type"], "?"),
                                 "price": fpl_p["now_cost"] / 10.0, "xp": xp, "status": note, "is_captain": False
                             })
                             
@@ -1080,25 +1118,40 @@ if lineup:
     bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in lineup.get("bench", []))
     move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in moves) or "None (holding)"
 
+    net_gain = float(tr.get("net_gain", 0.0))
     context = (
         f"Starting XI: {xi_str}\n"
         f"Bench: {bench_str}\n"
         f"Proposed transfers: {move_str}\n"
-        f"Total point hit cost: -{total_hit}\n"
+        f"Transfers made: {len(moves)}\n"
+        f"Net hit deduction: -{total_hit} ({hits} hits)\n"
+        f"Projected net xP delta: +{net_gain:.1f}\n"
     )
 
     system_prompt = (
-        "You are a former overall Fantasy Premier League winner and quantitative macro planner. "
-        "Evaluate the user's squad over a 4-gameweek tactical window. Be concise, highly tactical, "
-        "and data-driven. Return exactly 3-4 short bullet points."
+        "You are The FPL Final Boss. You are auditing an already-solved quantitative transfer plan. "
+        "You must critique, stress-test, and contextualise THESE EXACT MOVES. Never propose conflicting "
+        "moves or alternative transfers.\n"
+        "CHIP DISCIPLINE: If chips are disabled or inactive in the user context, you are strictly "
+        "FORBIDDEN from suggesting a Wildcard, Free Hit, Bench Boost, or Triple Captain. Never suggest "
+        "them as alternatives.\n"
+        "CRITICAL FPL MATH: Transfer point deductions are strictly multiples of 4 (-4, -8, -12). NEVER "
+        "invent figures such as -9.\n"
+        "CAPTAINCY: Validate the highest-ceiling asset. If an elite premium faces weak opposition (e.g., "
+        "Haaland vs newly promoted or struggling opposition), validate the quantitative favourite. Do not "
+        "recommend contrarian differentials for the sake of it.\n"
+        "You are a former overall Fantasy Premier League winner and quantitative macro planner. Be concise, "
+        "highly tactical, and data-driven. Return exactly 3-4 short bullet points."
     )
     ai_prompt = (
-        "Evaluate this FPL squad over the next 4 gameweeks and give 3-4 concise tactical bullets "
-        "using these benchmark rules:\n"
+        "Audit this already-solved FPL transfer plan over the next 4 gameweeks and give 3-4 concise "
+        "tactical bullets. These moves are immutable — critique, stress-test, and contextualise them; do "
+        "not propose conflicting moves or alternative transfers.\n"
         "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
         "validate structural health and endorse rolling the transfer for future leverage.\n"
-        "2. 'Crisis' Benchmark (Wildcard trigger): if it recommends a -8 hit or worse, or flags "
-        "widespread injury/suspension disruption, advise overriding the point hits and deploying the Wildcard.\n"
+        "2. 'Crisis' Benchmark: if it recommends a -8 hit or worse, or flags widespread "
+        "injury/suspension disruption, stress-test the cost of the point hits against the projected net "
+        "xP delta.\n"
         "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
         "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
         "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
@@ -1107,7 +1160,7 @@ if lineup:
         "reliable premium asset; if a differential is being captained, flag the risk.\n"
         "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
         "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
-        f"Team context:\n{context}"
+        f"Immutable team context:\n{context}"
     )
 
 with st.container(border=True):
@@ -1185,9 +1238,26 @@ with st.expander("📊 Player Scout & xP Rankings", expanded=False):
         ov_xp = max([p["xp"] for p in r["players"]] + [1.0])
         html = '<div class="grid">'
         for p in r["players"]:
-            html += _player_card({"position": p["position"], "name": p["name"], "team": p["team"],
+            name = p["name"]
+            if p.get("hazard"):
+                name = f"{name} {p['hazard']}"
+            html += _player_card({"position": p["position"], "name": name, "team": p["team"],
                                   "price": p["price"], "xp": p["xp"], "status": p.get("status", "")}, ov_xp)
         html += "</div>"
         st.markdown(_card(html, "📈 Ranked by xP"), unsafe_allow_html=True)
         st.markdown(get_caveat_html(), unsafe_allow_html=True)
+
+
+# ------------------------------------------------------------------
+# Persistent developer attribution (visible on mobile, outside the sidebar).
+# ------------------------------------------------------------------
+st.markdown(
+    """
+    <hr style="margin-top: 3rem; margin-bottom: 1rem; border: none; border-top: 1px solid #e0e0e0;">
+    <div style="text-align: center; color: #6b7280; font-size: 0.85rem; font-weight: 500; letter-spacing: 0.5px;">
+        Built by Waqas Hussain
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 

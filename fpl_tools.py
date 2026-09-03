@@ -37,8 +37,8 @@ MAX_HIT_TRANSFERS = 3
 PRIOR_MINUTES = 270.0          
 
 RISK_PROFILES = {
-    "conservative": {"hit_cost": 6.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0},
-    "balanced":     {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5},
+    "conservative": {"hit_cost": 8.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0},
+    "balanced":     {"hit_cost": 6.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5},
     "aggressive":   {"hit_cost": 3.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5},
     # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
     # leader (hunt low-ownership high-xGI differentials).
@@ -204,6 +204,152 @@ def _team_strength(team: Dict[str, Any], away: bool, which: str) -> float:
         val = 3.0
     return float(val)
 
+# ------------------------------------------------------------------
+# Live odds (The Odds API) integration
+# ------------------------------------------------------------------
+_ODDS_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+# Normalised Odds-API club name -> FPL short_name (used to map markets to squads).
+_CLUB_ALIASES = {
+    "arsenal": "ARS",
+    "aston villa": "AVL",
+    "bournemouth": "BOU",
+    "brentford": "BRE",
+    "brighton": "BHA",
+    "brighton and hove albion": "BHA",
+    "chelsea": "CHE",
+    "crystal palace": "CRY",
+    "everton": "EVE",
+    "fulham": "FUL",
+    "ipswich": "IPS",
+    "ipswich town": "IPS",
+    "leicester": "LEI",
+    "leicester city": "LEI",
+    "liverpool": "LIV",
+    "man city": "MCI",
+    "manchester city": "MCI",
+    "man utd": "MUN",
+    "manchester united": "MUN",
+    "manchester utd": "MUN",
+    "newcastle": "NEW",
+    "newcastle united": "NEW",
+    "nottingham forest": "NFO",
+    "southampton": "SOU",
+    "tottenham": "TOT",
+    "tottenham hotspur": "TOT",
+    "spurs": "TOT",
+    "west ham": "WHU",
+    "west ham united": "WHU",
+    "wolves": "WOL",
+    "wolverhampton": "WOL",
+    "wolverhampton wanderers": "WOL",
+}
+
+
+def _get_odds_api_key() -> Optional[str]:
+    key = os.getenv("ODDS_API_KEY")
+    if key:
+        return key
+    try:
+        import streamlit as st
+        key = st.secrets.get("ODDS_API_KEY")
+    except Exception:
+        key = None
+    return key or None
+
+
+def _canonical_club(name: str) -> Optional[str]:
+    if not name:
+        return None
+    n = name.lower().strip()
+    n = re.sub(r"[^a-z ]", " ", n)
+    n = " ".join(n.split())
+    if n in _CLUB_ALIASES:
+        return _CLUB_ALIASES[n]
+    for alias, code in _CLUB_ALIASES.items():
+        if alias in n:
+            return code
+    return None
+
+
+def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[int, Dict[int, float]]:
+    """Return {team_id: {opponent_id: implied win probability}} for upcoming fixtures.
+
+    Fetches live h2h odds from The Odds API and converts decimal prices into
+    bookmaker-margin-adjusted implied win probabilities. Returns {} on failure or
+    when ODDS_API_KEY is not configured.
+    """
+    global _ODDS_CACHE
+    now = time.time()
+    if _ODDS_CACHE["data"] is not None and now - _ODDS_CACHE["ts"] < 600:
+        return _ODDS_CACHE["data"]
+
+    result: Dict[int, Dict[int, float]] = {}
+    key = _get_odds_api_key()
+    if not key:
+        _ODDS_CACHE["data"] = result
+        _ODDS_CACHE["ts"] = now
+        return result
+
+    if bootstrap is None:
+        bootstrap = _get_bootstrap()
+    short_by_id = {t["id"]: t.get("short_name") for t in bootstrap.get("teams", [])}
+    id_by_short = {v: k for k, v in short_by_id.items() if v}
+
+    try:
+        url = (
+            "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+            f"?apiKey={key}&regions=uk,eu&markets=h2h"
+        )
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        matches = resp.json()
+    except Exception:
+        _ODDS_CACHE["data"] = result
+        _ODDS_CACHE["ts"] = now
+        return result
+
+    for m in matches:
+        home = _canonical_club(m.get("home_team", ""))
+        away = _canonical_club(m.get("away_team", ""))
+        h_id = id_by_short.get(home) if home else None
+        a_id = id_by_short.get(away) if away else None
+        if h_id is None or a_id is None:
+            continue
+
+        h_prices: List[float] = []
+        a_prices: List[float] = []
+        for bm in m.get("bookmakers", []):
+            for mk in bm.get("markets", []):
+                if mk.get("key") != "h2h":
+                    continue
+                for out in mk.get("outcomes", []):
+                    price = _to_float(out.get("price"))
+                    if price <= 0:
+                        continue
+                    code = _canonical_club(out.get("name", ""))
+                    if code == home:
+                        h_prices.append(price)
+                    elif code == away:
+                        a_prices.append(price)
+
+        if not h_prices or not a_prices:
+            continue
+        h_avg = sum(h_prices) / len(h_prices)
+        a_avg = sum(a_prices) / len(a_prices)
+        h_imp = 1.0 / h_avg
+        a_imp = 1.0 / a_avg
+        total = h_imp + a_imp
+        if total <= 0:
+            continue
+        result.setdefault(h_id, {})[a_id] = h_imp / total
+        result.setdefault(a_id, {})[h_id] = a_imp / total
+
+    _ODDS_CACHE["data"] = result
+    _ODDS_CACHE["ts"] = now
+    return result
+
+
 def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[int, List[Dict[str, Any]]]:
     if bootstrap is None:
         bootstrap = _get_bootstrap()
@@ -213,6 +359,8 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
         fixtures = _get_fixtures()
     except Exception:
         return {}
+
+    win_probs = _fetch_market_win_probs(bootstrap)
 
     lookup: Dict[int, List[Dict[str, Any]]] = {}
     for f in fixtures:
@@ -225,6 +373,7 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
             "difficulty": f.get("team_h_difficulty") or 3,
             "opp_strength_def": _team_strength(teams.get(a, {}), away=True, which="def"),
             "opp_strength_att": _team_strength(teams.get(a, {}), away=True, which="att"),
+            "win_prob": win_probs.get(h, {}).get(a),
         }
         away_fx = {
             "event": event,
@@ -233,6 +382,7 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
             "difficulty": f.get("team_a_difficulty") or 3,
             "opp_strength_def": _team_strength(teams.get(h, {}), away=False, which="def"),
             "opp_strength_att": _team_strength(teams.get(h, {}), away=False, which="att"),
+            "win_prob": win_probs.get(a, {}).get(h),
         }
         lookup.setdefault(h, []).append(home_fx)
         lookup.setdefault(a, []).append(away_fx)
@@ -240,6 +390,38 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
     for t in lookup:
         lookup[t].sort(key=lambda x: x["event"] if x["event"] is not None else 999)
     return lookup
+
+
+def _fixture_traffic_lights(team_id: int, fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> str:
+    """Return a 4-GW traffic-light string, e.g. '[🟢 🟡 🔴 🟢]'.
+
+    Uses market-implied win probability when available, falling back to FDR.
+    """
+    fixtures = fixture_lookup.get(team_id, [])
+    lights: List[str] = []
+    for i in range(n):
+        ev = start_event + i
+        fx = next((x for x in fixtures if x.get("event") == ev), None)
+        if fx is None:
+            lights.append("⚪")
+            continue
+        wp = fx.get("win_prob")
+        if wp is not None:
+            if wp > 0.5:
+                lights.append("🟢")
+            elif wp >= 0.3:
+                lights.append("🟡")
+            else:
+                lights.append("🔴")
+        else:
+            fdr = fx.get("difficulty") or 3
+            if fdr <= 2:
+                lights.append("🟢")
+            elif fdr == 3:
+                lights.append("🟡")
+            else:
+                lights.append("🔴")
+    return "[" + " ".join(lights) + "]"
 
 def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
     # Availability haircut using the official FPL API flag (chance_of_playing_*).
@@ -375,6 +557,15 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     def_adj = 3.0 / max(_to_float(f.get("opp_strength_def")), 1.0)
     att_adj = max(_to_float(f.get("opp_strength_att")), 1.0) / 3.0
+
+    # Live market scaling: blend bookmaker-implied win probability with static FDR.
+    win_prob = f.get("win_prob")
+    if win_prob is not None:
+        market_att = 0.6 + 0.8 * win_prob
+        market_def = 1.4 - 0.8 * win_prob
+        def_adj *= market_att
+        att_adj *= market_def
+
     _w = _load_weights()
     home_adv = _w["home_advantage"]
     venue_att = (1.0 + 0.08 * home_adv) if f.get("is_home") else (1.0 - 0.05 * home_adv)
@@ -425,6 +616,13 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
 
     pos_id = p.get("element_type")
     team_id = p.get("team")
+
+    # Strict minutes gating: block assets with zero minutes played this season
+    # (e.g. backup goalkeepers) so the solver never buys a zero-projection player.
+    # Skipped during GW1, when no player has accumulated minutes yet.
+    if _to_float(p.get("minutes", 0)) <= 0 and (event is None or event > 1):
+        return 0.0, "No minutes"
+
     min_frac = _expected_minute_fraction(p, status)
 
     fixtures = fixture_lookup.get(team_id, [])
@@ -448,7 +646,9 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
 
     ep_next = _to_float(p.get("ep_next"))
     if ep_next > 0:
-        xp = (1.0 - EP_BLEND) * our_total + EP_BLEND * ep_next
+        # Availability haircut applied to BOTH the model projection and FPL's own
+        # projection, so doubtful assets never display an unadjusted baseline.
+        xp = (1.0 - EP_BLEND) * our_total + EP_BLEND * ep_next * min_frac
     else:
         xp = our_total
 
@@ -475,6 +675,11 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
         return 0.0, "Suspended"
     elif status in ("u", "n"):
         return 0.0, "Unavailable"
+
+    # Strict minutes gating (backup-GK fix): zero projection for zero-minute assets.
+    # Skipped during GW1, when no player has accumulated minutes yet.
+    if _to_float(p.get("minutes", 0)) <= 0 and start_event > 1:
+        return 0.0, "No minutes"
 
     weights = HORIZON_WEIGHTS[:n] if n <= len(HORIZON_WEIGHTS) else HORIZON_WEIGHTS
     total = 0.0
@@ -812,7 +1017,7 @@ def suggest_transfers_for_custom_squad(
         if not pos:
             continue
         xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
-        if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable"):
+        if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable", "No minutes"):
             continue
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
@@ -1044,19 +1249,32 @@ def rank_players_by_xp(position: str = None, max_price: float = None, limit: int
     for p in bootstrap["elements"]:
         pos = POS_MAP.get(p["element_type"])
         price = p["now_cost"] / 10.0
+        status = p.get("status", "a")
+        if status == "u":
+            continue  # left the Premier League — never surface these in rankings
         if position and pos != position:
             continue
         if max_price and max_price > 0 and price > max_price:
             continue
 
         xp, note = _player_xp(p, fixture_lookup, event=event, risk=risk)
+
+        # Hazard icon so unadjusted baselines never mislead the user.
+        chance = p.get("chance_of_playing_next_round")
+        hazard = ""
+        if status in ("i", "s", "u", "n"):
+            hazard = "🔴"
+        elif status == "d" or (chance is not None and _to_float(chance) < 100):
+            hazard = "⚠️"
+
         ranked.append({
             "name": f"{p['first_name']} {p['second_name']}",
             "position": pos,
             "team": teams_by_id.get(p["team"], "?"),
             "price": price,
             "xp": xp,
-            "status": note
+            "status": note,
+            "hazard": hazard,
         })
 
     ranked.sort(key=lambda x: x["xp"], reverse=True)
