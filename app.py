@@ -495,7 +495,7 @@ def _headshot_img(p) -> str:
         ctx = _bootstrap_ctx()
         el = (ctx or {}).get("players_by_id", {}).get(_pid(p), {})
         photo = el.get("photo", "")
-    url = _headshot_url(photo) or "https://resources.premierleague.com/premierleague/photos/players/250x250/Photo-Missing.png"
+    url = _headshot_url(photo) or "https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png"
     badge = ""
     team_id = p.get("team_id")
     if team_id is None and isinstance(p.get("team"), int):
@@ -506,7 +506,7 @@ def _headshot_img(p) -> str:
     return (
         f'<div class="photo-frame">'
         f'<img class="headshot" src="{url}" alt="" loading="lazy" '
-        f'onerror="this.onerror=null; this.src=\'https://resources.premierleague.com/premierleague/photos/players/250x250/Photo-Missing.png\';">'
+        f'onerror="this.onerror=null; this.src=\'https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png\';">'
         f'{overlay}'
         f'</div>'
     )
@@ -1067,9 +1067,9 @@ with tab_planner:
             st.session_state["base_tot_xp"] = tot_xp
     
             x1, x2, x3 = st.columns(3)
-            x1.metric("🛡️ Baseline Starting XI xP", f"{st_xp} xP")
-            x2.metric("🪑 Baseline Bench xP", f"{be_xp} xP")
-            x3.metric("📊 Baseline Squad xP", f"{tot_xp} xP")
+            x1.metric("🛡️ Baseline Starting XI xP", f"{st_xp:.2f} xP")
+            x2.metric("🪑 Baseline Bench xP", f"{be_xp:.2f} xP")
+            x3.metric("📊 Baseline Squad xP", f"{tot_xp:.2f} xP")
     
             with st.expander("🔍 How Your Budget & Squad Value Are Calculated", expanded=False):
                 st.markdown(
@@ -1377,121 +1377,42 @@ with tab_planner:
                 transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
             st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
 
-            st.markdown("---")
-            st.markdown("### 👾 The FPL Final Boss")
-            st.markdown("Step into the manager's office. Present your transfers to the Final Boss for a brutal tactical interrogation.")
+            c_fast1, c_fast2 = st.columns(2)
+            with c_fast1:
+                accept_all = st.button("✅ Accept All Quant Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
+            with c_fast2:
+                fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
+            
+            if fast_hold:
+                with st.spinner("Generating Final Lineup with current squad…"):
+                    analysed_current = ov["analysed_squad"]
+                    lineup = fpl_tools.select_starting_xi(analysed_current)
+                    lineup["confirmed_chip"] = confirmed_chip
+                    st.session_state["manual_final"] = lineup
+                    st.rerun()
+    
+            if accept_all:
+                with st.spinner("Applying Quant transfers and generating final lineup…"):
+                    sold_ids = {m["out"]["id"] for m in moves}
+                    final_squad = [p for p in ov["analysed_squad"] if p["player_id"] not in sold_ids]
+                    for m in moves:
+                        final_squad.append({
+                            "player_id": m["in"]["id"],
+                            "name": m["in"]["name"],
+                            "team": m["in"]["team"],
+                            "team_id": m["in"]["team_id"],
+                            "position": m["in"]["position"],
+                            "price": m["in"]["price"],
+                            "xp": m["in"].get("xp_gw", m["in"]["xp"]),
+                            "status": m["in"]["status"],
+                            "is_captain": False,
+                        })
+                    lineup = fpl_tools.select_starting_xi(final_squad)
+                    lineup["confirmed_chip"] = confirmed_chip
+                    st.session_state["manual_final"] = lineup
+                    st.rerun()
 
-            if "ai_response" not in st.session_state:
-                st.session_state.ai_response = None
-            if "last_ai_prompt" not in st.session_state:
-                st.session_state.last_ai_prompt = None
 
-            fb_lineup = st.session_state.get("manual_final")
-
-            fb_ai_prompt = None
-            fb_system_prompt = None
-            if fb_lineup:
-                fb_tr = st.session_state.get("override_analysis", {}).get("transfers", {})
-                fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
-                fb_hits = int(fb_tr.get("hits", 0))
-                fb_hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
-                fb_total_hit = fb_hits * fb_hit_cost
-
-                fb_xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in fb_lineup.get("xi", []))
-                fb_bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in fb_lineup.get("bench", []))
-                fb_move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in fb_moves) or "None (holding)"
-
-                fb_net_gain = float(fb_tr.get("net_gain", 0.0))
-                fb_context = (
-                    f"Starting XI: {fb_xi_str}\n"
-                    f"Bench: {fb_bench_str}\n"
-                    f"Proposed transfers: {fb_move_str}\n"
-                    f"Transfers made: {len(fb_moves)}\n"
-                    f"Net hit deduction: -{fb_total_hit} ({fb_hits} hits)\n"
-                    f"Projected net xP delta: +{fb_net_gain:.1f}\n"
-                )
-
-                fb_system_prompt = (
-                    "You are The FPL Final Boss. You are auditing an already-solved quantitative transfer plan. "
-                    "You must critique, stress-test, and contextualise THESE EXACT MOVES. Never propose conflicting "
-                    "moves or alternative transfers.\n"
-                    "CHIP DISCIPLINE: If chips are disabled or inactive in the user context, you are strictly "
-                    "FORBIDDEN from suggesting a Wildcard, Free Hit, Bench Boost, or Triple Captain. Never suggest "
-                    "them as alternatives.\n"
-                    "CRITICAL FPL MATH: Transfer point deductions are strictly multiples of 4 (-4, -8, -12). NEVER "
-                    "invent figures such as -9.\n"
-                    "CAPTAINCY: Validate the highest-ceiling asset. If an elite premium faces weak opposition (e.g., "
-                    "Haaland vs newly promoted or struggling opposition), validate the quantitative favourite. Do not "
-                    "recommend contrarian differentials for the sake of it.\n"
-                    "You are a former overall Fantasy Premier League winner and quantitative macro planner. Be concise, "
-                    "highly tactical, and data-driven. Return exactly 3-4 short bullet points."
-                )
-                fb_ai_prompt = (
-                    "Audit this already-solved FPL transfer plan over the next 4 gameweeks and give 3-4 concise "
-                    "tactical bullets. These moves are immutable — critique, stress-test, and contextualise them; do "
-                    "not propose conflicting moves or alternative transfers.\n"
-                    "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
-                    "validate structural health and endorse rolling the transfer for future leverage.\n"
-                    "2. 'Crisis' Benchmark: if it recommends a -8 hit or worse, or flags widespread "
-                    "injury/suspension disruption, stress-test the cost of the point hits against the projected net "
-                    "xP delta.\n"
-                    "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
-                    "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
-                    "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
-                    "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n"
-                    "5. Captaincy Sanity Check: validate that the armband is anchored to the highest-ceiling, most "
-                    "reliable premium asset; if a differential is being captained, flag the risk.\n"
-                    "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
-                    "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
-                    f"Immutable team context:\n{fb_context}"
-                )
-
-            if not fb_lineup:
-                st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
-            else:
-                if st.button("Press here to face the Final Boss (If you dare)", type="primary"):
-                    with st.spinner("The Final Boss is reviewing your tactics... brace yourself for impact."):
-                        api_key = os.environ.get("DEEPSEEK_API_KEY")
-                        if not api_key:
-                            st.warning("API key missing. Please configure the environment variable.")
-                        else:
-                            response_text = None
-                            for attempt in range(3):
-                                try:
-                                    st.toast(f"The Final Boss is pondering deeply... ({attempt + 1}/3)")
-                                    resp = requests.post(
-                                        "https://api.deepseek.com/chat/completions",
-                                        headers={
-                                            "Authorization": f"Bearer {api_key}",
-                                            "Content-Type": "application/json",
-                                        },
-                                        json={
-                                            "model": "deepseek-v4-flash",
-                                            "messages": [
-                                                {"role": "system", "content": fb_system_prompt},
-                                                {"role": "user", "content": fb_ai_prompt},
-                                            ],
-                                            "temperature": 0.4,
-                                        },
-                                        timeout=120,
-                                    )
-                                    resp.raise_for_status()
-                                    response_text = resp.json()["choices"][0]["message"]["content"]
-                                    break
-                                except Exception as e:
-                                    if attempt < 2:
-                                        continue
-                                    st.error(f"API Request Failed: {str(e)}")
-
-                            if response_text is not None:
-                                st.session_state.ai_response = response_text
-                                st.session_state.last_ai_prompt = fb_ai_prompt
-
-                if st.session_state.ai_response:
-                    if st.session_state.last_ai_prompt == fb_ai_prompt:
-                        st.markdown(st.session_state.ai_response)
-                    else:
-                        st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
 
     
             with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
@@ -1534,40 +1455,6 @@ with tab_planner:
                     if k.startswith("man_out") or k.startswith("man_in"):
                         st.session_state.pop(k, None)
     
-            c_fast1, c_fast2 = st.columns(2)
-            with c_fast1:
-                accept_all = st.button("✅ Accept All Quant Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
-            with c_fast2:
-                fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
-            
-            if fast_hold:
-                with st.spinner("Generating Final Lineup with current squad…"):
-                    analysed_current = ov["analysed_squad"]
-                    lineup = fpl_tools.select_starting_xi(analysed_current)
-                    lineup["confirmed_chip"] = confirmed_chip
-                    st.session_state["manual_final"] = lineup
-                    st.rerun()
-    
-            if accept_all:
-                with st.spinner("Applying Quant transfers and generating final lineup…"):
-                    sold_ids = {m["out"]["id"] for m in moves}
-                    final_squad = [p for p in ov["analysed_squad"] if p["player_id"] not in sold_ids]
-                    for m in moves:
-                        final_squad.append({
-                            "player_id": m["in"]["id"],
-                            "name": m["in"]["name"],
-                            "team": m["in"]["team"],
-                            "team_id": m["in"]["team_id"],
-                            "position": m["in"]["position"],
-                            "price": m["in"]["price"],
-                            "xp": m["in"].get("xp_gw", m["in"]["xp"]),
-                            "status": m["in"]["status"],
-                            "is_captain": False,
-                        })
-                    lineup = fpl_tools.select_starting_xi(final_squad)
-                    lineup["confirmed_chip"] = confirmed_chip
-                    st.session_state["manual_final"] = lineup
-                    st.rerun()
     
             st.markdown("---")
             st.markdown("#### Or, Customise Your Transfers Below")
@@ -1789,6 +1676,123 @@ with tab_planner:
             cap_html += "</div>"
             st.markdown(_card(cap_html, "⭐ Captaincy"), unsafe_allow_html=True)
     
+
+
+    st.markdown("---")
+    st.markdown("### 👾 The FPL Final Boss")
+    st.markdown("Step into the manager's office. Present your transfers to the Final Boss for a brutal tactical interrogation.")
+
+    if "ai_response" not in st.session_state:
+        st.session_state.ai_response = None
+    if "last_ai_prompt" not in st.session_state:
+        st.session_state.last_ai_prompt = None
+
+    fb_lineup = st.session_state.get("manual_final")
+
+    fb_ai_prompt = None
+    fb_system_prompt = None
+    if fb_lineup:
+        fb_tr = st.session_state.get("override_analysis", {}).get("transfers", {})
+        fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
+        fb_hits = int(fb_tr.get("hits", 0))
+        fb_hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
+        fb_total_hit = fb_hits * fb_hit_cost
+
+        fb_xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in fb_lineup.get("xi", []))
+        fb_bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in fb_lineup.get("bench", []))
+        fb_move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in fb_moves) or "None (holding)"
+
+        fb_net_gain = float(fb_tr.get("net_gain", 0.0))
+        fb_context = (
+            f"Starting XI: {fb_xi_str}\n"
+            f"Bench: {fb_bench_str}\n"
+            f"Proposed transfers: {fb_move_str}\n"
+            f"Transfers made: {len(fb_moves)}\n"
+            f"Net hit deduction: -{fb_total_hit} ({fb_hits} hits)\n"
+            f"Projected net xP delta: +{fb_net_gain:.1f}\n"
+        )
+
+        fb_system_prompt = (
+            "You are The FPL Final Boss. You are auditing an already-solved quantitative transfer plan. "
+            "You must critique, stress-test, and contextualise THESE EXACT MOVES. Never propose conflicting "
+            "moves or alternative transfers.\n"
+            "CHIP DISCIPLINE: If chips are disabled or inactive in the user context, you are strictly "
+            "FORBIDDEN from suggesting a Wildcard, Free Hit, Bench Boost, or Triple Captain. Never suggest "
+            "them as alternatives.\n"
+            "CRITICAL FPL MATH: Transfer point deductions are strictly multiples of 4 (-4, -8, -12). NEVER "
+            "invent figures such as -9.\n"
+            "CAPTAINCY: Validate the highest-ceiling asset. If an elite premium faces weak opposition (e.g., "
+            "Haaland vs newly promoted or struggling opposition), validate the quantitative favourite. Do not "
+            "recommend contrarian differentials for the sake of it.\n"
+            "You are a former overall Fantasy Premier League winner and quantitative macro planner. Be concise, "
+            "highly tactical, and data-driven. Return exactly 3-4 short bullet points."
+        )
+        fb_ai_prompt = (
+            "Audit this already-solved FPL transfer plan over the next 4 gameweeks and give 3-4 concise "
+            "tactical bullets. These moves are immutable — critique, stress-test, and contextualise them; do "
+            "not propose conflicting moves or alternative transfers.\n"
+            "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
+            "validate structural health and endorse rolling the transfer for future leverage.\n"
+            "2. 'Crisis' Benchmark: if it recommends a -8 hit or worse, or flags widespread "
+            "injury/suspension disruption, stress-test the cost of the point hits against the projected net "
+            "xP delta.\n"
+            "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
+            "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
+            "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
+            "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n"
+            "5. Captaincy Sanity Check: validate that the armband is anchored to the highest-ceiling, most "
+            "reliable premium asset; if a differential is being captained, flag the risk.\n"
+            "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
+            "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
+            f"Immutable team context:\n{fb_context}"
+        )
+
+    if not fb_lineup:
+        st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
+    else:
+        if st.button("Press here to face the Final Boss (If you dare)", type="primary"):
+            with st.spinner("The Final Boss is reviewing your tactics... brace yourself for impact."):
+                api_key = os.environ.get("DEEPSEEK_API_KEY")
+                if not api_key:
+                    st.warning("API key missing. Please configure the environment variable.")
+                else:
+                    response_text = None
+                    for attempt in range(3):
+                        try:
+                            st.toast(f"The Final Boss is pondering deeply... ({attempt + 1}/3)")
+                            resp = requests.post(
+                                "https://api.deepseek.com/chat/completions",
+                                headers={
+                                    "Authorization": f"Bearer {api_key}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "model": "deepseek-v4-flash",
+                                    "messages": [
+                                        {"role": "system", "content": fb_system_prompt},
+                                        {"role": "user", "content": fb_ai_prompt},
+                                    ],
+                                    "temperature": 0.4,
+                                },
+                                timeout=120,
+                            )
+                            resp.raise_for_status()
+                            response_text = resp.json()["choices"][0]["message"]["content"]
+                            break
+                        except Exception as e:
+                            if attempt < 2:
+                                continue
+                            st.error(f"API Request Failed: {str(e)}")
+
+                    if response_text is not None:
+                        st.session_state.ai_response = response_text
+                        st.session_state.last_ai_prompt = fb_ai_prompt
+
+        if st.session_state.ai_response:
+            if st.session_state.last_ai_prompt == fb_ai_prompt:
+                st.markdown(st.session_state.ai_response)
+            else:
+                st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
 
 with tab_insights:
     st.markdown("### 🔬 Insights Lab")

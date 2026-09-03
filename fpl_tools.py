@@ -35,6 +35,8 @@ EP_BLEND = 0.5
 HIT_COST = 4.0                 
 MAX_HIT_TRANSFERS = 3          
 PRIOR_MINUTES = 270.0          
+WILDCARD_SCARCITY_COST = 25.0
+ROLL_TRANSFER_VALUE = 1.5
 
 RISK_PROFILES = {
     "conservative": {"hit_cost": 8.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0},
@@ -819,6 +821,8 @@ def _solve_squad(
     must_include_ids: Optional[set] = None,
     hit_config: Optional[Dict[str, Any]] = None,
     bench_boost: bool = False,
+    scarcity_cost: float = 0.0,
+    roll_value: float = 0.0,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -906,7 +910,25 @@ def _solve_squad(
         # Transfer friction: each free transfer used costs ft_friction xP, so the
         # solver values holding FTs. Hits stack the -4 penalty on top.
         ft_friction = hit_config.get("ft_friction", 0.0)
-        prob.setObjective(xp_expr - hit_config["hit_cost"] * hits - ft_friction * (transfers - hits))
+        obj = xp_expr - hit_config["hit_cost"] * hits - ft_friction * (transfers - hits)
+
+        # Wildcard scarcity: activating the chip (any transfer) incurs a fixed
+        # full-season opportunity cost, so the solver holds it unless the rebuilt
+        # squad decisively outscores the current squad over the horizon.
+        if scarcity_cost > 0 and max_t is not None:
+            chip_used = pulp.LpVariable("chip_used", cat="Binary")
+            prob += transfers <= max_t * chip_used, "chip_used_force"
+            obj = obj - scarcity_cost * chip_used
+
+        # Rolling value: banking the free transfer (0 transfers) earns a small
+        # bonus, favouring internal bench rotation over lateral tinkering.
+        if roll_value > 0 and max_t is not None:
+            roll = pulp.LpVariable("roll_ft", cat="Binary")
+            prob += roll <= 1 - transfers / max_t, "roll_ub"
+            prob += roll >= 1 - transfers, "roll_lb"
+            obj = obj + roll_value * roll
+
+        prob.setObjective(obj)
     else:
         prob.setObjective(xp_expr)
 
@@ -1071,7 +1093,8 @@ def suggest_transfers_for_custom_squad(
     std_selected, _ = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS, "ft_friction": ft_friction},
-        bench_boost=False
+        bench_boost=False,
+        roll_value=ROLL_TRANSFER_VALUE,
     )
     std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
     # Buffer the hold strategy: net_gain already subtracts FT friction, so a
@@ -1095,6 +1118,18 @@ def suggest_transfers_for_custom_squad(
             bench_boost=("Bench Boost" in eval_chips)
         )
         unl_moves, unl_hits, unl_net, unl_cost = _get_moves(unl_selected, True)
+
+    # Wildcard is a full-season chip: re-solve with a scarcity penalty so it is
+    # only deployed when the rebuilt squad decisively outscores the current one.
+    wc_moves, wc_hits, wc_net, wc_cost = [], 0, 0.0, 0.0
+    if "Wildcard" in eval_chips:
+        wc_selected, _ = _solve_squad(
+            pool, budget=budget, must_include_ids=set(current_ids),
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
+            bench_boost=("Bench Boost" in eval_chips),
+            scarcity_cost=WILDCARD_SCARCITY_COST,
+        )
+        wc_moves, wc_hits, wc_net, wc_cost = _get_moves(wc_selected, True)
 
     # ==============================================================
     # 3. Project Universe A Squad (For BB and TC Eval)
@@ -1128,7 +1163,7 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     chip_scores = {}
     if "Wildcard" in eval_chips:
-        chip_scores["Wildcard"] = round(unl_net - std_net, 2)
+        chip_scores["Wildcard"] = round(wc_net - std_net, 2)
     if "Free Hit" in eval_chips:
         chip_scores["Free Hit"] = round(unl_net - std_net, 2)
     if "Bench Boost" in eval_chips:
