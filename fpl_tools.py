@@ -26,6 +26,14 @@ try:
 except ImportError:
     HAS_PULP = False
 
+# Decaying transfer tax (anti-whipsaw). Lives in db.py (persistent ledger); fall
+# back to a no-op if the module is unavailable so the solver stays importable.
+try:
+    from db import calculate_decaying_tax
+except ImportError:
+    def calculate_decaying_tax(current_gw, purchase_gw, status="a"):
+        return 0.0
+
 BASE_URL = "https://fantasy.premierleague.com/api"
 
 # ------------------------------------------------------------------
@@ -838,7 +846,8 @@ def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
 
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,
                 selling_price: Optional[float] = None, xp_gw: Optional[float] = None,
-                fdr: Optional[List[float]] = None, event: Optional[int] = None) -> Dict[str, Any]:
+                fdr: Optional[List[float]] = None, event: Optional[int] = None,
+                holding_map: Optional[Dict[Any, int]] = None) -> Dict[str, Any]:
     entry = {
         "id": e["id"],
         "name": f"{e['first_name']} {e['second_name']}",
@@ -857,6 +866,8 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         entry["xp_gw"] = xp_gw
     if fdr is not None:
         entry["fdr"] = fdr
+    if holding_map is not None:
+        entry["purchase_gw"] = holding_map.get(e["id"])
     return entry
 
 def _solve_squad(
@@ -867,6 +878,8 @@ def _solve_squad(
     bench_boost: bool = False,
     scarcity_cost: float = 0.0,
     roll_value: float = 0.0,
+    holding_map: Optional[Dict[Any, int]] = None,
+    current_gw: Optional[int] = None,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -991,6 +1004,17 @@ def _solve_squad(
                 prob += y[k] <= y[k - 1], f"roll_ft_mono_{k}"
             obj = obj + roll_value * pulp.lpSum(ROLLED_FT_SHAPE[k - 1] * y[k] for k in range(1, 6))
 
+        for pid in must_include_ids:
+            if pid not in by_id:
+                continue
+            p = by_id[pid]
+            purchase_gw = p.get("purchase_gw")
+            if purchase_gw is None and holding_map is not None:
+                purchase_gw = holding_map.get(pid)
+            tax = calculate_decaying_tax(current_gw, purchase_gw, p.get("status", "a"))
+            if tax > 0:
+                obj = obj - tax * (1 - x[pid])
+
         prob.setObjective(obj)
     else:
         prob.setObjective(xp_expr)
@@ -1063,8 +1087,10 @@ def suggest_transfers_for_custom_squad(
     bank: float, 
     free_transfers: int, 
     eval_chips: List[str] = [],
-    event: Optional[int] = None, 
-    risk: str = "balanced"
+    event: Optional[int] = None,
+    risk: str = "balanced",
+    holding_map: Optional[Dict[Any, int]] = None,
+    current_gw: Optional[int] = None,
 ) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
     fixture_lookup = _build_fixture_lookup(bootstrap)
@@ -1073,6 +1099,9 @@ def suggest_transfers_for_custom_squad(
     
     if event is None:
         event = _next_gameweek(bootstrap)
+
+    if current_gw is None:
+        current_gw = event
 
     hit_cost = _risk_profile(risk)["hit_cost"]
     ft_friction = _risk_profile(risk).get("ft_friction", 1.5)
@@ -1093,7 +1122,8 @@ def suggest_transfers_for_custom_squad(
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
-                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr, event=event))
+                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr, event=event,
+                                holding_map=holding_map))
         seen.add(pid)
 
     for e in bootstrap["elements"]:
@@ -1107,7 +1137,8 @@ def suggest_transfers_for_custom_squad(
             continue
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
-        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event))
+        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
+                                holding_map=holding_map))
         seen.add(e["id"])
 
     # Total purchasing power = Bank + sum(selling price of the current squad).
@@ -1164,6 +1195,7 @@ def suggest_transfers_for_custom_squad(
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS, "ft_friction": ft_friction},
         bench_boost=False,
         roll_value=roll_value,
+        holding_map=holding_map, current_gw=current_gw,
     )
     std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
     # Buffer the hold strategy: the decision net (which includes the virtual
@@ -1184,7 +1216,8 @@ def suggest_transfers_for_custom_squad(
         unl_selected, _ = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
-            bench_boost=("Bench Boost" in eval_chips)
+            bench_boost=("Bench Boost" in eval_chips),
+            holding_map=holding_map, current_gw=current_gw,
         )
         unl_moves, unl_hits, unl_net, unl_cost, _ = _get_moves(unl_selected, True)
 
@@ -1197,6 +1230,7 @@ def suggest_transfers_for_custom_squad(
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
             scarcity_cost=WILDCARD_SCARCITY_COST,
+            holding_map=holding_map, current_gw=current_gw,
         )
         wc_moves, wc_hits, wc_net, wc_cost, _ = _get_moves(wc_selected, True)
 

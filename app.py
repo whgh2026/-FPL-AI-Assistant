@@ -7,6 +7,7 @@ import dateutil.parser
 from dateutil import tz
 import datetime
 import time
+from db import get_or_backfill_manager_history
 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
@@ -1463,8 +1464,10 @@ with tab_planner:
                                     "on_yellow_card_tightrope": fpl_tools._is_on_tightrope(fpl_p, GW_ID),
                                 })
                             
+                            holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                                analysed, float(bank_val), int(ft_val), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower())
+                                analysed, float(bank_val), int(ft_val), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
+                                holding_map=holding_map, current_gw=GW_ID)
                             
                             st.session_state["override_analysis"] = {
                                 "analysed_squad": analysed,
@@ -1526,9 +1529,11 @@ with tab_planner:
                                     _p["status"] = _note
                         except Exception:
                             pass
+                        holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
                         tr = fpl_tools.suggest_transfers_for_custom_squad(
                             ov["analysed_squad"], ov["bank"], ov["ft"],
-                            eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower()
+                            eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
+                            holding_map=holding_map, current_gw=GW_ID
                         )
                         ov["transfers"] = tr
                     except Exception as e:
