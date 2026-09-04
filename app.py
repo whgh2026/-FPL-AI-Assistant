@@ -1078,7 +1078,7 @@ with tab_planner:
                 st.query_params["mid"] = manager_id.strip()
                 with st.spinner("Judging your recent managerial decisions... Fetching squad…"):
                     try:
-                    preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
+                        preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
                         st.session_state["squad_preview"] = preview
                         
                         try:
@@ -1098,17 +1098,17 @@ with tab_planner:
         elif preview:
             
             ft = st.session_state.get("api_free_transfers_default", 0)
-        fetch_ts = fpl_tools.get_api_timestamp()
-        dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(tz.gettz('Europe/London'))
-        d_str = dt.strftime('%d %b %H:%M')
+            fetch_ts = fpl_tools.get_api_timestamp()
+            dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(tz.gettz('Europe/London'))
+            d_str = dt.strftime('%d %b %H:%M')
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Team", preview["team_name"])
-        m2.metric("Free Transfers", f"{ft}", f"As of {d_str}", delta_color="off")
-        m3.metric("Bank (Unspent)", f"£{preview['bank']}m", f"As of {d_str}", delta_color="off")
-        m4.metric("Team value", f"£{preview['team_value']}m")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Team", preview["team_name"])
+            m2.metric("Free Transfers", f"{ft}", f"As of {d_str}", delta_color="off")
+            m3.metric("Bank (Unspent)", f"£{preview['bank']}m", f"As of {d_str}", delta_color="off")
+            m4.metric("Team value", f"£{preview['team_value']}m")
     
-                    squad = preview.get("squad", [])
+            squad = preview.get("squad", [])
             starters, bench = _api_starters_bench(squad)
             cap = next((p for p in squad if p.get("is_captain")), None)
             vc = next((p for p in squad if p.get("is_vice_captain")), None)
