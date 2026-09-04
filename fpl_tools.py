@@ -35,7 +35,7 @@ EP_BLEND = 0.5
 HIT_COST = 4.0                 
 MAX_HIT_TRANSFERS = 3          
 PRIOR_MINUTES = 270.0          
-WILDCARD_SCARCITY_COST = 45.0
+WILDCARD_SCARCITY_COST = 55.0
 ROLL_TRANSFER_VALUE = 1.5
 
 RISK_PROFILES = {
@@ -1177,7 +1177,7 @@ def suggest_transfers_for_custom_squad(
     ranked_chips = sorted(chip_scores.items(), key=lambda x: x[1], reverse=True)
     
     # Ultra-Strict Compelling Reason Thresholds
-    THRESHOLDS = {"Wildcard": 45.0, "Free Hit": 18.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
+    THRESHOLDS = {"Wildcard": 55.0, "Free Hit": 20.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
     
     chip_advice_list = []
     if len(eval_chips) > 1:
