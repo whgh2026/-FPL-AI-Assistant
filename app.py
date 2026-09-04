@@ -276,6 +276,22 @@ DARK_CSS3 = """
 """
 st.markdown(DARK_CSS3, unsafe_allow_html=True)
 
+DARK_CSS4 = """
+<style>
+  .signal-grid {display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;}
+  .signal-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 12px 14px;}
+  .signal-head {display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-weight: 700; color: #E2E8F0;}
+  .signal-score {margin-left: auto; font-size: 1.15rem; font-weight: 800; color: #00F5A0;}
+  .signal-delta {font-size: 0.72rem; font-weight: 700; margin-left: 4px;}
+  .signal-row {display: flex; align-items: center; gap: 6px; margin: 5px 0;}
+  .signal-label {flex: 0 0 46px; font-size: 0.66rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em;}
+  .signal-bar {flex: 1; height: 5px; background: #334155; border-radius: 3px; overflow: hidden;}
+  .signal-fill {height: 100%; border-radius: 3px;}
+  .signal-val {flex: 0 0 22px; font-size: 0.7rem; font-weight: 700; text-align: right;}
+</style>
+"""
+st.markdown(DARK_CSS4, unsafe_allow_html=True)
+
 
 # ------------------------------------------------------------------
 # Render helpers
@@ -807,6 +823,123 @@ def _friendly_status(status) -> str:
     return s
 
 
+_SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
+_SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
+
+
+def _signal_colour(value: float) -> str:
+    if value < 40:
+        return "#f43f5e"
+    if value <= 70:
+        return "#fbbf24"
+    return "#00F5A0"
+
+
+def _player_market_signal(p, ctx) -> float:
+    """Implied win probability (0-100) aggregated from the live odds feed."""
+    team_id = p.get("team_id")
+    if team_id is None and isinstance(p.get("team"), int):
+        team_id = p.get("team")
+    if team_id is None:
+        return 50.0
+    fixtures = ctx["lookup"].get(team_id, [])
+    fx = next((f for f in fixtures if f.get("event") == ctx["start"]), None)
+    if fx is None and fixtures:
+        fx = fixtures[0]
+    if fx is None:
+        return 50.0
+    wp = fx.get("win_prob")
+    if wp is not None:
+        return max(0.0, min(100.0, wp * 100.0))
+    fdr = fx.get("difficulty") or 3
+    return max(0.0, min(100.0, 60.0 - (fdr - 3) * 10.0))
+
+
+def _player_form_signal(p, ctx) -> float:
+    """FPL form rating (0-10) scaled to 0-100."""
+    el = ctx["players_by_id"].get(_pid(p), {})
+    form = _num(el.get("form"))
+    return max(0.0, min(100.0, form * 10.0))
+
+
+def _positional_signals(squad):
+    """Compute market/quant/form signals per department for a 15-man squad."""
+    ctx = _bootstrap_ctx()
+    if not ctx or not squad:
+        return {}
+    groups = {d: [] for d in _SIGNAL_DEPTS}
+    for p in squad:
+        pos = p.get("position", "?")
+        dept = pos if pos in ("GK", "DEF", "MID", "FWD") else "Bench"
+        groups[dept].append(p)
+
+    xp_vals = [_num(p.get("xp")) for p in squad]
+    max_xp = max(xp_vals) if xp_vals else 1.0
+
+    out = {}
+    for dept in _SIGNAL_DEPTS:
+        players = groups[dept]
+        if not players:
+            out[dept] = {"market": 0.0, "quant": 0.0, "form": 0.0, "composite": 0.0}
+            continue
+        market = sum(_player_market_signal(p, ctx) for p in players) / len(players)
+        avg_xp = sum(_num(p.get("xp")) for p in players) / len(players)
+        quant = (avg_xp / max_xp) * 100.0
+        form = sum(_player_form_signal(p, ctx) for p in players) / len(players)
+        out[dept] = {
+            "market": round(market, 1),
+            "quant": round(quant, 1),
+            "form": round(form, 1),
+            "composite": round((market + quant + form) / 3.0, 1),
+        }
+    return out
+
+
+def _signals_html(signals, prev=None) -> str:
+    html = '<div class="signal-grid">'
+    for dept in _SIGNAL_DEPTS:
+        sig = signals.get(dept, {})
+        comp = sig.get("composite", 0.0)
+        delta = ""
+        if prev and dept in prev:
+            d = comp - prev[dept].get("composite", 0.0)
+            sign = "+" if d > 0 else ("-" if d < 0 else "")
+            colour = "#00F5A0" if d >= 0 else "#f43f5e"
+            delta = f'<span class="signal-delta" style="color:{colour}">{sign}{abs(d):.1f}</span>'
+        rows = ""
+        for label, key in (("Market", "market"), ("Quant", "quant"), ("Form", "form")):
+            val = sig.get(key, 0.0)
+            colour = _signal_colour(val)
+            rows += (
+                f'<div class="signal-row">'
+                f'<div class="signal-label">{label}</div>'
+                f'<div class="signal-bar"><div class="signal-fill" style="width:{min(val, 100.0):.0f}%;background:{colour}"></div></div>'
+                f'<div class="signal-val" style="color:{colour}">{val:.0f}</div>'
+                f'</div>'
+            )
+        html += (
+            f'<div class="signal-card">'
+            f'<div class="signal-head">{_SIGNAL_EMOJI.get(dept, "")} {dept}'
+            f'<span class="signal-score">{comp:.0f}{delta}</span></div>'
+            f'{rows}'
+            f'</div>'
+        )
+    html += "</div>"
+    return html
+
+
+def _render_positional_diagnostic(squad, prev=None, caption: str = ""):
+    """Render the 'Gaffer's Positional Diagnostic' dashboard for a squad."""
+    signals = _positional_signals(squad)
+    if not signals:
+        return None
+    html = _signals_html(signals, prev)
+    if caption:
+        html = f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{caption}</div>' + html
+    st.markdown(_card(html, "📊 Gaffer's Positional Diagnostic"), unsafe_allow_html=True)
+    return signals
+
+
 def _render_player_inspector(squad) -> None:
     """Selectable Player Inspector shown beneath the pitch in the Transfer Planner tab."""
     ctx = _bootstrap_ctx()
@@ -1129,6 +1262,13 @@ with tab_planner:
             st.markdown(_card(pitch, "⚽ Your Baseline Pitch · C = Captain · V = Vice-Captain"), unsafe_allow_html=True)
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
             _render_player_inspector(starters + bench)
+
+            baseline_signals = _render_positional_diagnostic(
+                starters + bench,
+                caption="The gaffer's blunt audit — every department under the microscope before the deadline.",
+            )
+            if baseline_signals:
+                st.session_state["baseline_signals"] = baseline_signals
     
     
     # ------------------------------------------------------------------
@@ -1719,6 +1859,12 @@ with tab_planner:
             st.markdown(_card(pitch_final, f'⚽ Final Pitch View · {xi["formation"][0]}-{xi["formation"][1]}-{xi["formation"][2]} · C = Captain · V = Vice-Captain'), unsafe_allow_html=True)
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
             
+            _render_positional_diagnostic(
+                xi["xi"] + xi["bench"],
+                prev=st.session_state.get("baseline_signals", {}),
+                caption="The final roll call — each department measured against your original XI (green is progress).",
+            )
+
             mult_str = "×3" if is_tc else "×2"
             mult_val = cap["xp"] * 3 if is_tc else cap["xp"] * 2
             cap_role_title = "Captain (Triple Captain Active)" if is_tc else "Captain"
