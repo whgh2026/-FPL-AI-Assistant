@@ -46,9 +46,9 @@ TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card
 #   Balanced:                 -6.5 xP  — clear multi-gameweek upgrade to justify a -4.
 #   Aggressive:               -4.0 xP  — raw mathematical cost, allows tactical punts.
 RISK_PROFILES = {
-    "conservative": {"hit_cost": 8.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0},
-    "balanced":     {"hit_cost": 6.5, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5},
-    "aggressive":   {"hit_cost": 4.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5},
+    "conservative": {"hit_cost": 8.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0, "roll_value": 2.0},
+    "balanced":     {"hit_cost": 6.5, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5, "roll_value": 1.5},
+    "aggressive":   {"hit_cost": 4.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5, "roll_value": 0.5},
     # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
     # leader (hunt low-ownership high-xGI differentials).
     "rank_protecting": {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.5, "shield_weight": 0.8, "ft_friction": 2.0},
@@ -957,13 +957,13 @@ def _solve_squad(
             prob += transfers <= max_t * chip_used, "chip_used_force"
             obj = obj - scarcity_cost * chip_used
 
-        # Rolling value: banking the free transfer (0 transfers) earns a small
-        # bonus, favouring internal bench rotation over lateral tinkering.
-        if roll_value > 0 and max_t is not None:
-            roll = pulp.LpVariable("roll_ft", cat="Binary")
-            prob += roll <= 1 - transfers / max_t, "roll_ub"
-            prob += roll >= 1 - transfers, "roll_lb"
-            obj = obj + roll_value * roll
+        # Value of a rolled transfer: banking free transfers holds strategic
+        # optionality, so reward each unspent FT carried forward into the bank
+        # (rolled_ft = free_transfers - transfers + hits). Once the bank is full
+        # (>= 5) — or empty (0) — there is no option value to protect, so skip.
+        free_transfers = hit_config.get("free_transfers", 0)
+        if roll_value > 0 and max_t is not None and 0 < free_transfers < 5:
+            obj = obj + roll_value * (free_transfers - transfers + hits)
 
         prob.setObjective(obj)
     else:
@@ -1050,6 +1050,7 @@ def suggest_transfers_for_custom_squad(
 
     hit_cost = _risk_profile(risk)["hit_cost"]
     ft_friction = _risk_profile(risk).get("ft_friction", 1.5)
+    roll_value = _risk_profile(risk).get("roll_value", ROLL_TRANSFER_VALUE)
     current_ids = [p["player_id"] for p in squad]
     sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price", 0.0)) for p in squad}
     pool = []
@@ -1131,7 +1132,7 @@ def suggest_transfers_for_custom_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS, "ft_friction": ft_friction},
         bench_boost=False,
-        roll_value=ROLL_TRANSFER_VALUE,
+        roll_value=roll_value,
     )
     std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
     # Buffer the hold strategy: net_gain already subtracts FT friction, so a
