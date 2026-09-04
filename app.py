@@ -862,6 +862,13 @@ def _render_player_inspector(squad) -> None:
         opp = teams_by_id.get(fx.get("opponent"), {})
         opp_name = opp.get("name", "?")
         venue = "H" if fx.get("is_home") else "A"
+        date_str = ""
+        if fx.get("kickoff_time"):
+            try:
+                dt = dateutil.parser.isoparse(fx.get("kickoff_time")).astimezone(tz.gettz("Europe/London"))
+                date_str = f" <span style='color:#64748b;font-weight:normal;font-size:0.75rem;margin-left:6px;'>{dt.strftime('%d %b %H:%M')}</span>"
+            except:
+                pass
         wp = fx.get("win_prob")
         fdr = fx.get("difficulty") or 3
         if wp is not None:
@@ -872,7 +879,7 @@ def _render_player_inspector(squad) -> None:
         fx_rows += (
             f'<div class="insp-fixture">'
             f'<div style="font-weight:700;color:#E2E8F0;">{opp_name} '
-            f'<span style="font-weight:600;color:#94a3b8;">({venue})</span></div>'
+            f'<span style="font-weight:600;color:#94a3b8;">({venue})</span>{date_str}</div>'
             f'<div class="tc-meta">{odds_desc}</div>'
             f'</div>'
         )
