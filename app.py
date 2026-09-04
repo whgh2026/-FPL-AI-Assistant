@@ -1037,6 +1037,9 @@ with tab_planner:
         )
     
         col1, col2 = st.columns([3, 1])
+        if "mid" in st.query_params and "mid_input" not in st.session_state:
+            st.session_state["mid_input"] = st.query_params["mid"]
+
         with col1:
             manager_id = st.text_input(
                 "Enter your FPL Manager ID (We promise not to laugh at your overall rank)",
@@ -1064,10 +1067,15 @@ with tab_planner:
             unsafe_allow_html=True,
         )
     
+        if st.query_params.get("mid") and "squad_preview" not in st.session_state and not load_clicked:
+            load_clicked = True
+            manager_id = st.query_params["mid"]
+
         if load_clicked:
             if not manager_id.strip():
                 st.warning("Pop your Manager ID in first — it’s the number in your FPL team-page URL.")
             else:
+                st.query_params["mid"] = manager_id.strip()
                 with st.spinner("Fetching your current squad…"):
                     try:
                         preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
