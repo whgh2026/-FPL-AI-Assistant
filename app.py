@@ -259,6 +259,18 @@ DARK_CSS3 = """
   .inspector-card {background: #0F172A; border: 1px solid #334155; border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
   .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted #334155;}
   .insp-fixture:last-child {border-bottom: none;}
+  @media (max-width: 768px) {
+    .pitch { padding: 12px 6px !important; }
+    .pitch-row-label { display: none !important; }
+    .pitch-row-cards { width: 100% !important; gap: 2px !important; justify-content: space-evenly !important; }
+    .pitch-player { width: auto !important; flex: 1 1 0 !important; max-width: 20% !important; min-width: 0 !important; padding: 2px !important; gap: 1px !important; }
+    .pitch-player .photo-frame, .pitch-player .headshot { display: none !important; }
+    .pitch-player .nm { font-size: 0.65rem !important; }
+    .pitch-player .meta { font-size: 0.58rem !important; }
+    .pitch-player .fx-dots { font-size: 0.62rem !important; letter-spacing: 0.5px !important; }
+    .dugout { padding: 10px 8px !important; }
+    .dugout > div:last-child { gap: 4px !important; justify-content: space-evenly !important; }
+  }
 </style>
 """
 st.markdown(DARK_CSS3, unsafe_allow_html=True)
@@ -851,13 +863,17 @@ def _render_player_inspector(squad) -> None:
         opp_name = opp.get("name", "?")
         venue = "H" if fx.get("is_home") else "A"
         wp = fx.get("win_prob")
-        wp_str = f"{wp * 100:.0f}%" if wp is not None else "N/A"
         fdr = fx.get("difficulty") or 3
+        if wp is not None:
+            odds_desc = f"Win Expectancy: {wp * 100:.0f}% · FDR {fdr}"
+        else:
+            odds_desc = f"Market Odds Pending · FDR {fdr}"
+            
         fx_rows += (
             f'<div class="insp-fixture">'
             f'<div style="font-weight:700;color:#E2E8F0;">{opp_name} '
             f'<span style="font-weight:600;color:#94a3b8;">({venue})</span></div>'
-            f'<div class="tc-meta">Implied Win Probability {wp_str} · FDR {fdr}</div>'
+            f'<div class="tc-meta">{odds_desc}</div>'
             f'</div>'
         )
     if not fx_rows:
