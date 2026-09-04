@@ -865,9 +865,9 @@ def _render_player_inspector(squad) -> None:
         wp = fx.get("win_prob")
         fdr = fx.get("difficulty") or 3
         if wp is not None:
-            odds_desc = f"Win Expectancy: {wp * 100:.0f}% · FDR {fdr}"
+            odds_desc = f"Market Win Probability: {wp * 100:.0f}% · Official FPL Difficulty: {fdr}/5"
         else:
-            odds_desc = f"Market Odds Pending · FDR {fdr}"
+            odds_desc = f"Market Odds Pending · Official FPL Difficulty: {fdr}/5"
             
         fx_rows += (
             f'<div class="insp-fixture">'
