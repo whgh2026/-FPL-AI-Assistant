@@ -115,6 +115,8 @@ DEFCON_THRESHOLD = {2: 10, 3: 12, 4: 12}
 TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 # Rolling 4-gameweek horizon weights for multi-week xP projection.
 HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
+HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1: scales the -4 hit to the 4-GW horizon
+ROLL_HURDLE = 1.5                    # immediate-GW xP bar when holding exactly 1 FT
 OUT_STATUSES = {"i", "s", "u", "n"}
 
 # Official FPL formation constraints: exactly 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD,
@@ -1091,6 +1093,7 @@ def suggest_transfers_for_custom_squad(
     risk: str = "balanced",
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
+    allow_hits: bool = False,
 ) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
     fixture_lookup = _build_fixture_lookup(bootstrap)
@@ -1106,6 +1109,15 @@ def suggest_transfers_for_custom_squad(
     hit_cost = _risk_profile(risk)["hit_cost"]
     ft_friction = _risk_profile(risk).get("ft_friction", 1.5)
     roll_value = _risk_profile(risk).get("roll_value", ROLL_TRANSFER_VALUE)
+    # Pay a hit against the IMMEDIATE gameweek xP, not diluted over the 4-GW sum.
+    hit_cost_horizon = hit_cost * HORIZON_SUM
+    # Hard clamp: never take point hits for lateral moves by default.
+    current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
+    fit_count = len(squad) - current_out_statuses
+    if allow_hits or fit_count < 11:
+        max_transfers = free_transfers + MAX_HIT_TRANSFERS
+    else:
+        max_transfers = free_transfers
     current_ids = [p["player_id"] for p in squad]
     sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price", 0.0)) for p in squad}
     pool = []
@@ -1180,7 +1192,7 @@ def suggest_transfers_for_custom_squad(
         tot_gain = sum(m["xp_gain"] for m in mvs)
         cost_chg = round(sum(m["cost"] for m in mvs), 2)
         # Pure xP net gain (drives the UI display, advice, and chip comparisons).
-        net_gain = round(tot_gain - hit_cost * hits - friction_penalty, 2)
+        net_gain = round(tot_gain - hit_cost_horizon * hits - friction_penalty, 2)
         # Virtual cash-reserve optionality: +0.2 xP per £0.5m released into the bank.
         # Used only for the hold-buffer decision, never surfaced as raw xP.
         liquidity_bonus = LIQUIDITY_BONUS_PER_05M * (-cost_chg) / 0.5
@@ -1192,7 +1204,7 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     std_selected, _ = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
-        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost, "max_transfers": free_transfers + MAX_HIT_TRANSFERS, "ft_friction": ft_friction},
+        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost_horizon, "max_transfers": max_transfers, "ft_friction": ft_friction},
         bench_boost=False,
         roll_value=roll_value,
         holding_map=holding_map, current_gw=current_gw,
@@ -1205,6 +1217,14 @@ def suggest_transfers_for_custom_squad(
 
     # Roll Transfer decision: if no move clears the hit penalty / threshold over the
     # 4-GW horizon, bank the free transfer (up to the 5-transfer cap).
+    # Roll hurdle: with a single FT, the top move must clear a 1.5 xP bar in the
+    # IMMEDIATE gameweek -- otherwise bank the transfer instead of chasing a
+    # multi-GW projection.
+    if free_transfers == 1 and std_moves:
+        gw_gain = sum(m["in"].get("xp_gw", m["in"]["xp"]) - m["out"].get("xp_gw", m["out"]["xp"]) for m in std_moves)
+        if gw_gain < ROLL_HURDLE:
+            std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
+
     roll_transfer = len(std_moves) == 0 and free_transfers < 5
     projected_ft = min(free_transfers + 1, 5) if roll_transfer else free_transfers
 

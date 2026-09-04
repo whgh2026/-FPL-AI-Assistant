@@ -1312,13 +1312,13 @@ with tab_planner:
             
             st.markdown("#### 1. Confirm Your Variables")
             plan_bank = float(st.session_state.get("squad_preview", {}).get("bank", 0.0))
-            default_ft = st.session_state.get("api_free_transfers_default", 0)
             
             var_col1, var_col2 = st.columns(2)
             with var_col1:
-                ft_val = st.number_input("Current Free Transfers", 0, 15, int(default_ft), key="ov_ft")
+                ft_val = st.number_input("Available Free Transfers", 1, 5, 1, key="baseline_ft")
             with var_col2:
                 bank_val = st.number_input("Remaining Budget in Bank (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
+            allow_hits = st.checkbox("⚠️ Allow point hits (-4 per transfer beyond FTs)", value=False, key="ov_allow_hits")
                 
             st.markdown("---")
             st.markdown("#### 2. Midweek Transfers")
@@ -1467,7 +1467,8 @@ with tab_planner:
                             holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
                                 analysed, float(bank_val), int(ft_val), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
-                                holding_map=holding_map, current_gw=GW_ID)
+                                holding_map=holding_map, current_gw=GW_ID,
+                                allow_hits=st.session_state.get("ov_allow_hits", False))
                             
                             st.session_state["override_analysis"] = {
                                 "analysed_squad": analysed,
@@ -1533,7 +1534,8 @@ with tab_planner:
                         tr = fpl_tools.suggest_transfers_for_custom_squad(
                             ov["analysed_squad"], ov["bank"], ov["ft"],
                             eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
-                            holding_map=holding_map, current_gw=GW_ID
+                            holding_map=holding_map, current_gw=GW_ID,
+                            allow_hits=st.session_state.get("ov_allow_hits", False)
                         )
                         ov["transfers"] = tr
                     except Exception as e:
@@ -1545,18 +1547,13 @@ with tab_planner:
                 eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
                 st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
     
-            rec_chip = tr.get("recommended_chip", "None (Hold Chips)")
             chip_options = ["None (Hold Chips)"] + ALL_CHIPS
-            
-            def_chip_idx = 0
-            if rec_chip in chip_options:
-                def_chip_idx = chip_options.index(rec_chip)
-    
+
             st.markdown("#### Confirm Active Chip")
             confirmed_chip = st.radio(
                 "Select which chip you will actively play this Gameweek (Only 1 allowed):",
                 chip_options,
-                index=def_chip_idx,
+                index=0,
                 horizontal=True,
                 key="confirmed_chip_radio"
             )
