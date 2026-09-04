@@ -44,6 +44,7 @@ except Exception:
 # ------------------------------------------------------------------
 POS_COLORS = {"GK": "#f59e0b", "DEF": "#0ea5e9", "MID": "#10b981", "FWD": "#f43f5e"}
 POS_ORDER = ["GK", "DEF", "MID", "FWD"]
+ALL_CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
 
 CSS = """
 <style>
@@ -997,24 +998,10 @@ st.markdown(
 
 
 # ------------------------------------------------------------------
-# Strategy selector (prominent, above Manager ID)
+# Risk strategy state — read from session state so `risk_label` stays
+# available to every step. The interactive selector now lives in Step 3.
 # ------------------------------------------------------------------
-st.markdown("### 🎯 Select Your Strategy")
-risk_label = st.radio(
-    "Strategy mode",
-    ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
-    index=0,
-    key="risk",
-    help="Tunes the transfer hurdle rate and competitive posture.",
-    captions=[
-        "Standard transfer hurdle rate; balanced risk-reward profile.",
-        "High hurdle rate; prioritises rolling and banking free transfers (Park the Bus).",
-        "Lower hurdle rate; accepts point hits (-4) if immediate upside justifies it.",
-        "Weights effective ownership (EO) to mirror template picks and protect rank.",
-        "Deprecates template picks; targets low-ownership differentials with high underlying metrics (Fergie Time).",
-    ],
-    on_change=clear_transfer_cache,
-)
+risk_label = st.session_state.get("risk", "Balanced")
 
 # ------------------------------------------------------------------
 # Main navigation
@@ -1165,13 +1152,6 @@ with tab_planner:
             with var_col2:
                 bank_val = st.number_input("Remaining Budget in Bank (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
                 
-            chips_val = st.multiselect(
-                "Select Active Chip(s) to Evaluate",
-                ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"],
-                default=[],
-                key="ov_chips"
-            )
-            
             st.markdown("---")
             st.markdown("#### 2. Midweek Transfers")
             show_override = st.checkbox("🚨 **I have already made midweek transfers** (Click to manually update your squad or upload a screenshot)", key="cb_override")
@@ -1316,13 +1296,12 @@ with tab_planner:
                                 })
                             
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                                analysed, float(bank_val), int(ft_val), eval_chips=chips_val, event=GW_ID, risk=risk_label.lower())
+                                analysed, float(bank_val), int(ft_val), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower())
                             
                             st.session_state["override_analysis"] = {
                                 "analysed_squad": analysed,
                                 "bank": float(bank_val),
                                 "ft": int(ft_val),
-                                "chips": chips_val,
                                 "transfers": transfers
                             }
                             st.session_state["_transfers_stale"] = False
@@ -1341,9 +1320,28 @@ with tab_planner:
             
             ov = st.session_state["override_analysis"]
             tr = ov["transfers"]
-    
+
+            # Risk strategy selector — moved here so toggling the strategy
+            # immediately recalculates and refreshes the transfer recommendations.
+            st.markdown("#### 🎯 Select Your Strategy")
+            risk_label = st.radio(
+                "Strategy mode",
+                ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
+                index=0,
+                key="risk",
+                help="Tunes the transfer hurdle rate and competitive posture.",
+                captions=[
+                    "Standard transfer hurdle rate; balanced risk-reward profile.",
+                    "High hurdle rate; prioritises rolling and banking free transfers (Park the Bus).",
+                    "Lower hurdle rate; accepts point hits (-4) if immediate upside justifies it.",
+                    "Weights effective ownership (EO) to mirror template picks and protect rank.",
+                    "Deprecates template picks; targets low-ownership differentials with high underlying metrics (Fergie Time).",
+                ],
+                on_change=clear_transfer_cache,
+            )
+
             # Recalculate transfers if the strategy mode changed (cache-busted via the
-            # sidebar on_change callback), so Step 3 never shows stale recommendations.
+            # on_change callback), so Step 3 never shows stale recommendations.
             if st.session_state.get("_transfers_stale"):
                 with st.spinner("Recalculating optimal transfers for new strategy..."):
                     try:
@@ -1362,7 +1360,7 @@ with tab_planner:
                             pass
                         tr = fpl_tools.suggest_transfers_for_custom_squad(
                             ov["analysed_squad"], ov["bank"], ov["ft"],
-                            eval_chips=ov.get("chips", []), event=GW_ID, risk=risk_label.lower()
+                            eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower()
                         )
                         ov["transfers"] = tr
                     except Exception as e:
@@ -1375,8 +1373,7 @@ with tab_planner:
                 st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
     
             rec_chip = tr.get("recommended_chip", "None (Hold Chips)")
-            valid_chips = [c for c in ov.get("chips", []) if c in ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]]
-            chip_options = ["None (Hold Chips)"] + valid_chips
+            chip_options = ["None (Hold Chips)"] + ALL_CHIPS
             
             def_chip_idx = 0
             if rec_chip in chip_options:
