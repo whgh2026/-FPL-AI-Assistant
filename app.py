@@ -285,7 +285,7 @@ DARK_CSS4 = """
   .signal-score {margin-left: auto; font-size: 1.15rem; font-weight: 800; color: #00F5A0;}
   .signal-delta {font-size: 0.72rem; font-weight: 700; margin-left: 4px;}
   .signal-row {display: flex; align-items: center; gap: 6px; margin: 5px 0;}
-  .signal-label {flex: 0 0 46px; font-size: 0.66rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em;}
+  .signal-label {flex: 0 0 132px; font-size: 0.66rem; color: #94a3b8; letter-spacing: 0.02em;}
   .signal-bar {flex: 1; height: 5px; background: #334155; border-radius: 3px; overflow: hidden;}
   .signal-fill {height: 100%; border-radius: 3px;}
   .signal-val {flex: 0 0 22px; font-size: 0.7rem; font-weight: 700; text-align: right;}
@@ -826,6 +826,11 @@ def _friendly_status(status) -> str:
 
 _SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
 _SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
+_SIGNAL_LABELS = {
+    "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean-sheet probabilities."),
+    "quant": ("FPL Quant Manager", "Closed-loop statistical model tracking projected minutes, xGI, defensive output, and fixture strength over 4 GWs."),
+    "form": ("Recent Form Tracker", "Rolling 30-day performance tracking sustained underlying shot volume and key involvements."),
+}
 
 
 def _signal_colour(value: float) -> str:
@@ -922,12 +927,12 @@ def _signals_html(signals, prev=None) -> str:
             colour = "#00F5A0" if d >= 0 else "#f43f5e"
             delta = f'<span class="signal-delta" style="color:{colour}">{sign}{abs(d):.1f}</span>'
         rows = ""
-        for label, key in (("Market", "market"), ("Quant", "quant"), ("Form", "form")):
+        for key, (label, tip) in _SIGNAL_LABELS.items():
             val = sig.get(key, 0.0)
             colour = _signal_colour(val)
             rows += (
                 f'<div class="signal-row">'
-                f'<div class="signal-label">{label}</div>'
+                f'<div class="signal-label" title="{tip}">{label}</div>'
                 f'<div class="signal-bar"><div class="signal-fill" style="width:{min(val, 100.0):.0f}%;background:{colour}"></div></div>'
                 f'<div class="signal-val" style="color:{colour}">{val:.0f}</div>'
                 f'</div>'
@@ -1165,6 +1170,36 @@ st.markdown(
 risk_label = st.session_state.get("risk", "Balanced")
 
 # ------------------------------------------------------------------
+def _gameweek_status_banner() -> str:
+    ctx = _bootstrap_ctx()
+    if not ctx:
+        return ""
+    events = ctx["bootstrap"].get("events", [])
+    current = next((e for e in events if e.get("is_current") and not e.get("finished")), None)
+    upcoming = next((e for e in events if e.get("is_next")), None)
+
+    def _deadline(ev):
+        try:
+            raw = ev.get("deadline_time")
+            if not raw:
+                return ""
+            dt = dateutil.parser.isoparse(raw).astimezone(tz.gettz("Europe/London"))
+            return dt.strftime("%a %d %b %Y · %H:%M %Z")
+        except Exception:
+            return ""
+
+    if current is not None:
+        txt = f"⚽ Gameweek {current['id']} Live / In Progress"
+        if upcoming is not None:
+            d = _deadline(upcoming)
+            txt += f" · Next Deadline: GW {upcoming['id']} on {d}" if d else ""
+        return txt
+    if upcoming is not None:
+        d = _deadline(upcoming)
+        return f"Upcoming: Gameweek {upcoming['id']} · Deadline: {d}" if d else f"Upcoming: Gameweek {upcoming['id']}"
+    return ""
+
+
 # Main navigation
 # ------------------------------------------------------------------
 tab_planner, tab_insights, tab_radar = st.tabs(["🏟️ Quant Auto Transfer Planner", "🔬 Insights Lab", "📡 Player Radar & Market"])
@@ -1174,6 +1209,10 @@ with tab_planner:
     # ------------------------------------------------------------------
     # Step 1 — Your Baseline Team
     # ------------------------------------------------------------------
+    _gw_banner = _gameweek_status_banner()
+    if _gw_banner:
+        st.info(_gw_banner)
+
     st.markdown(
         '<div class="override-head">Step 1: Your Baseline Team</div>',
         unsafe_allow_html=True,
@@ -1245,16 +1284,10 @@ with tab_planner:
             st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
         elif preview:
             
-            ft = st.session_state.get("api_free_transfers_default", 0)
-            fetch_ts = fpl_tools.get_api_timestamp()
-            dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(tz.gettz('Europe/London'))
-            d_str = dt.strftime('%d %b %H:%M')
-
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3 = st.columns(3)
             m1.metric("Team", preview["team_name"])
-            m2.metric("Free Transfers", f"{ft}", f"As of {d_str}", delta_color="off")
-            m3.metric("Bank (Unspent)", f"£{preview['bank']}m", f"As of {d_str}", delta_color="off")
-            m4.metric("Team value", f"£{preview['team_value']}m")
+            m2.metric("Bank (£m)", f"£{preview['bank']}m")
+            m3.metric("Team Value (£m)", f"£{preview['team_value']}m")
     
             squad = preview.get("squad", [])
             starters, bench = _api_starters_bench(squad)
@@ -1293,7 +1326,7 @@ with tab_planner:
 
             baseline_signals = _render_positional_diagnostic(
                 starters, bench,
-                caption="The gaffer's blunt audit — every department under the microscope before the deadline.",
+                caption="Here is what the models and market consensus say about your squad across three core analytical engines:",
             )
             if baseline_signals:
                 st.session_state["baseline_signals"] = baseline_signals
@@ -1315,10 +1348,10 @@ with tab_planner:
             
             var_col1, var_col2 = st.columns(2)
             with var_col1:
-                ft_val = st.number_input("Available Free Transfers", 1, 5, 1, key="baseline_ft")
+                ft_val = st.number_input("Available Free Transfers", min_value=1, max_value=5, value=1, step=1, key="available_ft", help="Set the exact number of Free Transfers you currently hold on fantasy.premierleague.com.")
             with var_col2:
                 bank_val = st.number_input("Remaining Budget in Bank (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
-            allow_hits = st.checkbox("⚠️ Allow point hits (-4 per transfer beyond FTs)", value=False, key="ov_allow_hits")
+            allow_hits = st.checkbox("Allow Point Hits (-4 pts per additional transfer)", value=False, key="ov_allow_hits", help="Disabled by default to enforce elite transfer conservation. When checked, the solver may suggest taking point deductions only if an incoming player's immediate gain outweighs the 4-point penalty.")
                 
             st.markdown("---")
             st.markdown("#### 2. Midweek Transfers")
@@ -1466,7 +1499,7 @@ with tab_planner:
                             
                             holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                                analysed, float(bank_val), int(ft_val), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
+                                analysed, float(bank_val), int(st.session_state.get("available_ft", 1)), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                                 holding_map=holding_map, current_gw=GW_ID,
                                 allow_hits=st.session_state.get("ov_allow_hits", False))
                             
