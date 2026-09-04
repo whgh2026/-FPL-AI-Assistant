@@ -1078,7 +1078,7 @@ with tab_planner:
                 st.query_params["mid"] = manager_id.strip()
                 with st.spinner("Fetching your current squad…"):
                     try:
-                        preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
+                    preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
                         st.session_state["squad_preview"] = preview
                         
                         try:
@@ -1108,7 +1108,7 @@ with tab_planner:
         m3.metric("Bank (Unspent)", f"£{preview['bank']}m", f"As of {d_str}", delta_color="off")
         m4.metric("Team value", f"£{preview['team_value']}m")
     
-            squad = preview.get("squad", [])
+                    squad = preview.get("squad", [])
             starters, bench = _api_starters_bench(squad)
             cap = next((p for p in squad if p.get("is_captain")), None)
             vc = next((p for p in squad if p.get("is_vice_captain")), None)
