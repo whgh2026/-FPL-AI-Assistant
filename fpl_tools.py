@@ -1175,7 +1175,7 @@ def suggest_transfers_for_custom_squad(
     ranked_chips = sorted(chip_scores.items(), key=lambda x: x[1], reverse=True)
     
     # Ultra-Strict Compelling Reason Thresholds
-    THRESHOLDS = {"Wildcard": 25.0, "Free Hit": 18.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
+    THRESHOLDS = {"Wildcard": 45.0, "Free Hit": 18.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
     
     chip_advice_list = []
     if len(eval_chips) > 1:
@@ -1190,7 +1190,7 @@ def suggest_transfers_for_custom_squad(
         
         # Wildcard exception: Lower xP barrier if squad is ravaged by injuries
         if chip_name == "Wildcard" and not passed_threshold:
-            if score >= 15.0 and current_out_statuses >= 3:
+            if score >= 25.0 and current_out_statuses >= 4:
                 passed_threshold = True
 
         if passed_threshold and recommended_chip == "None (Hold Chips)":
@@ -1205,11 +1205,10 @@ def suggest_transfers_for_custom_squad(
                 cap_name = cap['name'] if cap else "Captain"
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Recommended. <b>{cap_name}</b> has an elite ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")
         else:
-            # Failed threshold or lost to a better chip
-            if passed_threshold:
-                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Yields +{score:.1f} xP, but FPL limits 1 chip/wk. <b>{recommended_chip}</b> is mathematically superior right now.")
-            else:
-                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Only projects <b>+{score:.1f} xP</b>. Save this scarce asset for a compelling Double/Blank Gameweek (requires +{threshold:.1f} xP).")
+                    if chip_name == "Wildcard":
+                        chip_advice_list.append(f"❌ <b>Wildcard</b>: Hold. A complete reset yields +{score:.1f} xP, which does not justify burning a season-long strategic asset. Elite managers preserve the Wildcard for major fixture swings (GW6–8) or late-season Blank/Double Gameweek navigation.")
+                    else:
+                        chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Only projects <b>+{score:.1f} xP</b>. Save this scarce asset for a compelling Double/Blank Gameweek (requires +{threshold:.1f} xP).")
 
     # Generate Standard Advice
     n = len(std_moves)
