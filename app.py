@@ -827,9 +827,9 @@ def _friendly_status(status) -> str:
 _SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
 _SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
 _SIGNAL_LABELS = {
-    "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean-sheet probabilities."),
-    "quant": ("FPL Quant Manager", "Closed-loop statistical model tracking projected minutes, xGI, defensive output, and fixture strength over 4 GWs."),
-    "form": ("Recent Form Tracker", "Rolling 30-day performance tracking sustained underlying shot volume and key involvements."),
+    "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean sheet probabilities."),
+    "quant": ("FPL Quant Manager", "Multi-week algorithmic forecast incorporating projected minutes, xGI, DEFCON, and fixture strength."),
+    "form": ("Recent Form Tracker", "Rolling 30-day baseline performance tracking sustained underlying shot volume and key involvements."),
 }
 
 
@@ -932,7 +932,7 @@ def _signals_html(signals, prev=None) -> str:
             colour = _signal_colour(val)
             rows += (
                 f'<div class="signal-row">'
-                f'<div class="signal-label" title="{tip}">{label}</div>'
+                f'<div class="signal-label">{label}</div>'
                 f'<div class="signal-bar"><div class="signal-fill" style="width:{min(val, 100.0):.0f}%;background:{colour}"></div></div>'
                 f'<div class="signal-val" style="color:{colour}">{val:.0f}</div>'
                 f'</div>'
@@ -953,9 +953,14 @@ def _render_positional_diagnostic(starters, bench=None, prev=None, caption: str 
     signals = _positional_signals(starters, bench)
     if not signals:
         return None
-    html = _signals_html(signals, prev)
     if caption:
-        html = f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{caption}</div>' + html
+        st.markdown(f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{caption}</div>', unsafe_allow_html=True)
+    legend_cols = st.columns(3)
+    for col, (label, desc) in zip(legend_cols, _SIGNAL_LABELS.values()):
+        with col:
+            st.markdown(f"**{label}**")
+            st.caption(desc)
+    html = _signals_html(signals, prev)
     st.markdown(_card(html, "📊 Gaffer's Positional Diagnostic"), unsafe_allow_html=True)
     return signals
 
@@ -1348,7 +1353,7 @@ with tab_planner:
             
             var_col1, var_col2 = st.columns(2)
             with var_col1:
-                ft_val = st.number_input("Available Free Transfers", min_value=1, max_value=5, value=1, step=1, key="available_ft", help="Set the exact number of Free Transfers you currently hold on fantasy.premierleague.com.")
+                ft_val = st.number_input("Available Free Transfers", min_value=0, max_value=5, value=1, step=1, key="available_ft", help="Set the exact number of Free Transfers you currently hold on fantasy.premierleague.com.")
             with var_col2:
                 bank_val = st.number_input("Remaining Budget in Bank (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
             allow_hits = st.checkbox("Allow Point Hits (-4 pts per additional transfer)", value=False, key="ov_allow_hits", help="Disabled by default to enforce elite transfer conservation. When checked, the solver may suggest taking point deductions only if an incoming player's immediate gain outweighs the 4-point penalty.")

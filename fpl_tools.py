@@ -117,6 +117,11 @@ TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
 HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1: scales the -4 hit to the 4-GW horizon
 ROLL_HURDLE = 1.5                    # immediate-GW xP bar when holding exactly 1 FT
+GK_CHURN_FRICTION = 10.0             # heavy penalty on selling a GK when a fit starter exists
+CONSERVATIVE_OW_FLOOR = 5.0
+CONSERVATIVE_OW_PENALTY = 1.0
+AGGRESSIVE_OW_CEILING = 10.0
+AGGRESSIVE_DIFF_BONUS = 0.5
 OUT_STATUSES = {"i", "s", "u", "n"}
 
 # Official FPL formation constraints: exactly 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD,
@@ -882,6 +887,7 @@ def _solve_squad(
     roll_value: float = 0.0,
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
+    gk_friction: Optional[float] = None,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -936,7 +942,7 @@ def _solve_squad(
     # transfer/hit on a GK (1.5) or DEF (0.5) unless the xP uplift is substantial.
     if must_include_ids is not None:
         friction = pulp.lpSum(
-            TRANSFER_FRICTION.get(by_id[pid]["position"], 0.0) * (1 - x[pid])
+            (gk_friction if gk_friction is not None and by_id[pid]["position"] == "GK" else TRANSFER_FRICTION.get(by_id[pid]["position"], 0.0)) * (1 - x[pid])
             for pid in must_include_ids if pid in by_id
         )
         xp_expr = xp_expr - friction
@@ -1083,6 +1089,16 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
         "squad": squad
     }
 
+def _ownership_adjust(e, xp, risk):
+    """Tilt xP by ownership to make strategy modes mechanically distinct."""
+    ow = _to_float(e.get("selected_by_percent"))
+    if risk == "conservative" and ow < CONSERVATIVE_OW_FLOOR:
+        return max(0.0, xp - CONSERVATIVE_OW_PENALTY)
+    if risk == "aggressive" and ow < AGGRESSIVE_OW_CEILING:
+        return xp + AGGRESSIVE_DIFF_BONUS
+    return xp
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def suggest_transfers_for_custom_squad(
     squad: List[Dict[str, Any]], 
@@ -1111,13 +1127,23 @@ def suggest_transfers_for_custom_squad(
     roll_value = _risk_profile(risk).get("roll_value", ROLL_TRANSFER_VALUE)
     # Pay a hit against the IMMEDIATE gameweek xP, not diluted over the 4-GW sum.
     hit_cost_horizon = hit_cost * HORIZON_SUM
+    roll_hurdle = {"conservative": 2.0, "aggressive": 0.8}.get(risk, ROLL_HURDLE)
     # Hard clamp: never take point hits for lateral moves by default.
     current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
     fit_count = len(squad) - current_out_statuses
-    if allow_hits or fit_count < 11:
+    if free_transfers == 0 and not allow_hits:
+        max_transfers = 0
+    elif allow_hits or fit_count < 11:
         max_transfers = free_transfers + MAX_HIT_TRANSFERS
     else:
         max_transfers = free_transfers
+    has_fit_gk = any(
+        p.get("position") == "GK"
+        and _to_float(elements_by_id.get(p.get("player_id"), {}).get("minutes", 0)) > 60
+        and elements_by_id.get(p.get("player_id"), {}).get("status", "a") not in ("i", "s")
+        for p in squad
+    )
+    gk_friction = GK_CHURN_FRICTION if has_fit_gk else None
     current_ids = [p["player_id"] for p in squad]
     sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price", 0.0)) for p in squad}
     pool = []
@@ -1131,6 +1157,7 @@ def suggest_transfers_for_custom_squad(
         # Multi-GW horizon xP drives the solver; keep the single-GW xP alongside
         # for final lineup/captaincy decisions (which are per-gameweek).
         xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
+        xp = _ownership_adjust(e, xp, risk)
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
@@ -1147,6 +1174,7 @@ def suggest_transfers_for_custom_squad(
         xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
         if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable", "No minutes"):
             continue
+        xp = _ownership_adjust(e, xp, risk)
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
@@ -1208,6 +1236,7 @@ def suggest_transfers_for_custom_squad(
         bench_boost=False,
         roll_value=roll_value,
         holding_map=holding_map, current_gw=current_gw,
+        gk_friction=gk_friction,
     )
     std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
     # Buffer the hold strategy: the decision net (which includes the virtual
@@ -1222,7 +1251,7 @@ def suggest_transfers_for_custom_squad(
     # multi-GW projection.
     if free_transfers == 1 and std_moves:
         gw_gain = sum(m["in"].get("xp_gw", m["in"]["xp"]) - m["out"].get("xp_gw", m["out"]["xp"]) for m in std_moves)
-        if gw_gain < ROLL_HURDLE:
+        if gw_gain < roll_hurdle:
             std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
 
     roll_transfer = len(std_moves) == 0 and free_transfers < 5
