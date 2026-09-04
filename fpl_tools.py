@@ -1205,10 +1205,10 @@ def suggest_transfers_for_custom_squad(
                 cap_name = cap['name'] if cap else "Captain"
                 chip_advice_list.append(f"🏆 <b>{chip_name}</b>: Recommended. <b>{cap_name}</b> has an elite ceiling ({score} xP ➞ <b>{score*3:.1f} xP</b>).")
         else:
-                    if chip_name == "Wildcard":
-                        chip_advice_list.append(f"❌ <b>Wildcard</b>: Hold. A complete reset yields +{score:.1f} xP, which does not justify burning a season-long strategic asset. Elite managers preserve the Wildcard for major fixture swings (GW6–8) or late-season Blank/Double Gameweek navigation.")
-                    else:
-                        chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Only projects <b>+{score:.1f} xP</b>. Save this scarce asset for a compelling Double/Blank Gameweek (requires +{threshold:.1f} xP).")
+            if chip_name == "Wildcard":
+                chip_advice_list.append(f"❌ <b>Wildcard</b>: Hold. A complete reset yields +{score:.1f} xP, which does not justify burning a season-long strategic asset. Elite managers preserve the Wildcard for major fixture swings (GW6–8) or late-season Blank/Double Gameweek navigation.")
+            else:
+                chip_advice_list.append(f"❌ <b>{chip_name}</b>: Hold. Only projects <b>+{score:.1f} xP</b>. Save this scarce asset for a compelling Double/Blank Gameweek (requires +{threshold:.1f} xP).")
 
     # Generate Standard Advice
     n = len(std_moves)
