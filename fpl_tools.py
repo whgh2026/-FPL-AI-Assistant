@@ -39,6 +39,12 @@ WILDCARD_SCARCITY_COST = 55.0
 ROLL_TRANSFER_VALUE = 1.5
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
+# Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
+# cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
+ROLLED_FT_SHAPE         = [1.0, 0.8, 0.55, 0.25, 0.05]  # convex-down marginal value of the 1st..5th banked FT
+LIQUIDITY_BONUS_PER_05M = 0.2                          # xP per £0.5m held unspent in the bank
+HIT_FLOOR_PENALTY       = 0.5                          # φ: surcharge on low minutes-floor acquisitions
+
 # Hit hurdle rate calibration — the -4 transfer cost scales with the active risk
 # profile to prevent hyperactive churn. Defensive profiles demand a far larger
 # expected gain before sanctioning a point hit than aggressive punt profiles.
@@ -843,6 +849,7 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         "xp": xp,
         "status": note,
         "on_yellow_card_tightrope": _is_on_tightrope(e, event),
+        "minutes_floor": _expected_minute_fraction(e, e.get("status", "a")),
     }
     if selling_price is not None:
         entry["sell_price"] = selling_price
@@ -874,12 +881,13 @@ def _solve_squad(
     # Kept current players are charged at their selling price (the opportunity cost
     # of not cashing them in); incoming players are charged at their now_cost.
     if must_include_ids is not None:
-        prob += pulp.lpSum(
+        spend = pulp.lpSum(
             (by_id[pid].get("sell_price", by_id[pid]["price"]) if pid in must_include_ids else by_id[pid]["price"]) * x[pid]
             for pid in ids
-        ) <= budget, "budget"
+        )
     else:
-        prob += pulp.lpSum(by_id[pid]["price"] * x[pid] for pid in ids) <= budget, "budget"
+        spend = pulp.lpSum(by_id[pid]["price"] * x[pid] for pid in ids)
+    prob += spend <= budget, "budget"
 
     for pos, cnt in POS_COUNTS.items():
         prob += pulp.lpSum(x[pid] for pid in ids if by_id[pid]["position"] == pos) == cnt, f"pos_{pos}"
@@ -937,6 +945,10 @@ def _solve_squad(
                 rotation_bonus += ROTATION_PAIR_BONUS * z
     xp_expr = xp_expr + rotation_bonus
 
+    # Cash reserve liquidity: holding cash enables a 1-move upgrade later without a
+    # restructuring hit, so reward residual budget rather than always maxing it out.
+    xp_expr = xp_expr + LIQUIDITY_BONUS_PER_05M * (budget - spend) / 0.5
+
     if must_include_ids is not None and hit_config is not None:
         transfers = pulp.lpSum((1 - x[pid]) for pid in must_include_ids if pid in by_id)
         max_t = hit_config.get("max_transfers")
@@ -949,6 +961,16 @@ def _solve_squad(
         ft_friction = hit_config.get("ft_friction", 0.0)
         obj = xp_expr - hit_config["hit_cost"] * hits - ft_friction * (transfers - hits)
 
+        # Minutes-floor hit-hurdle scaling: a rotational punt (low expected-minute
+        # floor) faces a higher effective hurdle than a nailed starter, because the
+        # -4 is guaranteed while the payoff is far more variable.
+        incoming = [pid for pid in ids if pid not in must_include_ids]
+        floor_risk = pulp.lpSum(
+            max(0.0, 1.0 - by_id[pid].get("minutes_floor", 1.0)) * x[pid]
+            for pid in incoming
+        )
+        obj = obj - HIT_FLOOR_PENALTY * hit_config["hit_cost"] * floor_risk
+
         # Wildcard scarcity: activating the chip (any transfer) incurs a fixed
         # full-season opportunity cost, so the solver holds it unless the rebuilt
         # squad decisively outscores the current squad over the horizon.
@@ -958,12 +980,16 @@ def _solve_squad(
             obj = obj - scarcity_cost * chip_used
 
         # Value of a rolled transfer: banking free transfers holds strategic
-        # optionality, so reward each unspent FT carried forward into the bank
-        # (rolled_ft = free_transfers - transfers + hits). Once the bank is full
-        # (>= 5) — or empty (0) — there is no option value to protect, so skip.
+        # optionality, so reward each unspent FT carried forward with a diminishing
+        # marginal curve (the 1st banked FT is worth more than the 5th).
         free_transfers = hit_config.get("free_transfers", 0)
-        if roll_value > 0 and max_t is not None and 0 < free_transfers < 5:
-            obj = obj + roll_value * (free_transfers - transfers + hits)
+        if roll_value > 0 and max_t is not None and 0 < free_transfers <= 5:
+            rolled = free_transfers - transfers + hits   # == max(0, F - T) at optimality
+            y = pulp.LpVariable.dicts("roll_ft", range(1, 6), cat="Binary")
+            prob += rolled == pulp.lpSum(y[k] for k in range(1, 6)), "roll_ft_sum"
+            for k in range(2, 6):
+                prob += y[k] <= y[k - 1], f"roll_ft_mono_{k}"
+            obj = obj + roll_value * pulp.lpSum(ROLLED_FT_SHAPE[k - 1] * y[k] for k in range(1, 6))
 
         prob.setObjective(obj)
     else:
@@ -1094,7 +1120,7 @@ def suggest_transfers_for_custom_squad(
 
     def _get_moves(selected_ids, is_unlimited):
         if not selected_ids: 
-            return [], 0, 0.0, 0.0
+            return [], 0, 0.0, 0.0, 0.0
         selected_set = set(selected_ids)
         sold = [pid for pid in current_ids if pid not in selected_set]
         bought = [pid for pid in selected_ids if pid not in current_ids]
@@ -1121,9 +1147,14 @@ def suggest_transfers_for_custom_squad(
         free_used = 0 if is_unlimited else (len(mvs) - hits)
         friction_penalty = ft_friction * free_used
         tot_gain = sum(m["xp_gain"] for m in mvs)
-        net_gain = round(tot_gain - hit_cost * hits - friction_penalty, 2)
         cost_chg = round(sum(m["cost"] for m in mvs), 2)
-        return mvs, hits, net_gain, cost_chg
+        # Pure xP net gain (drives the UI display, advice, and chip comparisons).
+        net_gain = round(tot_gain - hit_cost * hits - friction_penalty, 2)
+        # Virtual cash-reserve optionality: +0.2 xP per £0.5m released into the bank.
+        # Used only for the hold-buffer decision, never surfaced as raw xP.
+        liquidity_bonus = LIQUIDITY_BONUS_PER_05M * (-cost_chg) / 0.5
+        decision_net = round(net_gain + liquidity_bonus, 2)
+        return mvs, hits, net_gain, cost_chg, decision_net
 
     # ==============================================================
     # 1. Universe A: Standard Transfers Optimization (Takes Hit Penalty)
@@ -1134,10 +1165,10 @@ def suggest_transfers_for_custom_squad(
         bench_boost=False,
         roll_value=roll_value,
     )
-    std_moves, std_hits, std_net, std_cost = _get_moves(std_selected, False)
-    # Buffer the hold strategy: net_gain already subtracts FT friction, so a
-    # non-positive net gain means holding (banking the FT) is the better play.
-    if std_net <= 0:
+    std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
+    # Buffer the hold strategy: the decision net (which includes the virtual
+    # cash-reserve optionality) must be positive, else holding is the better play.
+    if std_decision <= 0:
         std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
 
     # Roll Transfer decision: if no move clears the hit penalty / threshold over the
@@ -1155,7 +1186,7 @@ def suggest_transfers_for_custom_squad(
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
             bench_boost=("Bench Boost" in eval_chips)
         )
-        unl_moves, unl_hits, unl_net, unl_cost = _get_moves(unl_selected, True)
+        unl_moves, unl_hits, unl_net, unl_cost, _ = _get_moves(unl_selected, True)
 
     # Wildcard is a full-season chip: re-solve with a scarcity penalty so it is
     # only deployed when the rebuilt squad decisively outscores the current one.
@@ -1167,7 +1198,7 @@ def suggest_transfers_for_custom_squad(
             bench_boost=("Bench Boost" in eval_chips),
             scarcity_cost=WILDCARD_SCARCITY_COST,
         )
-        wc_moves, wc_hits, wc_net, wc_cost = _get_moves(wc_selected, True)
+        wc_moves, wc_hits, wc_net, wc_cost, _ = _get_moves(wc_selected, True)
 
     # ==============================================================
     # 3. Project Universe A Squad (For BB and TC Eval)
