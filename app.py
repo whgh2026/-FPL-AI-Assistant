@@ -1089,10 +1089,16 @@ with tab_planner:
             st.info("Check your Manager ID (the number in your FPL team URL) and try again.")
         elif preview:
             
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Team", preview["team_name"])
-            m2.metric("Bank (Unspent)", f"£{preview['bank']}m")
-            m3.metric("Team value", f"£{preview['team_value']}m")
+            ft = st.session_state.get("api_free_transfers_default", 0)
+        fetch_ts = fpl_tools.get_api_timestamp()
+        dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(tz.gettz('Europe/London'))
+        d_str = dt.strftime('%d %b %H:%M')
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Team", preview["team_name"])
+        m2.metric("Free Transfers", f"{ft}", f"As of {d_str}", delta_color="off")
+        m3.metric("Bank (Unspent)", f"£{preview['bank']}m", f"As of {d_str}", delta_color="off")
+        m4.metric("Team value", f"£{preview['team_value']}m")
     
             squad = preview.get("squad", [])
             starters, bench = _api_starters_bench(squad)
