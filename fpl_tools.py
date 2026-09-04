@@ -1163,7 +1163,7 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     chip_scores = {}
     if "Wildcard" in eval_chips:
-        chip_scores["Wildcard"] = round(wc_net - std_net - WILDCARD_SCARCITY_COST, 2)
+        chip_scores["Wildcard"] = round(wc_net - std_net, 2)
     if "Free Hit" in eval_chips:
         chip_scores["Free Hit"] = round(unl_net - std_net, 2)
     if "Bench Boost" in eval_chips:
