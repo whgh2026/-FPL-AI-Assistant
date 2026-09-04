@@ -1034,6 +1034,14 @@ def _render_player_inspector(squad) -> None:
     if not fx_rows:
         fx_rows = '<div class="empty">No upcoming fixtures found.</div>'
 
+    tightrope = bool(player.get("on_yellow_card_tightrope")) or fpl_tools._is_on_tightrope(
+        ctx["players_by_id"].get(sel, {}), start
+    )
+    tightrope_html = (
+        '<span class="stat-badge stat-doubt" style="margin-left:4px;">⚠️ 1 card from ban</span>'
+        if tightrope else ""
+    )
+
     card = (
         f'<div class="inspector-card">'
         f'<div style="display:flex;gap:16px;align-items:flex-start;">'
@@ -1044,7 +1052,7 @@ def _render_player_inspector(squad) -> None:
         f'{_badge_img(team_id, large=True)}'
         f'</div>'
         f'<div class="tc-meta">{player.get("position", "")} · {player.get("team", "")} · £{player.get("price", 0):.1f}m</div>'
-        f'<div style="margin-top:6px;font-size:0.85rem;color:#E2E8F0;">{_friendly_status(player.get("status"))}</div>'
+        f'<div style="margin-top:6px;font-size:0.85rem;color:#E2E8F0;">{_friendly_status(player.get("status"))}{tightrope_html}</div>'
         f'</div></div>'
         f'<div style="margin-top:14px;"><div class="section-label">Next 4 Fixtures</div>{fx_rows}</div>'
         f'</div>'
@@ -1057,6 +1065,10 @@ def _transfer_pair_html(moves) -> str:
     for m in moves:
         out = m["out"]
         inn = m["in"]
+        in_tightrope = (
+            '<div class="tc-meta" style="color:#b45309;font-weight:600;">⚠️ 1 card from ban</div>'
+            if inn.get("on_yellow_card_tightrope") else ""
+        )
         html += (
             f'<div class="transfer-pair">'
             f'<div class="transfer-card tc-out">'
@@ -1068,7 +1080,8 @@ def _transfer_pair_html(moves) -> str:
             f'<div class="transfer-card tc-in">'
             f'<div class="tc-meta">Transfer In</div>'
             f'<div class="tc-head">{_headshot_img(inn)}<div><div class="tc-name">⬆️ {_web_name(inn)}</div>'
-            f'<div class="tc-meta">{inn.get("position", "")} · {inn.get("team", "")} · £{inn.get("price", 0):.1f}m</div></div></div>'
+            f'<div class="tc-meta">{inn.get("position", "")} · {inn.get("team", "")} · £{inn.get("price", 0):.1f}m</div>'
+            f'{in_tightrope}</div></div>'
             f'</div>'
             f'<div style="min-width:110px;text-align:right;">'
             f'<div class="rot-score">+{m.get("xp_gain", 0)}</div>'
@@ -1446,7 +1459,8 @@ with tab_planner:
                                     "position": pos_map.get(fpl_p["element_type"], "?"),
                                     "price": fpl_p["now_cost"] / 10.0,
                                     "selling_price": sell_by_id.get(pid, fpl_p["now_cost"] / 10.0),
-                                    "xp": xp, "status": note, "is_captain": False
+                                    "xp": xp, "status": note, "is_captain": False,
+                                    "on_yellow_card_tightrope": fpl_tools._is_on_tightrope(fpl_p, GW_ID),
                                 })
                             
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
@@ -1613,6 +1627,7 @@ with tab_planner:
                             "xp": m["in"].get("xp_gw", m["in"]["xp"]),
                             "status": m["in"]["status"],
                             "is_captain": False,
+                            "on_yellow_card_tightrope": m["in"].get("on_yellow_card_tightrope", False),
                         })
                     lineup = fpl_tools.select_starting_xi(final_squad)
                     lineup["confirmed_chip"] = confirmed_chip

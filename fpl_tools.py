@@ -37,11 +37,18 @@ MAX_HIT_TRANSFERS = 3
 PRIOR_MINUTES = 270.0          
 WILDCARD_SCARCITY_COST = 55.0
 ROLL_TRANSFER_VALUE = 1.5
+TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
+# Hit hurdle rate calibration — the -4 transfer cost scales with the active risk
+# profile to prevent hyperactive churn. Defensive profiles demand a far larger
+# expected gain before sanctioning a point hit than aggressive punt profiles.
+#   Defensive (conservative): -8.0 xP  — massive expected gain required for any hit.
+#   Balanced:                 -6.5 xP  — clear multi-gameweek upgrade to justify a -4.
+#   Aggressive:               -4.0 xP  — raw mathematical cost, allows tactical punts.
 RISK_PROFILES = {
     "conservative": {"hit_cost": 8.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0},
-    "balanced":     {"hit_cost": 6.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5},
-    "aggressive":   {"hit_cost": 3.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5},
+    "balanced":     {"hit_cost": 6.5, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5},
+    "aggressive":   {"hit_cost": 4.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5},
     # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
     # leader (hunt low-ownership high-xGI differentials).
     "rank_protecting": {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.5, "shield_weight": 0.8, "ft_friction": 2.0},
@@ -665,6 +672,28 @@ def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]
     return round(max(_risk_adjust(p, raw, risk), 0.0) * gmod, 2), note
 
 
+def _is_on_tightrope(p: Dict[str, Any], event: Optional[int] = None) -> bool:
+    """True when a player is one yellow card away from a PL suspension.
+
+    Premier League accumulation rules:
+      * 5 yellows in a club's first 19 matches  -> 1-match ban.
+      * 10 yellows through match 32             -> 2-match ban.
+    The current gameweek (`event`) is used as a proxy for the club's matches
+    played, so the manager is flagged the week before the ban can trigger.
+    """
+    if event is None:
+        return False
+    try:
+        yellows = int(p.get("yellow_cards") or 0)
+    except (TypeError, ValueError):
+        return False
+    if event < 19:
+        return yellows == 4
+    if event < 32:
+        return yellows == 9
+    return False
+
+
 def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, risk: str = "balanced", n: int = 4) -> Tuple[float, str]:
     """Multi-gameweek expected points with geometric decay over the horizon.
 
@@ -690,6 +719,11 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
     for i, w in enumerate(weights):
         raw, _ = _player_xp_raw(p, fixture_lookup, start_event + i)
         total += w * raw
+
+    # Proactive suspension tightrope: a player one yellow card away from a ban
+    # carries real multi-week downside, so haircut the horizon projection.
+    if _is_on_tightrope(p, start_event):
+        total *= TIGHTROPE_DISCOUNT
 
     note = "Available"
     chance_val = p.get("chance_of_playing_next_round")
@@ -798,7 +832,7 @@ def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
 
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,
                 selling_price: Optional[float] = None, xp_gw: Optional[float] = None,
-                fdr: Optional[List[float]] = None) -> Dict[str, Any]:
+                fdr: Optional[List[float]] = None, event: Optional[int] = None) -> Dict[str, Any]:
     entry = {
         "id": e["id"],
         "name": f"{e['first_name']} {e['second_name']}",
@@ -808,6 +842,7 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         "price": e["now_cost"] / 10.0,
         "xp": xp,
         "status": note,
+        "on_yellow_card_tightrope": _is_on_tightrope(e, event),
     }
     if selling_price is not None:
         entry["sell_price"] = selling_price
@@ -1031,7 +1066,7 @@ def suggest_transfers_for_custom_squad(
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
-                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr))
+                                selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr, event=event))
         seen.add(pid)
 
     for e in bootstrap["elements"]:
@@ -1045,7 +1080,7 @@ def suggest_transfers_for_custom_squad(
             continue
         xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
         fdr = _player_fdr_list(e, fixture_lookup, event)
-        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr))
+        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event))
         seen.add(e["id"])
 
     # Total purchasing power = Bank + sum(selling price of the current squad).
@@ -1155,6 +1190,7 @@ def suggest_transfers_for_custom_squad(
             "price": fpl_p["now_cost"] / 10.0,
             "xp": xp,
             "status": note,
+            "on_yellow_card_tightrope": _is_on_tightrope(fpl_p, event),
             "is_captain": False
         })
         
