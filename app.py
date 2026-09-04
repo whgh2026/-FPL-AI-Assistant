@@ -1000,6 +1000,11 @@ tab_planner, tab_insights, tab_radar = st.tabs(["🏟️ Quant Auto Transfer Pla
 
 with tab_planner:
     
+    wildcard_mode = st.toggle("⚡ Exploratory Wildcard Mode", value=False, on_change=clear_transfer_cache)
+    if wildcard_mode:
+        st.info("**Wildcard Mode Active:** The algorithm is currently simulating an unrestricted 15-man squad overhaul with zero transfer penalties. Compare this projected ceiling against your standard squad to determine if playing your Wildcard this Gameweek is strategically justified.")
+
+
     # ------------------------------------------------------------------
     # Step 1 — Your Baseline Team
     # ------------------------------------------------------------------
@@ -1279,7 +1284,7 @@ with tab_planner:
                                 })
                             
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
-                                analysed, float(bank_val), int(ft_val), eval_chips=chips_val, event=GW_ID, risk=risk_label.lower())
+                                analysed, float(bank_val), int(ft_val), eval_chips=chips_val, event=GW_ID, risk=risk_label.lower(), exploratory_wildcard=wildcard_mode)
                             
                             st.session_state["override_analysis"] = {
                                 "analysed_squad": analysed,
@@ -1326,6 +1331,7 @@ with tab_planner:
                         tr = fpl_tools.suggest_transfers_for_custom_squad(
                             ov["analysed_squad"], ov["bank"], ov["ft"],
                             eval_chips=ov.get("chips", []), event=GW_ID, risk=risk_label.lower(),
+                            exploratory_wildcard=wildcard_mode,
                         )
                         ov["transfers"] = tr
                     except Exception as e:
