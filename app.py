@@ -862,18 +862,32 @@ def _player_form_signal(p, ctx) -> float:
     return max(0.0, min(100.0, form * 10.0))
 
 
-def _positional_signals(squad):
-    """Compute market/quant/form signals per department for a 15-man squad."""
+def _positional_signals(starters, bench=None):
+    """Compute market/quant/form signals per department for a 15-man squad.
+
+    `bench` is an explicit list of the 4 bench players. When omitted, bench
+    assets are detected via the FPL `multiplier` (0) or `is_bench` flag.
+    """
     ctx = _bootstrap_ctx()
-    if not ctx or not squad:
+    starters = list(starters or [])
+    if bench is None:
+        bench = [p for p in starters if p.get("multiplier", 1) == 0 or p.get("is_bench")]
+        starters = [p for p in starters if p.get("multiplier", 1) != 0 and not p.get("is_bench")]
+    else:
+        bench = list(bench)
+
+    all_players = starters + bench
+    if not ctx or not all_players:
         return {}
+
     groups = {d: [] for d in _SIGNAL_DEPTS}
-    for p in squad:
+    for p in starters:
         pos = p.get("position", "?")
         dept = pos if pos in ("GK", "DEF", "MID", "FWD") else "Bench"
         groups[dept].append(p)
+    groups["Bench"].extend(bench)
 
-    xp_vals = [_num(p.get("xp")) for p in squad]
+    xp_vals = [_num(p.get("xp")) for p in all_players]
     max_xp = max(xp_vals) if xp_vals else 1.0
 
     out = {}
@@ -928,9 +942,9 @@ def _signals_html(signals, prev=None) -> str:
     return html
 
 
-def _render_positional_diagnostic(squad, prev=None, caption: str = ""):
+def _render_positional_diagnostic(starters, bench=None, prev=None, caption: str = ""):
     """Render the 'Gaffer's Positional Diagnostic' dashboard for a squad."""
-    signals = _positional_signals(squad)
+    signals = _positional_signals(starters, bench)
     if not signals:
         return None
     html = _signals_html(signals, prev)
@@ -1264,7 +1278,7 @@ with tab_planner:
             _render_player_inspector(starters + bench)
 
             baseline_signals = _render_positional_diagnostic(
-                starters + bench,
+                starters, bench,
                 caption="The gaffer's blunt audit — every department under the microscope before the deadline.",
             )
             if baseline_signals:
@@ -1860,7 +1874,7 @@ with tab_planner:
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
             
             _render_positional_diagnostic(
-                xi["xi"] + xi["bench"],
+                xi["xi"], xi["bench"],
                 prev=st.session_state.get("baseline_signals", {}),
                 caption="The final roll call — each department measured against your original XI (green is progress).",
             )
