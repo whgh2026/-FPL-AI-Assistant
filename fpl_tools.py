@@ -1001,8 +1001,7 @@ def suggest_transfers_for_custom_squad(
     free_transfers: int, 
     eval_chips: List[str] = [],
     event: Optional[int] = None, 
-    risk: str = "balanced",
-    exploratory_wildcard: bool = False
+    risk: str = "balanced"
 ) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
     fixture_lookup = _build_fixture_lookup(bootstrap)
@@ -1122,10 +1121,8 @@ def suggest_transfers_for_custom_squad(
 
     # Wildcard is a full-season chip: re-solve with a scarcity penalty so it is
     # only deployed when the rebuilt squad decisively outscores the current one.
-    # In Exploratory Wildcard mode the penalty is waived, surfacing the chip's
-    # full upside (unlimited transfers) without the full-season opportunity cost.
     wc_moves, wc_hits, wc_net, wc_cost = [], 0, 0.0, 0.0
-    if "Wildcard" in eval_chips and not exploratory_wildcard:
+    if "Wildcard" in eval_chips:
         wc_selected, _ = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
@@ -1166,11 +1163,7 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     chip_scores = {}
     if "Wildcard" in eval_chips:
-        if exploratory_wildcard:
-            # Zero-penalty evaluation: full upside of the unlimited-transfer squad.
-            chip_scores["Wildcard"] = round(unl_net - std_net, 2)
-        else:
-            chip_scores["Wildcard"] = round(wc_net - std_net, 2)
+        chip_scores["Wildcard"] = round(wc_net - std_net - WILDCARD_SCARCITY_COST, 2)
     if "Free Hit" in eval_chips:
         chip_scores["Free Hit"] = round(unl_net - std_net, 2)
     if "Bench Boost" in eval_chips:
@@ -1242,7 +1235,6 @@ def suggest_transfers_for_custom_squad(
         "recommended_chip": recommended_chip,
         "roll_transfer": roll_transfer,
         "projected_ft": projected_ft,
-        "exploratory_wildcard": exploratory_wildcard,
         "horizon": 4
     }
 
