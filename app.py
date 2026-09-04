@@ -1076,7 +1076,7 @@ with tab_planner:
                 st.warning("Pop your Manager ID in first — it’s the number in your FPL team-page URL.")
             else:
                 st.query_params["mid"] = manager_id.strip()
-                with st.spinner("Fetching your current squad…"):
+                with st.spinner("Judging your recent managerial decisions... Fetching squad…"):
                     try:
                     preview = fpl_tools.score_my_squad(manager_id.strip(), GW_ID, risk=risk_label.lower())
                         st.session_state["squad_preview"] = preview
