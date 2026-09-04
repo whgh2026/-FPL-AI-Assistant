@@ -4,4 +4,5 @@ requests
 pulp
 python-dotenv
 Pillow
-python-dateutilpsycopg2-binary
+python-dateutil
+psycopg2-binary
