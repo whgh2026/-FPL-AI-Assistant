@@ -26,6 +26,13 @@ try:
 except ImportError:
     HAS_PULP = False
 
+try:
+    import numpy as _np
+    HAS_NUMPY = True
+except ImportError:
+    _np = None
+    HAS_NUMPY = False
+
 # Decaying transfer tax (anti-whipsaw). Lives in db.py (persistent ledger); fall
 # back to a no-op if the module is unavailable so the solver stays importable.
 try:
@@ -55,6 +62,11 @@ PHASE2_START_GW = 26            # GW26+ switches from pure EV to Blocker/Diverge
 CHIP_SET1_EXPIRY_GW = 19        # Set 1 chips expire at the GW19 deadline (2 Jan 2027 13:30 GMT)
 CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
 CAP_LOCK_BONUS = 2.0            # blocker reward for captaining the consensus (highest-EO) asset
+
+# Phase D — stochastic optimisation & multi-week planning.
+SAA_SCENARIOS = 500             # Monte Carlo scenarios per solve
+PLAN_HORIZON = 6                # multi-GW transfer planning window
+PLAN_WEIGHTS = [1.0, 0.85, 0.7, 0.55, 0.45, 0.35]  # decay over the planning horizon
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -830,6 +842,12 @@ def _load_weights() -> Dict[str, float]:
         "diverge_weight": 0.05,
         "stack_weight": 0.3,
         "track_weight": 0.5,
+        "saa_att_sigma": 0.25,
+        "saa_def_sigma": 0.2,
+        "saa_crisis_prob": 0.05,
+        "term_equity": 0.1,
+        "term_ft": 1.5,
+        "term_dead": 0.5,
     }
     weights = dict(defaults)
     try:
@@ -1564,6 +1582,231 @@ def get_played_chips(manager_id: str) -> List[str]:
         return []
 
 
+def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
+                        n=PLAN_HORIZON, S=SAA_SCENARIOS, seed=7):
+    """Correlated SAA scenarios -> (saa_mean, matrix).
+
+    Outcomes are coupled through shared team attack/defence latent shocks and a
+    shared rotation-crisis minutes shock (never independent player draws).
+    Returns:
+      saa_mean: {pid: [mean xP over GW t=0..n-1]}
+      matrix:   {pid: [n arrays, each length S]}  (for floor/ceiling quantiles)
+    """
+    bootstrap = _get_bootstrap()
+    elements = {e["id"]: e for e in bootstrap.get("elements", [])}
+    ids = [pid for pid in player_ids if pid in elements]
+
+    base = {}
+    p0 = {}
+    team_of = {}
+    pos_of = {}
+    for pid in ids:
+        e = elements[pid]
+        row = []
+        for t in range(n):
+            xp, _ = _player_xp(e, fixture_lookup, event=event + t, risk=risk)
+            row.append(xp)
+        base[pid] = row
+        _p0, _pc, _pf = _minute_distribution(e, e.get("status", "a"))
+        p0[pid] = _p0
+        team_of[pid] = e.get("team")
+        pos_of[pid] = POS_MAP.get(e.get("element_type"), "MID")
+
+    if not HAS_NUMPY or not ids:
+        saa_mean = {pid: [round(v, 2) for v in base[pid]] for pid in ids}
+        matrix = {pid: [[v] for v in base[pid]] for pid in ids}
+        return saa_mean, matrix
+
+    w = _load_weights()
+    sig_att = w.get("saa_att_sigma", 0.25)
+    sig_def = w.get("saa_def_sigma", 0.2)
+    crisis_p = w.get("saa_crisis_prob", 0.05)
+
+    teams = sorted({team_of[pid] for pid in ids})
+    tidx = {t: i for i, t in enumerate(teams)}
+    T = len(teams)
+    rng = _np.random.default_rng(seed)
+
+    # Shared team latent shocks: shape (S, T, n), mean-1 log-normals.
+    att_shock = rng.lognormal(mean=-0.5 * sig_att ** 2, sigma=sig_att, size=(S, T, n))
+    def_shock = rng.lognormal(mean=-0.5 * sig_def ** 2, sigma=sig_def, size=(S, T, n))
+    crisis = (rng.random(size=(S, T, n)) < crisis_p).astype(float) * rng.beta(1.0, 3.0, size=(S, T, n))
+
+    att_share = {"GK": 0.1, "DEF": 0.45, "MID": 0.85, "FWD": 0.9}
+
+    saa_mean = {}
+    matrix = {}
+    for pid in ids:
+        ti = tidx[team_of[pid]]
+        ashare = att_share.get(pos_of[pid], 0.8)
+        shock = ashare * att_shock[:, ti, :] + (1.0 - ashare) * def_shock[:, ti, :]  # (S, n)
+        min_factor = 1.0 - p0[pid] * crisis[:, ti, :]                                # (S, n)
+        xp_s = _np.asarray(base[pid], dtype=float)[None, :] * shock * min_factor      # (S, n)
+        matrix[pid] = xp_s
+        saa_mean[pid] = [round(float(xp_s[:, t].mean()), 2) for t in range(n)]
+
+    return saa_mean, matrix
+
+
+def _scenario_distribution(selected_ids, matrix, weights=None, n=PLAN_HORIZON):
+    """P5/P50/P95 of a selected squad's horizon points across scenarios."""
+    sel = [pid for pid in selected_ids if pid in matrix]
+    if not sel:
+        return {"p5": 0.0, "p50": 0.0, "p95": 0.0, "mean": 0.0}
+    S = len(matrix[sel[0]][0])
+    w = weights or PLAN_WEIGHTS[:n]
+    if HAS_NUMPY:
+        totals = _np.zeros(S)
+        for pid in sel:
+            m = matrix[pid]
+            for t in range(min(n, len(m))):
+                totals = totals + w[t] * _np.asarray(m[t])
+        p5 = float(_np.percentile(totals, 5))
+        p50 = float(_np.percentile(totals, 50))
+        p95 = float(_np.percentile(totals, 95))
+        mean = float(totals.mean())
+    else:
+        totals = [0.0] * S
+        for pid in sel:
+            m = matrix[pid]
+            for t in range(min(n, len(m))):
+                wt = w[t]
+                for s in range(S):
+                    totals[s] += wt * m[t][s]
+        ts = sorted(totals)
+        p5 = ts[int(0.05 * (S - 1))]
+        p50 = ts[int(0.5 * (S - 1))]
+        p95 = ts[int(0.95 * (S - 1))]
+        mean = sum(totals) / S
+    return {"p5": round(p5, 2), "p50": round(p50, 2), "p95": round(p95, 2), "mean": round(mean, 2)}
+
+
+def _planner_shortlist(pool, current_ids, saa_mean):
+    """Downsample the pool to ~40 players for the multi-GW planner."""
+    cur = [p for p in pool if p["id"] in set(current_ids)]
+    incoming = [p for p in pool if p["id"] not in set(current_ids)]
+
+    def horizon_xp(p):
+        m = saa_mean.get(p["id"], [p.get("xp", 0.0)])
+        return sum(PLAN_WEIGHTS[t] * (m[t] if t < len(m) else p.get("xp", 0.0))
+                   for t in range(len(PLAN_WEIGHTS)))
+
+    incoming.sort(key=horizon_xp, reverse=True)
+    per_pos = {"GK": 4, "DEF": 6, "MID": 6, "FWD": 4}
+    picked = []
+    for pos, k in per_pos.items():
+        picked += [p for p in incoming if p["position"] == pos][:k]
+    picked_ids = {p["id"] for p in picked} | {p["id"] for p in cur}
+    for p in incoming:
+        if len(picked_ids) >= 40:
+            break
+        if p["id"] not in picked_ids:
+            picked.append(p)
+            picked_ids.add(p["id"])
+    return cur + picked
+
+
+def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean,
+                             event, n=PLAN_HORIZON):
+    """Multi-GW transfer scheduler: ownership + FT + budget over N GWs (Omega(f)).
+
+    Spans the horizon so banking FTs now can fund a coupled structural pivot in a
+    later gameweek without hits; a terminal value Psi(S_t+N) stops the solver from
+    strip-mining the squad in the final week.
+    """
+    if not HAS_PULP:
+        return []
+    shortlist = _planner_shortlist(pool, current_ids, saa_mean)
+    by_id = {p["id"]: p for p in shortlist}
+    ids = [p["id"] for p in shortlist]
+    cur_set = set(current_ids)
+    T = n
+    w = _load_weights()
+    lam_eq = w.get("term_equity", 0.1)
+    lam_ft = w.get("term_ft", 1.5)
+    lam_dead = w.get("term_dead", 0.5)
+
+    prob = pulp.LpProblem("multi_gw_plan", pulp.LpMaximize)
+    x = pulp.LpVariable.dicts("mx", (ids, range(T)), cat="Binary")
+    buy = pulp.LpVariable.dicts("mbuy", (ids, range(T)), cat="Binary")
+    sell = pulp.LpVariable.dicts("msell", (ids, range(T)), cat="Binary")
+    ft = [pulp.LpVariable(f"ft_{t}", lowBound=0, upBound=5, cat="Integer") for t in range(T + 1)]
+    hits = [pulp.LpVariable(f"hit_{t}", lowBound=0, cat="Integer") for t in range(T)]
+    bank = [pulp.LpVariable(f"bank_{t}", lowBound=0) for t in range(T + 1)]
+
+    # Ownership linkage.
+    for pid in ids:
+        c0 = 1 if pid in cur_set else 0
+        prob += x[pid][0] == c0 + buy[pid][0] - sell[pid][0], f"own0_{pid}"
+        for t in range(1, T):
+            prob += x[pid][t] == x[pid][t - 1] + buy[pid][t] - sell[pid][t], f"own_{pid}_{t}"
+        for t in range(T):
+            prob += buy[pid][t] + sell[pid][t] <= 1, f"no_churn_{pid}_{t}"
+
+    # Squad structure per GW.
+    for t in range(T):
+        prob += pulp.lpSum(x[pid][t] for pid in ids) == 15, f"squad_{t}"
+        for pos, cnt in POS_COUNTS.items():
+            prob += pulp.lpSum(x[pid][t] for pid in ids if by_id[pid]["position"] == pos) == cnt, f"pos_{pos}_{t}"
+        for tm in {by_id[pid]["team_id"] for pid in ids}:
+            prob += pulp.lpSum(x[pid][t] for pid in ids if by_id[pid]["team_id"] == tm) <= 3, f"team_{tm}_{t}"
+
+    # Transfers, FT, hits, budget linkage.
+    transfers = [pulp.lpSum(buy[pid][t] for pid in ids) for t in range(T)]
+    sell_value = [pulp.lpSum(sell[pid][t] * by_id[pid].get("sell_price", by_id[pid]["price"]) for pid in ids) for t in range(T)]
+    buy_cost = [pulp.lpSum(buy[pid][t] * by_id[pid]["price"] for pid in ids) for t in range(T)]
+
+    prob += ft[0] == min(5, int(free_transfers)), "ft0"
+    prob += bank[0] == budget, "bank0"
+    for t in range(T):
+        prob += hits[t] >= transfers[t] - ft[t], f"hits_lb_{t}"
+        prob += hits[t] <= transfers[t], f"hits_ub_{t}"
+        prob += ft[t + 1] <= ft[t] - transfers[t] + 1 + hits[t], f"ft_next_{t}"
+        prob += ft[t + 1] <= 5, f"ft_cap_{t}"
+        prob += buy_cost[t] <= bank[t] + sell_value[t], f"budget_flow_{t}"
+        prob += bank[t + 1] == bank[t] + sell_value[t] - buy_cost[t], f"bank_next_{t}"
+
+    # Precompute per-player per-GW SAA xP.
+    saa_xp = {}
+    for pid in ids:
+        m = saa_mean.get(pid)
+        if m:
+            saa_xp[pid] = [m[t] if t < len(m) else by_id[pid].get("xp", 0.0) for t in range(T)]
+        else:
+            saa_xp[pid] = [by_id[pid].get("xp", 0.0)] * T
+
+    # Objective: horizon SAA points - hits + terminal value Psi.
+    obj = 0.0
+    for t in range(T):
+        gw_w = PLAN_WEIGHTS[t] if t < len(PLAN_WEIGHTS) else 0.0
+        pts = pulp.lpSum(x[pid][t] * saa_xp[pid][t] for pid in ids)
+        obj += gw_w * (pts - 4.0 * hits[t])
+
+    term_equity = pulp.lpSum(x[pid][T - 1] * by_id[pid].get("sell_price", by_id[pid]["price"]) for pid in ids)
+    dead = pulp.lpSum(x[pid][T - 1] * (1.0 if (by_id[pid].get("status") in _NON_PLAYING_NOTES or by_id[pid].get("xp", 0.0) <= 0.1) else 0.0) for pid in ids)
+    obj += lam_eq * term_equity + lam_ft * ft[T] - lam_dead * dead
+
+    prob.setObjective(obj)
+    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    if pulp.LpStatus[prob.status] != "Optimal":
+        return []
+
+    schedule = []
+    for t in range(T):
+        buys = [by_id[pid]["name"] for pid in ids if buy[pid][t].varValue and buy[pid][t].varValue > 0.5]
+        sells = [by_id[pid]["name"] for pid in ids if sell[pid][t].varValue and sell[pid][t].varValue > 0.5]
+        schedule.append({
+            "gw": event + t,
+            "buys": buys,
+            "sells": sells,
+            "transfers": int(round(transfers[t].value() or 0.0)),
+            "hits": int(round(hits[t].value() or 0.0)),
+            "ft_after": int(round(ft[t + 1].value() or 0.0)),
+            "bank_after": round(bank[t + 1].value() or 0.0, 1),
+        })
+    return schedule
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def suggest_transfers_for_custom_squad(
     squad: List[Dict[str, Any]], 
@@ -1666,6 +1909,22 @@ def suggest_transfers_for_custom_squad(
     )
     budget = bank + total_sell
     pool_by_id = {p["id"]: p for p in pool}
+
+    # Phase D SAA: correlated scenarios + SAA-mean horizon xP + multi-GW plan.
+    saa_mean = {}
+    scenario_matrix = {}
+    multi_gw_plan = []
+    try:
+        pool_ids = [p["id"] for p in pool]
+        saa_mean, scenario_matrix = _generate_scenarios(pool_ids, fixture_lookup, event, risk=risk)
+        for p in pool:
+            m = saa_mean.get(p["id"])
+            if m:
+                p["xp"] = round(sum(HORIZON_WEIGHTS[t] * (m[t] if t < len(m) else 0.0)
+                                    for t in range(len(HORIZON_WEIGHTS))), 2)
+        multi_gw_plan = _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean, event)
+    except Exception:
+        saa_mean, scenario_matrix, multi_gw_plan = {}, {}, []
 
     def _get_moves(selected_ids, is_unlimited):
         if not selected_ids: 
@@ -1791,6 +2050,11 @@ def suggest_transfers_for_custom_squad(
         
     std_best_xi = select_starting_xi(std_squad)
 
+    # Scenario distribution of the final recommended squad (floor vs ceiling).
+    scenario_dist = _scenario_distribution(
+        [p["player_id"] for p in std_squad], scenario_matrix, weights=HORIZON_WEIGHTS, n=4
+    ) if scenario_matrix else {}
+
     # ==============================================================
     # 4. Ultra-Strict Chip Scoring & Ranking
     # ==============================================================
@@ -1867,6 +2131,8 @@ def suggest_transfers_for_custom_squad(
         "recommended_chip": recommended_chip,
         "roll_transfer": roll_transfer,
         "projected_ft": projected_ft,
+        "scenario_distribution": scenario_dist,
+        "multi_gw_plan": multi_gw_plan,
         "horizon": 4
     }
 

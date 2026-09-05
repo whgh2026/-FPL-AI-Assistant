@@ -6,3 +6,4 @@ python-dotenv
 Pillow
 python-dateutil
 psycopg2-binary
+numpy

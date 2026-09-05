@@ -1,5 +1,6 @@
 import math
 import os
+import json
 
 try:
     import streamlit as st
@@ -229,6 +230,36 @@ def save_chip_play(manager_id, gameweek, chip):
                 "INSERT INTO chip_plays (manager_id, gameweek, chip) VALUES (%s, %s, %s) "
                 "ON CONFLICT DO NOTHING",
                 (str(manager_id), int(gameweek), chip),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def save_plan(manager_id, gameweek, plan):
+    """Persist the multi-GW transfer schedule to the fpl_plans ledger."""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS fpl_plans ("
+                "id BIGSERIAL PRIMARY KEY,"
+                "manager_id TEXT NOT NULL,"
+                "gameweek INTEGER NOT NULL,"
+                "horizon INTEGER NOT NULL,"
+                "plan JSONB,"
+                "created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+            cur.execute(
+                "INSERT INTO fpl_plans (manager_id, gameweek, horizon, plan) "
+                "VALUES (%s, %s, %s, %s)",
+                (str(manager_id), int(gameweek), len(plan or []), json.dumps(plan or [])),
             )
             conn.commit()
             return True

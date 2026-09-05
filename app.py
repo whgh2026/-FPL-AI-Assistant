@@ -7,7 +7,7 @@ import dateutil.parser
 from dateutil import tz
 import datetime
 import time
-from db import get_or_backfill_manager_history, log_decision, log_squad_health, save_chip_play
+from db import get_or_backfill_manager_history, log_decision, log_squad_health, save_chip_play, save_plan
 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
@@ -1692,6 +1692,45 @@ with tab_planner:
                 transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
             st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
 
+            # ---- Scenario Distribution (SAA floor vs ceiling) ----
+            try:
+                sd = tr.get("scenario_distribution") or {}
+                if sd:
+                    p5, p50, p95 = sd.get("p5", 0.0), sd.get("p50", 0.0), sd.get("p95", 0.0)
+                    dist_html = (
+                        '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;">'
+                        f'<div><div class="tc-meta">FLOOR (P5)</div><div style="font-weight:800;color:#ef4444;font-size:1.3rem;">{p5}</div></div>'
+                        f'<div><div class="tc-meta">MEDIAN (P50)</div><div style="font-weight:800;color:#E2E8F0;font-size:1.3rem;">{p50}</div></div>'
+                        f'<div><div class="tc-meta">CEILING (P95)</div><div style="font-weight:800;color:#10b981;font-size:1.3rem;">{p95}</div></div>'
+                        '</div>'
+                    )
+                    st.markdown(_card(dist_html, "🎲 Scenario Distribution · 4-GW horizon (500 sims)"), unsafe_allow_html=True)
+            except Exception:
+                pass
+
+            # ---- Multi-GW Transfer Schedule ----
+            try:
+                plan = tr.get("multi_gw_plan") or []
+                active = [s for s in plan if s.get("transfers") or s.get("buys") or s.get("sells")]
+                if active:
+                    rows = []
+                    for s in plan:
+                        buys = ", ".join(s["buys"]) or "—"
+                        sells = ", ".join(s["sells"]) or "—"
+                        hit = f" (-{4 * s['hits']})" if s.get("hits") else ""
+                        rows.append(
+                            f'<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #1e293b;align-items:flex-start;">'
+                            f'<div style="flex:0 0 52px;font-weight:800;color:#4f46e5;">GW{s["gw"]}</div>'
+                            f'<div style="flex:1;min-width:0;">'
+                            f'<div class="tc-meta">Sell: {sells}</div>'
+                            f'<div class="tc-meta">Buy: {buys}</div>'
+                            f'<div class="tc-meta">Transfers: {s["transfers"]}{hit} · FT after: {s["ft_after"]} · Bank: £{s["bank_after"]:.1f}m</div>'
+                            f'</div></div>'
+                        )
+                    st.markdown(_card("".join(rows), "🗓️ Multi-Gameweek Transfer Plan (Ω(f) bundling)"), unsafe_allow_html=True)
+            except Exception:
+                pass
+
             c_fast1, c_fast2 = st.columns(2)
             with c_fast1:
                 accept_all = st.button("✅ Accept All Quant Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
@@ -1740,6 +1779,7 @@ with tab_planner:
                         )
                         if confirmed_chip and confirmed_chip != "None (Hold Chips)":
                             save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
+                        save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
                     except Exception:
                         pass
                     st.session_state["manual_final"] = lineup
