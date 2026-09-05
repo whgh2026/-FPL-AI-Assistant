@@ -68,6 +68,10 @@ SAA_SCENARIOS = 500             # Monte Carlo scenarios per solve
 PLAN_HORIZON = 6                # multi-GW transfer planning window
 PLAN_WEIGHTS = [1.0, 0.85, 0.7, 0.55, 0.45, 0.35]  # decay over the planning horizon
 
+# Phase E — auto-calibration, CVaR hedging, live tracking.
+CVAR_STRESS_K = 50              # pooled downside scenarios for the CVaR tail
+DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-projection
+
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
 ROLLED_FT_SHAPE         = [1.0, 0.8, 0.55, 0.25, 0.05]  # convex-down marginal value of the 1st..5th banked FT
@@ -848,6 +852,8 @@ def _load_weights() -> Dict[str, float]:
         "term_equity": 0.1,
         "term_ft": 1.5,
         "term_dead": 0.5,
+        "cvar_alpha": 0.1,
+        "cvar_lambda": 0.05,
     }
     weights = dict(defaults)
     try:
@@ -1203,6 +1209,7 @@ def _solve_squad(
     mode: str = "ev",
     phase: int = 1,
     rival_ids: Optional[set] = None,
+    cvar_scenarios: Optional[Dict[int, List[float]]] = None,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -1297,6 +1304,23 @@ def _solve_squad(
                 xp_expr = xp_expr - track_w * pulp.lpSum(
                     (1 - x[pid]) for pid in rival_ids if pid in by_id
                 )
+            # CVaR downside hedging (Rockafellar-Uryasev): maximise the lower
+            # alpha-tail mean of the XI+captain points across the pooled stress
+            # scenarios. Auxiliary variables are continuous -> stays <2s.
+            if cvar_scenarios and start is not None:
+                cvar_w = w.get("cvar_lambda", 0.05)
+                alpha = max(1e-3, w.get("cvar_alpha", 0.1))
+                ks = list(range(len(next(iter(cvar_scenarios.values()), [0.0]))))
+                if ks:
+                    zeta = pulp.LpVariable("cvar_zeta", cat="Continuous")
+                    u = pulp.LpVariable.dicts("cvar_u", ks, lowBound=0, cat="Continuous")
+                    for s in ks:
+                        pi_s = pulp.lpSum(
+                            (start[pid] + captain[pid]) * cvar_scenarios.get(pid, [0.0] * len(ks))[s]
+                            for pid in ids
+                        )
+                        prob += u[s] >= zeta - pi_s, f"cvar_excess_{s}"
+                    xp_expr = xp_expr + cvar_w * (zeta - (1.0 / (alpha * len(ks))) * pulp.lpSum(u[s] for s in ks))
         else:  # divergence
             eo_ceil = w.get("eo_ceil", 10.0)
             div_w = w.get("diverge_weight", 0.05)
@@ -1681,6 +1705,30 @@ def _scenario_distribution(selected_ids, matrix, weights=None, n=PLAN_HORIZON):
     return {"p5": round(p5, 2), "p50": round(p50, 2), "p95": round(p95, 2), "mean": round(mean, 2)}
 
 
+def _select_stress_scenarios(matrix, K=CVAR_STRESS_K):
+    """Pool the K lowest-aggregate (downside) scenarios -> {pid: [horizon xP per scenario]}.
+
+    Candidate pooling bounds the CVaR auxiliary variables so the blocker MIP stays
+    under the 2s solve-time limit.
+    """
+    if not matrix or not HAS_NUMPY:
+        return {}
+    first = next(iter(matrix.values()))
+    n_gw = len(first)
+    S = len(first[0])
+    horizons = {}
+    for pid, m in matrix.items():
+        h = _np.zeros(S)
+        for t in range(min(n_gw, len(HORIZON_WEIGHTS))):
+            h = h + HORIZON_WEIGHTS[t] * _np.asarray(m[t])
+        horizons[pid] = h
+    totals = _np.zeros(S)
+    for pid, h in horizons.items():
+        totals = totals + h
+    idx = _np.argsort(totals)[:K]
+    return {pid: [float(horizons[pid][s]) for s in idx] for pid in horizons}
+
+
 def _planner_shortlist(pool, current_ids, saa_mean):
     """Downsample the pool to ~40 players for the multi-GW planner."""
     cur = [p for p in pool if p["id"] in set(current_ids)]
@@ -1913,10 +1961,12 @@ def suggest_transfers_for_custom_squad(
     # Phase D SAA: correlated scenarios + SAA-mean horizon xP + multi-GW plan.
     saa_mean = {}
     scenario_matrix = {}
+    stress_scenarios = {}
     multi_gw_plan = []
     try:
         pool_ids = [p["id"] for p in pool]
         saa_mean, scenario_matrix = _generate_scenarios(pool_ids, fixture_lookup, event, risk=risk)
+        stress_scenarios = _select_stress_scenarios(scenario_matrix)
         for p in pool:
             m = saa_mean.get(p["id"])
             if m:
@@ -1924,7 +1974,7 @@ def suggest_transfers_for_custom_squad(
                                     for t in range(len(HORIZON_WEIGHTS))), 2)
         multi_gw_plan = _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean, event)
     except Exception:
-        saa_mean, scenario_matrix, multi_gw_plan = {}, {}, []
+        saa_mean, scenario_matrix, stress_scenarios, multi_gw_plan = {}, {}, {}, []
 
     def _get_moves(selected_ids, is_unlimited):
         if not selected_ids: 
@@ -1974,6 +2024,7 @@ def suggest_transfers_for_custom_squad(
         roll_value=roll_value,
         holding_map=holding_map, current_gw=current_gw,
         eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
+        cvar_scenarios=stress_scenarios,
     )
     std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
     # Buffer the hold strategy: the decision net (which includes the virtual
@@ -2005,6 +2056,7 @@ def suggest_transfers_for_custom_squad(
             bench_boost=("Bench Boost" in eval_chips),
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
+            cvar_scenarios=stress_scenarios,
         )
         unl_moves, unl_hits, unl_net, unl_cost, _ = _get_moves(unl_selected, True)
 
@@ -2019,6 +2071,7 @@ def suggest_transfers_for_custom_squad(
             scarcity_cost=WILDCARD_SCARCITY_COST,
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
+            cvar_scenarios=stress_scenarios,
         )
         wc_moves, wc_hits, wc_net, wc_cost, _ = _get_moves(wc_selected, True)
 
@@ -2446,3 +2499,136 @@ def _squad_structural_health(squad, bank):
     })
 
     return checks
+
+
+def evaluate_calibration(rows, weights):
+    """RMSE + count-data Poisson deviance of re-projected predictions vs actuals.
+
+    Re-projection: pred = gmod * (base_pts - autosub_ref*cameo_mass
+    - rotation_convexity*rotation_variance + (decay - default_decay)*dc_sensitivity).
+    """
+    if not rows:
+        return {"rmse": 0.0, "deviance": 0.0, "n": 0}
+    gmod = weights.get("global_xP_modifier", 1.0)
+    autosub_ref = weights.get("autosub_ref", 1.8)
+    rot = weights.get("rotation_convexity", 0.4)
+    decay = weights.get("dixon_coles_decay", 0.03)
+    sq = 0.0
+    dev = 0.0
+    n = 0
+    for r in rows:
+        base = _to_float(r.get("base_pts", r.get("predicted_xp", 0.0)))
+        cameo = _to_float(r.get("cameo_mass", 0.0))
+        var = _to_float(r.get("rotation_variance", 0.0))
+        dc = _to_float(r.get("dc_sensitivity", 0.0))
+        pred = gmod * (base - autosub_ref * cameo - rot * var + (decay - DIXON_COLES_DECAY_DEFAULT) * dc)
+        actual = _to_float(r.get("actual_points", 0.0))
+        sq += (pred - actual) ** 2
+        dev += 2.0 * (pred - actual * math.log(max(pred, 1e-6)))
+        n += 1
+    return {"rmse": round(math.sqrt(sq / n), 4), "deviance": round(dev / n, 4), "n": n}
+
+
+def calibrate_weights(rows, weights, damping=0.05):
+    """Damped coordinate descent over the 4 targeted parameters.
+
+    Minimises a blended RMSE + Poisson-deviance metric. Returns an updated dict.
+    """
+    if not rows:
+        return dict(weights)
+
+    def metric(w):
+        e = evaluate_calibration(rows, w)
+        return e["rmse"] + 0.3 * e["deviance"]
+
+    bounds = {
+        "global_xP_modifier": (0.5, 2.0),
+        "autosub_ref": (0.5, 3.0),
+        "rotation_convexity": (0.0, 1.5),
+        "dixon_coles_decay": (0.0, 0.15),
+    }
+    new = dict(weights)
+    for name, (lo, hi) in bounds.items():
+        best_val = new[name]
+        best_metric = metric(new)
+        for frac in (-0.1, 0.1):
+            cand = max(lo, min(hi, new[name] * (1.0 + frac)))
+            trial = dict(new)
+            trial[name] = cand
+            m = metric(trial)
+            if m < best_metric:
+                best_metric, best_val = m, cand
+        new[name] = round(new[name] + damping * (best_val - new[name]), 6)
+    return new
+
+
+_LIVE_CACHE: Dict[int, Dict[str, Any]] = {}
+_LIVE_CACHE_TS: float = 0.0
+
+
+def get_live_event(gw):
+    """Live per-player stats -> {pid: {minutes, total_points, bonus, bps, played}}."""
+    global _LIVE_CACHE, _LIVE_CACHE_TS
+    if _LIVE_CACHE and (time.time() - _LIVE_CACHE_TS) < 60:
+        return _LIVE_CACHE
+    try:
+        resp = requests.get(f"{BASE_URL}/event/{gw}/live/", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return {}
+    out = {}
+    for e in data.get("elements", []):
+        st = e.get("stats", {})
+        out[e["id"]] = {
+            "minutes": _to_float(st.get("minutes")),
+            "total_points": _to_float(st.get("total_points")),
+            "bonus": _to_float(st.get("bonus")),
+            "bps": _to_float(st.get("bps")),
+            "played": bool(st.get("played")),
+        }
+    _LIVE_CACHE = out
+    _LIVE_CACHE_TS = time.time()
+    return out
+
+
+def compute_h2h(my_squad, rival_squad, live):
+    """Head-to-head live comparison of two active XIs.
+
+    Returns {my_rows, rival_rows, my_total, rival_total, margin} factoring the
+    captain/TC multiplier, live BPS (provisional bonus) and remaining minutes.
+    """
+    def _resolve(squad):
+        starters = [p for p in squad if (p.get("multiplier", 1) or 1) >= 1]
+        rows = []
+        for p in starters:
+            pid = p.get("player_id")
+            lv = live.get(pid, {})
+            mult = int(p.get("multiplier", 1) or 1)
+            pts = lv.get("total_points", 0.0) * mult
+            mins = lv.get("minutes", 0.0)
+            played = lv.get("played", False)
+            in_progress = (not played) or (0 < mins < 90)
+            rows.append({
+                "pid": pid,
+                "name": p.get("name", "?"),
+                "multiplier": mult,
+                "points": round(pts, 1),
+                "minutes": mins,
+                "in_progress": in_progress,
+                "bps": lv.get("bps", 0.0),
+                "bonus": lv.get("bonus", 0.0),
+            })
+        return rows
+
+    my_rows = _resolve(my_squad)
+    rival_rows = _resolve(rival_squad)
+    my_total = sum(r["points"] for r in my_rows)
+    rival_total = sum(r["points"] for r in rival_rows)
+    return {
+        "my_rows": my_rows,
+        "rival_rows": rival_rows,
+        "my_total": round(my_total, 1),
+        "rival_total": round(rival_total, 1),
+        "margin": round(my_total - rival_total, 1),
+    }

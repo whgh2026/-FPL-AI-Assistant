@@ -1,6 +1,7 @@
 """
-Wednesday Auto-Tuner: compare logged predictions against actual results and nudge
-weights.json to close the systematic gap (damped to a 3% max shift per run).
+Wednesday Auto-Calibration: compare logged predictions against actual results and
+coordinate-descend on weights.json to close the systematic RMSE / Poisson-deviance
+gap (damped to a 5% max shift per parameter per run).
 
 Safety threshold: require >= 1000 rows before adjusting, to avoid overfitting on
 a tiny sample.
@@ -11,71 +12,38 @@ import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import psycopg2
+import fpl_tools
+from db import ensure_calibration_columns, get_prediction_history
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEIGHTS_PATH = os.path.join(ROOT, "weights.json")
-DEFAULT_WEIGHTS = {"global_xP_modifier": 1.0, "home_advantage": 1.0, "clean_sheet_confidence": 1.0}
 MIN_ROWS = 1000
-DAMPING = 0.03
-MIN_MULTIPLIER = 0.5
-MAX_MULTIPLIER = 2.0
-
-
-def _connect():
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(url)
-
-
-def _load_weights() -> dict:
-    try:
-        with open(WEIGHTS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return {k: float(data.get(k, v)) for k, v in DEFAULT_WEIGHTS.items()}
-    except Exception:
-        pass
-    return dict(DEFAULT_WEIGHTS)
+DAMPING = 0.05
 
 
 def main() -> None:
-    conn = _connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT predicted_xp, actual_points FROM fpl_predictions "
-                "WHERE actual_points IS NOT NULL"
-            )
-            rows = cur.fetchall()
-    finally:
-        conn.close()
+    ensure_calibration_columns()
+    rows = get_prediction_history()
 
     n = len(rows)
     if n < MIN_ROWS:
-        print(f"Skipping auto-tune: {n} rows < {MIN_ROWS} threshold (avoid overfitting).")
+        print(f"Skipping calibration: {n} rows < {MIN_ROWS} threshold (avoid overfitting).")
         return
 
-    total_pred = sum(float(r[0]) for r in rows)
-    total_actual = sum(float(r[1]) for r in rows)
-    mae = sum(abs(float(r[0]) - float(r[1])) for r in rows) / n
-
-    # bias > 0 => over-predicting (predicted too high); bias < 0 => under-predicting.
-    bias = (total_pred - total_actual) / total_actual if total_actual else 0.0
-    adjustment = max(-DAMPING, min(DAMPING, -bias))
-
-    weights = _load_weights()
-    old = weights["global_xP_modifier"]
-    new = max(MIN_MULTIPLIER, min(MAX_MULTIPLIER, round(old * (1.0 + adjustment), 4)))
-    weights["global_xP_modifier"] = new
+    weights = fpl_tools._load_weights()
+    before = fpl_tools.evaluate_calibration(rows, weights)
+    new_weights = fpl_tools.calibrate_weights(rows, weights, damping=DAMPING)
+    after = fpl_tools.evaluate_calibration(rows, new_weights)
 
     with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
-        json.dump(weights, f, indent=2)
+        json.dump(new_weights, f, indent=2)
 
+    changed = {k: f"{weights.get(k)} -> {new_weights.get(k)}" for k in new_weights
+               if round(weights.get(k, 0.0), 6) != round(new_weights.get(k, 0.0), 6)}
     print(
-        f"Auto-tune: n={n}, MAE={mae:.3f}, bias={bias:+.3%}, "
-        f"global_xP_modifier {old:.4f} -> {new:.4f} (adjustment {adjustment:+.4f}, damped to 3%)."
+        f"Calibration: n={n}, RMSE {before['rmse']:.4f} -> {after['rmse']:.4f}, "
+        f"deviance {before['deviance']:.4f} -> {after['deviance']:.4f}. "
+        f"Tuned: {changed or 'none'}."
     )
 
 

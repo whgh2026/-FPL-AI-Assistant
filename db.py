@@ -239,6 +239,60 @@ def save_chip_play(manager_id, gameweek, chip):
         return False
 
 
+def ensure_calibration_columns():
+    """Add Phase E feature-tracking columns to fpl_predictions (idempotent)."""
+    cols = [
+        ("minutes_floor", "DOUBLE PRECISION"),
+        ("cameo_mass", "DOUBLE PRECISION"),
+        ("rotation_variance", "DOUBLE PRECISION"),
+        ("dc_sensitivity", "DOUBLE PRECISION"),
+        ("base_pts", "DOUBLE PRECISION"),
+    ]
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            for name, typ in cols:
+                cur.execute(f"ALTER TABLE fpl_predictions ADD COLUMN IF NOT EXISTS {name} {typ}")
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def get_prediction_history():
+    """Return calibration rows: predicted_xp, actual_points and the feature columns."""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return []
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT predicted_xp, actual_points, base_pts, cameo_mass, rotation_variance, dc_sensitivity "
+                "FROM fpl_predictions WHERE actual_points IS NOT NULL"
+            )
+            rows = []
+            for r in cur.fetchall():
+                rows.append({
+                    "predicted_xp": r[0] or 0.0,
+                    "actual_points": r[1] or 0.0,
+                    "base_pts": r[2] if r[2] is not None else (r[0] or 0.0),
+                    "cameo_mass": r[3] or 0.0,
+                    "rotation_variance": r[4] or 0.0,
+                    "dc_sensitivity": r[5] or 0.0,
+                })
+            return rows
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
 def save_plan(manager_id, gameweek, plan):
     """Persist the multi-GW transfer schedule to the fpl_plans ledger."""
     try:

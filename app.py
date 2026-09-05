@@ -841,7 +841,7 @@ _SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
 _SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
 _SIGNAL_LABELS = {
     "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean sheet probabilities."),
-    "quant": ("FPL Quant Manager", "Self-calibrating machine learning engine. Employs multi-week algorithmic projections (xGI, DEFCON, probabilistic minutes, and fixture swing dynamics) with continuous post-deadline backtesting that automatically improves calibration week by week to drive institutional-grade rank performance."),
+    "quant": ("FPL Quant Manager", "Our proprietary internal quantitative engine. Built specifically for this application, it combines multi-week Poisson projections (xGI, DEFCON, probabilistic minutes, and Dixon–Coles fixture swings) with a continuous post-deadline machine learning feedback loop that dynamically self-tunes week by week."),
     "form": ("Recent Form Tracker", "Rolling 30-day baseline performance tracking sustained underlying shot volume and key involvements."),
 }
 
@@ -1122,7 +1122,7 @@ def _transfer_pair_html(moves) -> str:
 # Sidebar
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## ⚽ FPL Quant Manager")
+    st.markdown("## ⚽ FPL Quant Manager (Proprietary In-House Engine)")
     st.caption("Your data-driven pre-deadline quant engine")
 
     with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
@@ -1479,11 +1479,6 @@ with tab_planner:
                                 override_squad.append(selected[0])
     
             st.markdown("<br>", unsafe_allow_html=True)
-            rival_manager_id = st.text_input(
-                "Rival Manager ID (optional — Blocker mode shadows this team)",
-                key="rival_id_input",
-                help="In Phase 2 (GW26+), Conservative/Blocker mode aligns your squad with this rival's players to protect a lead.",
-            )
             if st.button("⚽ Run the Numbers (In the Engine We Trust)", type="primary", use_container_width=True, key="btn_analyse_override"):
                 
                 active_squad_ids = override_squad if show_override else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
@@ -1520,14 +1515,7 @@ with tab_planner:
                                 })
                             
                             holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
-                            rival_ids = None
-                            if rival_manager_id and rival_manager_id.strip():
-                                try:
-                                    _rv = fpl_tools.score_my_squad(rival_manager_id.strip(), GW_ID)
-                                    rival_ids = {p["player_id"] for p in _rv.get("squad", [])}
-                                except Exception:
-                                    rival_ids = None
-                            st.session_state["rival_ids"] = rival_ids
+                            rival_ids = st.session_state.get("rival_ids")
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
                                 analysed, float(bank_val), int(st.session_state.get("available_ft", 1)), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                                 holding_map=holding_map, current_gw=GW_ID,
@@ -1589,6 +1577,29 @@ with tab_planner:
                 ],
                 on_change=clear_transfer_cache,
             )
+
+            # Mini-league rival team (Blocker mode only) — rendered conditionally.
+            if risk_label == "Conservative":
+                rival_manager_id = st.text_input(
+                    "Mini-League Rival Team ID (Optional)",
+                    key="rival_id_input",
+                    help="Blocker mode shadows this rival's squad to protect a lead.",
+                )
+                _rk = rival_manager_id.strip() if rival_manager_id else ""
+                if _rk != st.session_state.get("_rival_resolved", ""):
+                    st.session_state["_rival_resolved"] = _rk
+                    if _rk:
+                        try:
+                            _rv = fpl_tools.score_my_squad(_rk, GW_ID)
+                            st.session_state["rival_ids"] = {p["player_id"] for p in _rv.get("squad", [])}
+                        except Exception:
+                            st.session_state["rival_ids"] = None
+                    else:
+                        st.session_state["rival_ids"] = None
+                    clear_transfer_cache()
+            else:
+                st.session_state["rival_ids"] = None
+                st.session_state["_rival_resolved"] = ""
 
             # Recalculate transfers if the strategy mode changed (cache-busted via the
             # on_change callback), so Step 3 never shows stale recommendations.
@@ -2034,6 +2045,36 @@ with tab_planner:
         )
         with st.container(border=True):
             st.caption("Here is your optimal starting formation, bench order, and captaincy based on your final decisions.")
+
+            # Live H2H vs Rival (if a rival was specified).
+            try:
+                _rival_id = st.session_state.get("rival_id_input")
+                if _rival_id and _rival_id.strip():
+                    live = fpl_tools.get_live_event(GW_ID)
+                    my_squad = st.session_state.get("squad_preview", {}).get("squad", [])
+                    _rv = fpl_tools.score_my_squad(_rival_id.strip(), GW_ID)
+                    h2h = fpl_tools.compute_h2h(my_squad, _rv.get("squad", []), live)
+                    if h2h.get("my_rows"):
+                        margin = h2h["margin"]
+                        colour = "#10b981" if margin >= 0 else "#ef4444"
+                        h2h_html = (
+                            '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;margin-bottom:10px;">'
+                            f'<div><div class="tc-meta">You</div><div style="font-weight:800;font-size:1.4rem;color:#E2E8F0;">{h2h["my_total"]}</div></div>'
+                            f'<div><div class="tc-meta">Margin</div><div style="font-weight:800;font-size:1.4rem;color:{colour};">{margin:+.1f}</div></div>'
+                            f'<div><div class="tc-meta">Rival</div><div style="font-weight:800;font-size:1.4rem;color:#E2E8F0;">{h2h["rival_total"]}</div></div>'
+                            '</div>'
+                        )
+                        for r in h2h["my_rows"]:
+                            prog = " 🕒" if r["in_progress"] else ""
+                            cap = " (C)" if r["multiplier"] > 1 else ""
+                            h2h_html += (
+                                f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e293b;">'
+                                f'<span style="color:#E2E8F0;">{r["name"]}{cap}{prog}</span>'
+                                f'<span style="font-weight:700;color:#E2E8F0;">{r["points"]}</span></div>'
+                            )
+                        st.markdown(_card(h2h_html, "🆚 Live H2H vs Rival"), unsafe_allow_html=True)
+            except Exception:
+                pass
             
             xi = man_final
             cap = xi["captain"]
