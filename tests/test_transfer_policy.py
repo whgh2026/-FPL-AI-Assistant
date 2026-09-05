@@ -64,7 +64,10 @@ class TransferPolicyTest(unittest.TestCase):
         squad = _squad()
         squad[14]["status"] = "Injured"
         squad[14]["xp"] = 0.0
-        res = _run(squad, {15: 0.0, 16: 12.0}, {15: 0.0, 16: 3.0}, {15: "Injured"}, free_transfers=1)
+        # Under the bench-decay model the injured 0.0-xP player is bench fodder
+        # (valued ~0), so the replacement must clearly upgrade the XI (20.0 vs 12.0)
+        # to clear the transfer-friction hurdle.
+        res = _run(squad, {15: 0.0, 16: 20.0}, {15: 0.0, 16: 5.0}, {15: "Injured"}, free_transfers=1)
         outs = [m["out"]["id"] for m in res["transfers"]]
         self.assertIn(15, outs)
 

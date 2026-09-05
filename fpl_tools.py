@@ -117,7 +117,16 @@ TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
 HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1: scales the -4 hit to the 4-GW horizon
 ROLL_HURDLE = 1.5                    # immediate-GW xP bar when holding exactly 1 FT
-GK_CHURN_FRICTION = 10.0             # heavy penalty on selling a GK when a fit starter exists
+# Bench slot activation probabilities. The reserve keeper (~5%) never comes on
+# for partial cameos, which is what permanently suppresses backup-GK churn
+# without a magic friction constant; the outfield bench slots are valued at a
+# uniform ~12% (the mean of B1 0.30 / B2 0.06 / B3 0.01) for Phase A.
+BENCH_GK_WEIGHT = 0.05
+BENCH_OUTFIELD_WEIGHT = 0.12
+# Market candidate shortlist entering the MIP: the manager's 15 plus the top
+# assets per position by horizon xP, so the starter/bench/captain binaries
+# (~135 pool entries) solve in well under a second.
+POOL_SHORTLIST = {"GK": 20, "DEF": 35, "MID": 35, "FWD": 30}
 CONSERVATIVE_OW_FLOOR = 5.0
 CONSERVATIVE_OW_PENALTY = 1.0
 AGGRESSIVE_OW_CEILING = 10.0
@@ -166,6 +175,37 @@ def _to_float(v: Any) -> float:
         return float(v or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _selling_price(purchase: float, current: float) -> float:
+    """FPL manager selling price in £m, using integer-tenths arithmetic.
+
+    FPL prices are integer tenths of a million (105 == £10.5m). On a profit the
+    manager keeps £0.1m for every full £0.2m of price rise, so the gain is
+    rounded DOWN to the nearest £0.1m; on a loss the player sells at the current
+    price. Integer division avoids floating-point rounding errors.
+    """
+    try:
+        p = int(round(purchase * 10))
+        c = int(round(current * 10))
+    except (TypeError, ValueError):
+        return float(current)
+    if c > p:
+        return (p + (c - p) // 2) / 10.0
+    return c / 10.0
+
+
+def _manager_sell_price(selling_price_raw: Any, purchase_price_raw: Any, now_cost_tenths: float) -> float:
+    """Manager-specific selling price in £m.
+
+    Prefer the API's `selling_price` (already the 50%-profit value); if it is
+    missing, recompute it from the purchase price with integer-tenths arithmetic.
+    """
+    if selling_price_raw is not None:
+        return _to_float(selling_price_raw) / 10.0
+    purchase = purchase_price_raw if purchase_price_raw is not None else now_cost_tenths
+    return _selling_price(_to_float(purchase) / 10.0, _to_float(now_cost_tenths) / 10.0)
+
 
 def _risk_profile(risk: str) -> Dict[str, float]:
     key = (risk or "balanced").lower().strip()
@@ -887,7 +927,6 @@ def _solve_squad(
     roll_value: float = 0.0,
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
-    gk_friction: Optional[float] = None,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -916,33 +955,47 @@ def _solve_squad(
     for t in {by_id[pid]["team_id"] for pid in ids}:
         prob += pulp.lpSum(x[pid] for pid in ids if by_id[pid]["team_id"] == t) <= 3, f"team_{t}"
 
-    # Objective. Back-up goalkeepers are heavily discounted (x0.1) so the solver
-    # treats the second GK as a budget enabler rather than a premium bench-warmer.
-    # The discount is removed when Bench Boost is active (every bench player scores).
+    # Objective. Back-up players are discounted to their autosub activation
+    # probability: the reserve keeper ~5% (never comes on for partial cameos) and
+    # the outfield bench slots a uniform ~12% for Phase A. The discount is removed
+    # under Bench Boost (every bench player scores) — but captaincy (one starter
+    # scores double) applies in every gameweek.
     gk_ids = [pid for pid in ids if by_id[pid]["position"] == "GK"]
-    xp_expr = pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in ids if by_id[pid]["position"] != "GK")
+    outfield_ids = [pid for pid in ids if by_id[pid]["position"] != "GK"]
 
     if bench_boost or not gk_ids:
-        xp_expr += pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in gk_ids)
+        # Bench Boost (or no keeper pool): every selected player counts fully.
+        xp_expr = pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in ids)
+        start = None
     else:
-        # Binary role assignment: exactly one keeper starts (1.0x xP) and exactly
-        # one keeper is the bench option (0.1x xP) — so the backup is budget fodder.
-        gk_start = pulp.LpVariable.dicts("gk_start", gk_ids, cat="Binary")
-        gk_bench = pulp.LpVariable.dicts("gk_bench", gk_ids, cat="Binary")
-        for pid in gk_ids:
-            # A selected keeper is either the starter or the bench option.
-            prob += gk_start[pid] + gk_bench[pid] == x[pid], f"gk_role_{pid}"
-        prob += pulp.lpSum(gk_start[pid] for pid in gk_ids) == 1, "one_start_gk"
-        prob += pulp.lpSum(gk_bench[pid] for pid in gk_ids) == 1, "one_bench_gk"
-        xp_expr += pulp.lpSum(by_id[pid]["xp"] * gk_start[pid] for pid in gk_ids)
-        xp_expr += 0.1 * pulp.lpSum(by_id[pid]["xp"] * gk_bench[pid] for pid in gk_ids)
+        # Role assignment: exactly 11 starters (1 GK + 10 outfield) at 1.0x, the
+        # remaining 4 bench slots at their activation-probability weight.
+        start = pulp.LpVariable.dicts("start", ids, cat="Binary")
+        for pid in ids:
+            prob += start[pid] <= x[pid], f"start_le_x_{pid}"
+        prob += pulp.lpSum(start[pid] for pid in ids) == 11, "eleven_starters"
+        prob += pulp.lpSum(start[pid] for pid in gk_ids) == 1, "one_start_gk"
+        xp_expr = pulp.lpSum(by_id[pid]["xp"] * start[pid] for pid in ids)
+        xp_expr += BENCH_OUTFIELD_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid]) for pid in outfield_ids)
+        xp_expr += BENCH_GK_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid]) for pid in gk_ids)
+
+    # Captaincy uplift: the armband doubles one starter's score every gameweek.
+    # Modelled in the solver so an incoming armband-winner's xP is valued ~2x.
+    captain = pulp.LpVariable.dicts("captain", ids, cat="Binary")
+    prob += pulp.lpSum(captain[pid] for pid in ids) == 1, "one_captain"
+    for pid in ids:
+        if start is not None:
+            prob += captain[pid] <= start[pid], f"captain_le_start_{pid}"
+        else:
+            prob += captain[pid] <= x[pid], f"captain_le_x_{pid}"
+    xp_expr += pulp.lpSum(by_id[pid]["xp"] * captain[pid] for pid in ids)
 
     # Positional transfer friction: subtract a penalty for every player sold
     # ((1 - x[pid]) == 1 for outgoing players). This stops the solver burning a
     # transfer/hit on a GK (1.5) or DEF (0.5) unless the xP uplift is substantial.
     if must_include_ids is not None:
         friction = pulp.lpSum(
-            (gk_friction if gk_friction is not None and by_id[pid]["position"] == "GK" else TRANSFER_FRICTION.get(by_id[pid]["position"], 0.0)) * (1 - x[pid])
+            TRANSFER_FRICTION.get(by_id[pid]["position"], 0.0) * (1 - x[pid])
             for pid in must_include_ids if pid in by_id
         )
         xp_expr = xp_expr - friction
@@ -1065,7 +1118,7 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
             "team": teams_by_id.get(p_data["team"], "?"),
             "position": POS_MAP.get(p_data["element_type"], "?"),
             "price": p_data["now_cost"] / 10.0,
-            "selling_price": _to_float(pick.get("selling_price", p_data["now_cost"])) / 10.0,
+            "selling_price": _manager_sell_price(pick.get("selling_price"), pick.get("purchase_price"), p_data["now_cost"]),
             "purchase_price": _to_float(pick.get("purchase_price", p_data["now_cost"])) / 10.0,
             "xp": xp,
             "status": note,
@@ -1137,18 +1190,16 @@ def suggest_transfers_for_custom_squad(
         max_transfers = free_transfers + MAX_HIT_TRANSFERS
     else:
         max_transfers = free_transfers
-    has_fit_gk = any(
-        p.get("position") == "GK"
-        and _to_float(elements_by_id.get(p.get("player_id"), {}).get("minutes", 0)) > 60
-        and elements_by_id.get(p.get("player_id"), {}).get("status", "a") not in ("i", "s")
-        for p in squad
-    )
-    gk_friction = GK_CHURN_FRICTION if has_fit_gk else None
     current_ids = [p["player_id"] for p in squad]
-    sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price", 0.0)) for p in squad}
+    sell_by_id = {}
+    for p in squad:
+        sp = p.get("selling_price")
+        sell_by_id[p["player_id"]] = sp if sp is not None else _selling_price(
+            p.get("purchase_price", p.get("price", 0.0)), p.get("price", 0.0)
+        )
     pool = []
     seen = set()
-    
+
     for pid in current_ids:
         e = elements_by_id.get(pid)
         if not e:
@@ -1165,6 +1216,11 @@ def suggest_transfers_for_custom_squad(
                                 holding_map=holding_map))
         seen.add(pid)
 
+    # Candidate shortlist: the full market (~700 players) is dominated by ~400
+    # irrelevant non-starters. Restrict the MIP to the manager's 15 plus the top
+    # assets per position by horizon xP, so the starter/bench/captain binaries
+    # solve in well under a second.
+    incoming_by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     for e in bootstrap["elements"]:
         if e["id"] in seen:
             continue
@@ -1174,12 +1230,15 @@ def suggest_transfers_for_custom_squad(
         xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
         if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable", "No minutes"):
             continue
-        xp = _ownership_adjust(e, xp, risk)
-        xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
-        fdr = _player_fdr_list(e, fixture_lookup, event)
-        pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
-                                holding_map=holding_map))
-        seen.add(e["id"])
+        incoming_by_pos[pos].append((_ownership_adjust(e, xp, risk), note, e))
+    for pos, entries in incoming_by_pos.items():
+        entries.sort(key=lambda t: t[0], reverse=True)
+        for xp, note, e in entries[:POOL_SHORTLIST.get(pos, 30)]:
+            xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
+            fdr = _player_fdr_list(e, fixture_lookup, event)
+            pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
+                                    holding_map=holding_map))
+            seen.add(e["id"])
 
     # Total purchasing power = Bank + sum(selling price of the current squad).
     total_sell = sum(
@@ -1236,7 +1295,6 @@ def suggest_transfers_for_custom_squad(
         bench_boost=False,
         roll_value=roll_value,
         holding_map=holding_map, current_gw=current_gw,
-        gk_friction=gk_friction,
     )
     std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
     # Buffer the hold strategy: the decision net (which includes the virtual
@@ -1529,3 +1587,43 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
         "vice_captain": vice,
         "total_xp": total_xp,
     }
+
+
+def get_regression_candidates(min_minutes: int = 360, threshold: float = 1.5) -> Dict[str, Any]:
+    """Regression-to-the-mean candidates from over/under-performance vs xG+xA.
+
+    R_i = (goals + assists - (xG + xA)) / sqrt(xG + xA + 1). A player far above
+    +threshold is over-performing (SELL-HIGH); far below -threshold is
+    under-performing (BUY-LOW). Season-to-date totals from the bootstrap.
+    """
+    bootstrap = _get_bootstrap()
+    teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
+    out: Dict[str, List[Dict[str, Any]]] = {"sell_high": [], "buy_low": []}
+    for e in bootstrap.get("elements", []):
+        if _to_float(e.get("minutes")) < min_minutes:
+            continue
+        goals = _to_float(e.get("goals_scored"))
+        assists = _to_float(e.get("assists"))
+        xg = _to_float(e.get("expected_goals"))
+        xa = _to_float(e.get("expected_assists"))
+        residual = (goals + assists - xg - xa) / math.sqrt(xg + xa + 1.0)
+        row = {
+            "id": e["id"],
+            "name": f"{e.get('first_name', '')} {e.get('second_name', '')}".strip(),
+            "team": teams_by_id.get(e.get("team"), "?"),
+            "position": POS_MAP.get(e.get("element_type"), "?"),
+            "price": _to_float(e.get("now_cost")) / 10.0,
+            "residual": round(residual, 2),
+            "goals": int(round(goals)),
+            "assists": int(round(assists)),
+            "xg": round(xg, 2),
+            "xa": round(xa, 2),
+            "minutes": int(_to_float(e.get("minutes"))),
+        }
+        if residual >= threshold:
+            out["sell_high"].append(row)
+        elif residual <= -threshold:
+            out["buy_low"].append(row)
+    out["sell_high"].sort(key=lambda r: r["residual"], reverse=True)
+    out["buy_low"].sort(key=lambda r: r["residual"])
+    return out

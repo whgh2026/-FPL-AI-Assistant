@@ -125,3 +125,41 @@ def get_or_backfill_manager_history(manager_id, current_gw):
             conn.close()
     except Exception:
         return {}
+
+
+def log_decision(manager_id, gameweek, action, delta_xp, hits=0, chip=None, transfers=None):
+    """Persist a transfer decision and its expected xP delta for audit / ΔxP capture.
+
+    The `decision_log` table is created idempotently on first use, so no separate
+    migration step is required.
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS decision_log ("
+                "id BIGSERIAL PRIMARY KEY,"
+                "manager_id TEXT NOT NULL,"
+                "gameweek INTEGER NOT NULL,"
+                "action TEXT NOT NULL,"
+                "delta_xp DOUBLE PRECISION,"
+                "hits INTEGER DEFAULT 0,"
+                "chip TEXT,"
+                "transfers TEXT,"
+                "created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+            cur.execute(
+                "INSERT INTO decision_log "
+                "(manager_id, gameweek, action, delta_xp, hits, chip, transfers) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (str(manager_id), int(gameweek), action, delta_xp, int(hits or 0), chip, transfers),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False

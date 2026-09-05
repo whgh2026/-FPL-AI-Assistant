@@ -7,7 +7,7 @@ import dateutil.parser
 from dateutil import tz
 import datetime
 import time
-from db import get_or_backfill_manager_history
+from db import get_or_backfill_manager_history, log_decision
 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
@@ -703,6 +703,22 @@ def _momentum_row_html(r, up: bool = True) -> str:
         f'<div class="tc-meta">{r["pos"]} · £{r["price"]:.1f}m · net {r["net"]:+,}</div>'
         f'</div>'
         f'{arrow} {badge}'
+        f'</div>'
+    )
+
+
+def _regression_row(r, high: bool) -> str:
+    color = "#ef4444" if high else "#10b981"
+    arrow = "🔻" if high else "🔺"
+    return (
+        f'<div style="display:flex;justify-content:space-between;align-items:center;'
+        f'padding:7px 0;border-bottom:1px solid #1e293b;">'
+        f'<div style="min-width:0;">'
+        f'<div style="font-weight:700;color:#E2E8F0;">{r["name"]}</div>'
+        f'<div class="tc-meta">{r["position"]} · {r["team"]} · £{r["price"]:.1f}m</div>'
+        f'<div class="tc-meta">G {r["goals"]} A {r["assists"]} vs xG {r["xg"]} xA {r["xa"]}</div>'
+        f'</div>'
+        f'<div style="font-weight:800;color:{color};font-size:1.05rem;white-space:nowrap;">{arrow} {r["residual"]:+.2f}</div>'
         f'</div>'
     )
 
@@ -1507,7 +1523,21 @@ with tab_planner:
                                 analysed, float(bank_val), int(st.session_state.get("available_ft", 1)), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                                 holding_map=holding_map, current_gw=GW_ID,
                                 allow_hits=st.session_state.get("ov_allow_hits", False))
-                            
+
+                            try:
+                                log_decision(
+                                    manager_id.strip(), GW_ID, "plan",
+                                    float(transfers.get("net_gain", 0.0)),
+                                    hits=int(transfers.get("hits", 0)),
+                                    chip=None,
+                                    transfers="; ".join(
+                                        f"{m['out']['name']}->{m['in']['name']}"
+                                        for m in transfers.get("standard_transfers", [])
+                                    ) or "HOLD",
+                                )
+                            except Exception:
+                                pass
+
                             st.session_state["override_analysis"] = {
                                 "analysed_squad": analysed,
                                 "bank": float(bank_val),
@@ -1649,6 +1679,11 @@ with tab_planner:
                     analysed_current = ov["analysed_squad"]
                     lineup = fpl_tools.select_starting_xi(analysed_current)
                     lineup["confirmed_chip"] = confirmed_chip
+                    try:
+                        log_decision(manager_id.strip(), GW_ID, "hold", 0.0,
+                                     hits=0, chip=confirmed_chip, transfers="HOLD")
+                    except Exception:
+                        pass
                     st.session_state["manual_final"] = lineup
                     st.rerun()
     
@@ -1671,6 +1706,16 @@ with tab_planner:
                         })
                     lineup = fpl_tools.select_starting_xi(final_squad)
                     lineup["confirmed_chip"] = confirmed_chip
+                    try:
+                        log_decision(
+                            manager_id.strip(), GW_ID, "accept",
+                            float(tr.get("net_gain", 0.0)),
+                            hits=int(tr.get("hits", 0)),
+                            chip=confirmed_chip,
+                            transfers="; ".join(f"{m['out']['name']}->{m['in']['name']}" for m in moves) or "HOLD",
+                        )
+                    except Exception:
+                        pass
                     st.session_state["manual_final"] = lineup
                     st.rerun()
 
@@ -2169,6 +2214,27 @@ with tab_radar:
         st.markdown(_card(grid, f"{kind} · sorted by {sort_label}"), unsafe_allow_html=True)
     else:
         st.info("No players match this filter.")
+
+    st.markdown("#### 🧲 Regression-to-Mean Flags (SELL-HIGH / BUY-LOW)")
+    try:
+        reg = fpl_tools.get_regression_candidates()
+        c_sell, c_buy = st.columns(2)
+        with c_sell:
+            sell_rows = "".join(_regression_row(r, True) for r in reg["sell_high"][:8])
+            st.markdown(
+                _card(sell_rows or '<div style="color:#64748b;">No clear over-performers right now.</div>',
+                      "📉 Over-performing — SELL-HIGH candidates"),
+                unsafe_allow_html=True,
+            )
+        with c_buy:
+            buy_rows = "".join(_regression_row(r, False) for r in reg["buy_low"][:8])
+            st.markdown(
+                _card(buy_rows or '<div style="color:#64748b;">No clear under-performers right now.</div>',
+                      "📈 Under-performing — BUY-LOW candidates"),
+                unsafe_allow_html=True,
+            )
+    except Exception:
+        pass
     st.markdown(get_caveat_html(), unsafe_allow_html=True)
 
     
