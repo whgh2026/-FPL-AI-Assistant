@@ -131,8 +131,26 @@ class ChipSchedulingTest(unittest.TestCase):
         self.assertGreater(tc17, tc19)
 
     def test_forced_exercise(self):
-        self.assertEqual(fpl_tools._chip_reservation_threshold("Wildcard", 18), 0.0)
+        """At the set deadline the reservation collapses: use it or lose it.
+
+        Was: assertEqual(threshold("Wildcard", 18), 0.0). The old function
+        returned a hard 0.0 for EVERY gw >= 18 -- which is the bug, because that
+        includes GW20-38 where the second chip set lives, so from GW18 onward
+        the top-ranked chip cleared its threshold every week for the rest of the
+        season. The intent (collapse toward the deadline) is preserved; the
+        assertion now tests that intent rather than the constant.
+        """
+        self.assertLess(fpl_tools._chip_reservation_threshold("Wildcard", 18), 0.1)
+        self.assertEqual(fpl_tools._chip_reservation_threshold("Wildcard", 19), 0.0)
         self.assertEqual(fpl_tools._chip_reservation_threshold("Triple Captain", 19), 0.0)
+
+    def test_set2_reservation_resets(self):
+        """The second chip set is a fresh option with its own deadline."""
+        at_deadline = fpl_tools._chip_reservation_threshold("Wildcard", 19)
+        just_after = fpl_tools._chip_reservation_threshold("Wildcard", 20)
+        self.assertEqual(at_deadline, 0.0)
+        self.assertGreater(just_after, 5.0, "Set 2 must not inherit Set 1's spent clock")
+        self.assertEqual(fpl_tools._chip_reservation_threshold("Wildcard", 38), 0.0)
 
     def test_inventory_expiry(self):
         inv1 = fpl_tools._chip_inventory(19)

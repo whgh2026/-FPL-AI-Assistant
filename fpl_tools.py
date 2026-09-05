@@ -1637,6 +1637,7 @@ def _solve_squad(
     phase: int = 1,
     rival_ids: Optional[set] = None,
     cvar_scenarios: Optional[Dict[int, List[float]]] = None,
+    bench_cap: Optional[float] = None,
 ) -> Tuple[Optional[List[int]], Optional[float], Dict[str, float]]:
     if not HAS_PULP:
         return None, None, {}
@@ -1705,6 +1706,15 @@ def _solve_squad(
         xp_expr += BENCH_B1_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * b1[pid] for pid in outfield_ids)
         xp_expr += BENCH_DEAD_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid] - b1[pid]) for pid in outfield_ids)
         xp_expr += BENCH_GK_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid]) for pid in gk_ids)
+
+        # Bench cost cap. Without it the planner is happy to build a flat,
+        # expensive bench that scores nothing in a normal gameweek. It ramps
+        # into a scheduled Bench Boost rather than being flat, because a hard
+        # cap would make it impossible to prepare for the chip at all.
+        if bench_cap is not None:
+            prob += pulp.lpSum(
+                by_id[pid]["price"] * (x[pid] - start[pid]) for pid in ids
+            ) <= bench_cap, "bench_cap"
 
     # Captaincy uplift: the armband doubles one starter's score every gameweek.
     # Modelled in the solver so an incoming armband-winner's xP is valued ~2x.
@@ -1940,12 +1950,50 @@ def _solve_squad(
     components = _LAST_SOLVE["components"]
     if status == "Optimal":
         return selected, pulp.value(prob.objective), components
+
     # A time-limited incumbent is usable interactively but never in tests: the
     # deterministic profile must fail loudly rather than hand back a squad that
     # varies with machine load.
-    if _SOLVER_PROFILE == "interactive" and len(selected) == sum(POS_COUNTS.values()):
+    #
+    # "Not Solved" is the only non-optimal status that carries a usable
+    # incumbent. Infeasible / Unbounded / Undefined leave STALE variable values
+    # from an earlier relaxation, and those values can look superficially
+    # plausible: an infeasible solve was observed returning 15 selected players
+    # with a TEN-man starting XI, because the previous check only counted the
+    # squad. Validate the solution itself, not just its length.
+    if _SOLVER_PROFILE == "interactive" and status == "Not Solved" and _is_valid_squad(selected, by_id, start):
         return selected, pulp.value(prob.objective), components
     return None, None, {}
+
+
+def _is_valid_squad(selected, by_id, start) -> bool:
+    """Structural check on a solver result before it is trusted."""
+    if not selected or len(selected) != sum(POS_COUNTS.values()):
+        return False
+    counts = {}
+    for pid in selected:
+        counts[by_id[pid]["position"]] = counts.get(by_id[pid]["position"], 0) + 1
+    if counts != POS_COUNTS:
+        return False
+    clubs = {}
+    for pid in selected:
+        clubs[by_id[pid]["team_id"]] = clubs.get(by_id[pid]["team_id"], 0) + 1
+    if clubs and max(clubs.values()) > 3:
+        return False
+    if start is not None:
+        xi = [pid for pid in selected
+              if start[pid].varValue is not None and start[pid].varValue > 0.5]
+        if len(xi) != 11:
+            return False
+        form = {}
+        for pid in xi:
+            form[by_id[pid]["position"]] = form.get(by_id[pid]["position"], 0) + 1
+        if form.get("GK", 0) != 1:
+            return False
+        for pos, lo, hi in (("DEF", 3, 5), ("MID", 2, 5), ("FWD", 1, 3)):
+            if not lo <= form.get(pos, 0) <= hi:
+                return False
+    return True
 
 def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str, Any]:
     manager_id = _clean_manager_id(manager_id)
@@ -2084,15 +2132,107 @@ def _chip_inventory(current_gw):
     return {"set1": set1, "set2": set2, "expiry_gw": CHIP_SET1_EXPIRY_GW}
 
 
+CHIP_RESERVATION_BASE = {"Wildcard": 12.0, "Free Hit": 6.0,
+                         "Bench Boost": 5.0, "Triple Captain": 4.0}
+CHIP_SET2_EXPIRY_GW = 38
+# Wildcard timing prior. Fixture swings guide it, but a Set-1 wildcard has to
+# last until GW19, so a strong three-week swing at GW4 is a trap: it buys a
+# squad built for September and leaves it stale through autumn. The envelope
+# penalises firing outside the window where the payback historically lands.
+BENCH_CAP_STANDARD = 16.0
+# T-2 and T-1 before a scheduled Bench Boost, then uncapped in the week itself.
+BENCH_CAP_RAMP = {2: 19.0, 1: 22.0, 0: None}
+WILDCARD_WINDOW = (7, 14)
+WILDCARD_ENVELOPE_PENALTY = 6.0
+
+
+def _bench_cap_for(current_gw, bench_boost_gw=None) -> Optional[float]:
+    """Bench budget for this gameweek, ramping into a planned Bench Boost."""
+    if bench_boost_gw is None:
+        return BENCH_CAP_STANDARD
+    weeks_out = int(bench_boost_gw) - int(current_gw)
+    if weeks_out in BENCH_CAP_RAMP:
+        return BENCH_CAP_RAMP[weeks_out]
+    return BENCH_CAP_STANDARD
+
+
+# The API returns chip names in its own vocabulary; the UI and this module use
+# display names. Normalising in one place stops a played-chip lookup silently
+# missing because it compared "3xc" against "Triple Captain".
+_CHIP_API_NAMES = {
+    "wildcard": "Wildcard",
+    "freehit": "Free Hit",
+    "free_hit": "Free Hit",
+    "bboost": "Bench Boost",
+    "benchboost": "Bench Boost",
+    "3xc": "Triple Captain",
+    "triplecaptain": "Triple Captain",
+}
+
+
+def normalise_chip_name(name) -> Optional[str]:
+    """API or display chip name -> canonical display name."""
+    if not name:
+        return None
+    key = str(name).strip().lower().replace(" ", "").replace("-", "")
+    if key in _CHIP_API_NAMES:
+        return _CHIP_API_NAMES[key]
+    for chip in CHIPS:
+        if chip.lower().replace(" ", "") == key:
+            return chip
+    return None
+
+
+def _chip_set_bounds(gw: int) -> Tuple[int, int]:
+    """(first, last) gameweek of the chip set `gw` falls in."""
+    gw = int(gw or 1)
+    if gw <= CHIP_SET1_EXPIRY_GW:
+        return 1, CHIP_SET1_EXPIRY_GW
+    return CHIP_SET1_EXPIRY_GW + 1, CHIP_SET2_EXPIRY_GW
+
+
 def _chip_reservation_threshold(chip: str, gw: int) -> float:
-    """Declining reservation hurdle as the Set-1 deadline approaches."""
-    base = {"Wildcard": 55.0, "Free Hit": 20.0, "Bench Boost": 15.0, "Triple Captain": 15.0}.get(chip, 99.0)
+    """Reservation value of holding `chip`, decaying toward its set's deadline.
+
+    Two defects in the previous three-step version:
+
+    * It returned 0.0 for EVERY gw >= 18 -- including GW20-38, where the second
+      chip set lives. From GW18 onward the top-ranked chip therefore cleared its
+      threshold every single week for the rest of the season, so the engine
+      recommended playing a chip continuously for more than half the campaign.
+    * The bases were on a different scale from the scores they gated. Triple
+      Captain scored one captain's single-gameweek xP, ~6-9, against a threshold
+      of 15.0 -- so it could not be recommended before GW15 no matter how good
+      the fixture was.
+
+    Now a smooth decay to zero at the set deadline, restarting for Set 2, with
+    per-chip bases on the same one-week scale as the (now commensurate) scores.
+    """
     gw = int(gw)
-    if gw >= 18:
-        return 0.0   # forced exercise: play on any positive gain
-    if gw >= 15:
-        return 10.0  # dropped hurdle
-    return base
+    first, last = _chip_set_bounds(gw)
+    base = CHIP_RESERVATION_BASE.get(chip, 99.0)
+    span = max(1, last - first)
+    remaining = max(0.0, min(1.0, (last - gw) / span))
+    # eta > 1 decays slowly at first, then collapses near the deadline: hold the
+    # option while it still has time to pay, then use it rather than lose it.
+    eta = 2.0 if chip == "Wildcard" else 1.5
+    return round(base * (remaining ** eta), 2)
+
+
+def _wildcard_timing_penalty(gw: int, swing_scores=None) -> float:
+    """Extra reservation applied to a wildcard fired outside its window.
+
+    Purely dynamic timing (fire wherever the fixture swing peaks) has a known
+    failure mode: a good three-week swing early buys a squad that then has to
+    survive the rest of the half. The window is an empirical prior, not a hard
+    band -- a large enough swing still clears it.
+    """
+    gw = int(gw)
+    lo, hi = WILDCARD_WINDOW
+    if lo <= gw <= hi or gw > CHIP_SET1_EXPIRY_GW:
+        return 0.0
+    distance = (lo - gw) if gw < lo else (gw - hi)
+    return round(WILDCARD_ENVELOPE_PENALTY * min(1.0, distance / 4.0), 2)
 
 
 def get_played_chips(manager_id: str) -> List[str]:
@@ -2102,7 +2242,17 @@ def get_played_chips(manager_id: str) -> List[str]:
         resp = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10)
         resp.raise_for_status()
         chips = resp.json().get("chips") or []
-        return [c.get("name") for c in chips if c.get("name")]
+        # Normalised to display names. The API returns its own vocabulary --
+        # "wildcard", "freehit", "bboost", "3xc" -- which was being compared
+        # directly against "Wildcard", "Free Hit", "Bench Boost", "Triple
+        # Captain". Nothing ever matched, so a played chip stayed on the
+        # available list and could be recommended a second time.
+        out = []
+        for c in chips:
+            name = normalise_chip_name(c.get("name"))
+            if name and name not in out:
+                out.append(name)
+        return out
     except Exception:
         return []
 
@@ -2431,6 +2581,7 @@ def suggest_transfers_for_custom_squad(
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
     allow_hits: bool = False,
+    bench_boost_gw: Optional[int] = None,
     rival_ids: Optional[set] = None,
 ) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
@@ -2623,6 +2774,14 @@ def suggest_transfers_for_custom_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_charge, "max_transfers": max_transfers},
         bench_boost=False,
+        # No bench cap on the standard weekly solve. The fifteen are fixed here,
+        # so the ONLY way to satisfy a bench-cost cap is to change who STARTS --
+        # which forces price into a lineup decision that should be made on
+        # expected points. Measured on the fixture: a GBP 16m cap cut the XI by
+        # 12.7 points, RAISED bench cost (it benched cheap players to start
+        # expensive ones), and where the squad could not comply at all it made
+        # the program infeasible. The cap belongs on squad CONSTRUCTION, which is
+        # what the chip solves below do.
         holding_map=holding_map, current_gw=current_gw,
         eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
         cvar_scenarios=stress_scenarios,
@@ -2657,11 +2816,41 @@ def suggest_transfers_for_custom_squad(
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
                         "hurdle_scale": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
+            bench_cap=_bench_cap_for(current_gw, bench_boost_gw),
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
             cvar_scenarios=stress_scenarios,
         )
         unl_moves, unl_hits, unl_net, unl_cost, _unl_bd = _get_moves(unl_selected, True, unl_parts)
+
+    # Free Hit lasts exactly ONE gameweek -- the squad reverts afterwards -- so
+    # it must be solved and scored on the single gameweek. It was previously
+    # sharing the unlimited horizon solve, valuing a one-week squad over four
+    # weeks and inflating it ~3x against Bench Boost and Triple Captain, which
+    # are correctly scored over one.
+    fh_moves, fh_hits, fh_net, fh_cost = [], 0, 0.0, 0.0
+    fh_squad_ids = []
+    if "Free Hit" in eval_chips:
+        fh_pool = []
+        for entry in pool:
+            e = dict(entry)
+            e["xp"] = e.get("xp_gw", e["xp"])     # one week, not the horizon
+            fh_pool.append(e)
+        fh_selected, _fh_obj, fh_parts = _solve_squad(
+            fh_pool, budget=budget, must_include_ids=set(current_ids),
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
+                        "hurdle_scale": 0.0},
+            bench_boost=False,
+            holding_map=holding_map, current_gw=current_gw,
+            eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
+        )
+        fh_squad_ids = fh_selected or []
+        if fh_selected:
+            fh_by_id = {e["id"]: e for e in fh_pool}
+            fh_xi = sorted((fh_by_id[i]["xp"] for i in fh_selected), reverse=True)[:11]
+            cur_xi = sorted((fh_by_id[i]["xp"] for i in current_ids if i in fh_by_id),
+                            reverse=True)[:11]
+            fh_net = round(sum(fh_xi) - sum(cur_xi), 2)
 
     # Wildcard is a full-season chip: re-solve with a scarcity penalty so it is
     # only deployed when the rebuilt squad decisively outscores the current one.
@@ -2672,6 +2861,7 @@ def suggest_transfers_for_custom_squad(
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
                         "hurdle_scale": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
+            bench_cap=_bench_cap_for(current_gw, bench_boost_gw),
             scarcity_cost=WILDCARD_SCARCITY_COST,
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
@@ -2684,7 +2874,23 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     sold_ids = [m["out"]["id"] for m in std_moves]
     bought_ids = [m["in"]["id"] for m in std_moves]
-    std_squad = [p for p in squad if p["player_id"] not in sold_ids]
+    # Held players keep the caller's dict, but their xP is RECOMPUTED here.
+    # select_starting_xi ranks on "xp", and the Bench Boost and Triple Captain
+    # scores are read off the resulting bench and captain -- so if a caller
+    # omitted or stale-filled that field, both chips silently scored 0.0 and the
+    # lineup was chosen on arbitrary values. The engine should not depend on its
+    # caller to supply its own projections.
+    std_squad = []
+    for p in squad:
+        if p["player_id"] in sold_ids:
+            continue
+        held = dict(p)
+        fpl_p = elements_by_id.get(p["player_id"])
+        if fpl_p:
+            xp_h, note_h = _player_xp(fpl_p, fixture_lookup, event=event)
+            held["xp"] = xp_h
+            held.setdefault("status", note_h)
+        std_squad.append(held)
     
     current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
     
@@ -2722,16 +2928,37 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     # 4. Ultra-Strict Chip Scoring & Ranking
     # ==============================================================
+    # Every chip scored as the TOTAL extra points playing it now delivers, over
+    # the window it actually applies to. Previously Wildcard and Free Hit were
+    # measured over the 4-gameweek horizon while Bench Boost and Triple Captain
+    # were measured over one, so the first two were ~3x inflated by construction
+    # and almost always outranked the others.
+    #
+    # Wildcard legitimately keeps the horizon: the squad it builds persists.
+    # That is a real difference in what the chip buys, not a unit mismatch.
     chip_scores = {}
     if "Wildcard" in eval_chips:
         chip_scores["Wildcard"] = round(wc_net - std_net, 2)
     if "Free Hit" in eval_chips:
-        chip_scores["Free Hit"] = round(unl_net - std_net, 2)
+        chip_scores["Free Hit"] = round(fh_net, 2)
     if "Bench Boost" in eval_chips:
-        chip_scores["Bench Boost"] = round(sum(p['xp'] for p in std_best_xi['bench']), 2)
+        chip_scores["Bench Boost"] = round(sum(p.get("xp", 0.0) for p in std_best_xi["bench"]), 2)
     if "Triple Captain" in eval_chips:
-        cap = std_best_xi.get('captain')
-        chip_scores["Triple Captain"] = cap.get('xp', 0.0) if cap else 0.0
+        cap = std_best_xi.get("captain")
+        chip_scores["Triple Captain"] = round(cap.get("xp", 0.0) if cap else 0.0, 2)
+
+    # Free Hit is also the blank-gameweek escape hatch, which is its dominant
+    # modern use -- rescuing a week where much of the squad has no fixture. The
+    # calendar detector built in Stage 5 is exactly this trigger.
+    fh_emergency = False
+    try:
+        cal = _fixture_calendar(fixture_lookup, event, 1).get(event, {})
+        playing = sum(1 for p in squad
+                      if _gw_fixtures(fixture_lookup.get(
+                          elements_by_id.get(p["player_id"], {}).get("team"), []), event))
+        fh_emergency = bool(cal.get("is_bgw")) and playing <= 8
+    except Exception:
+        fh_emergency = False
 
     ranked_chips = sorted(chip_scores.items(), key=lambda x: x[1], reverse=True)
     
@@ -2747,9 +2974,17 @@ def suggest_transfers_for_custom_squad(
 
     for chip_name, score in ranked_chips:
         threshold = _chip_reservation_threshold(chip_name, current_gw)
+        if chip_name == "Wildcard":
+            # Empirical timing prior: a Set-1 wildcard must last to GW19, so a
+            # strong early swing is a trap. Additive, not a hard band -- a large
+            # enough gain still clears it.
+            threshold += _wildcard_timing_penalty(current_gw)
+        if chip_name == "Free Hit" and fh_emergency:
+            # A blank gameweek that guts the squad is what the chip is for.
+            threshold = 0.0
         passed_threshold = score >= threshold
-        
-        # Wildcard exception: Lower xP barrier if squad is ravaged by injuries
+
+        # Wildcard exception: lower the barrier if the squad is injury-ravaged.
         if chip_name == "Wildcard" and not passed_threshold:
             if score >= 25.0 and current_out_statuses >= 4:
                 passed_threshold = True
