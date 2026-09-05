@@ -71,16 +71,26 @@ class DixonColesTest(unittest.TestCase):
         return fpl_tools._fit_dixon_coles(fixtures, decay=0.0, tau=0.1, iterations=500, lr=0.1)
 
     def test_recovers_attack_ordering(self):
-        ratings, _gamma, _rho = self._fit()
+        ratings, _gamma, _rho, _mu = self._fit()
         self.assertGreater(ratings[1]["att"], ratings[4]["att"])
 
     def test_recovers_defence_ordering(self):
-        ratings, _gamma, _rho = self._fit()
-        # Strong defence (team 2) has a lower `def` than weak defence (team 3).
+        ratings, _gamma, _rho, _mu = self._fit()
+        # A HIGHER `def` is a BETTER defence: the generator above uses
+        # lh = exp(att[h] - dfn[a]), so a large dfn[a] suppresses the goals
+        # scored against team a. Team 3 (dfn = +0.3) is therefore the strong
+        # defence and team 2 (dfn = -0.4) the weak one.
+        #
+        # The previous comment here had those roles the wrong way round. The
+        # assertion was still correct, so the test passed -- but that same
+        # misreading is what produced `dc_def = 3.0 - def*scale` in
+        # _team_attack_def_ratings, which boosted attackers against elite
+        # defences for the whole season. Naming the roles explicitly so the
+        # convention cannot be misread again.
         self.assertLess(ratings[2]["def"], ratings[3]["def"])
 
     def test_home_advantage_positive(self):
-        _ratings, gamma, _rho = self._fit()
+        _ratings, gamma, _rho, _mu = self._fit()
         self.assertGreater(gamma, 0.0)
 
 

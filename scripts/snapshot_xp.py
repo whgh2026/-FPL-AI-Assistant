@@ -59,7 +59,8 @@ def main() -> None:
         finally:
             fpl_tools._WEIGHTS_CACHE = _orig_cache
         rows.append((e["id"], gw, e.get("web_name", "?"), pos, teams_by_id.get(e["team"], "?"),
-                     float(xp), float(base_xp), cameo_mass, rotation_variance, 0.0, minutes_floor))
+                     float(xp), float(base_xp), cameo_mass, rotation_variance, 0.0, minutes_floor,
+                     fpl_tools.MODEL_VERSION))
 
     conn = _connect()
     try:
@@ -70,8 +71,9 @@ def main() -> None:
             cur.executemany(
                 "INSERT INTO fpl_predictions "
                 "(player_id, gameweek, player_name, position, team, predicted_xp, "
-                "base_pts, cameo_mass, rotation_variance, dc_sensitivity, minutes_floor) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "base_pts, cameo_mass, rotation_variance, dc_sensitivity, minutes_floor, "
+                "model_version) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 rows,
             )
         conn.commit()

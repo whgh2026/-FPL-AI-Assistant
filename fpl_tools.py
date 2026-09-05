@@ -72,6 +72,14 @@ PLAN_WEIGHTS = [1.0, 0.85, 0.7, 0.55, 0.45, 0.35]  # decay over the planning hor
 CVAR_STRESS_K = 50              # pooled downside scenarios for the CVaR tail
 DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-projection
 
+# Stamp on every calibration row, so auto_tune only ever fits against a
+# homogeneous population of predictions. It must be bumped by ANY stage that
+# changes what _player_xp returns -- Stage 4 (this one), Stage 2 (strategy
+# terms leaving the forecast) and Stage 5b (EP_BLEND taper, clean sheets,
+# DefCon). One stamp spanning all three would mix materially different
+# predictions under a single label, which is exactly what versioning is for.
+MODEL_VERSION = "v2-dc-centred"
+
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
 ROLLED_FT_SHAPE         = [1.0, 0.8, 0.55, 0.25, 0.05]  # convex-down marginal value of the 1st..5th banked FT
@@ -363,22 +371,41 @@ def _tau_correction(x: float, y: float, lh: float, la: float, rho: float):
     return 1.0, 0.0, 0.0, 0.0
 
 
-def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=0.2, iterations=300, lr=0.1):
-    """Time-decayed Dixon-Coles bivariate Poisson -> ({team_id: {'att','def'}}, gamma, rho).
+def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=-0.10, iterations=300, lr=0.1):
+    """Time-decayed Dixon-Coles bivariate Poisson.
 
-    lambda_home = exp(att[h] - def[a] + gamma); lambda_away = exp(att[a] - def[h]).
-    Attack strengths are centred (zero mean) for identifiability; defence absorbs
-    the overall scoring level. Pure-Python gradient ascent (no scipy/numpy).
+    Returns ({team_id: {'att','def'}}, gamma, rho, mu) with
+
+        lambda_home = exp(mu + att[h] - def[a] + gamma)
+        lambda_away = exp(mu + att[a] - def[h])
+
+    Both att and def are centred to zero mean every iteration; the league scoring
+    level lives in the explicit intercept `mu`. Previously only att was centred
+    and def absorbed the level, which left mean(def) at roughly -log(1.4) ~ -0.33.
+    That is benign inside the fit, but `_team_attack_def_ratings` maps def onto a
+    [1,5] scale as `3.0 +/- def*scale`, so the uncentred mean shifted every team's
+    defensive rating by ~0.66 and, once the mapping sign was corrected, would have
+    inflated league-wide attacker xG by roughly 28% against neutral. Centring is
+    what makes the sign fix safe.
+
+    `rho` also now defaults negative (~-0.10, the usual sign for football) rather
+    than +0.20, and its gradient is normalised by the weight of the matches that
+    actually contribute to it. Only 0-0, 1-0, 0-1 and 1-1 have a non-zero
+    d(tau)/d(rho); dividing by the weight of *all* matches diluted the step by
+    roughly 1/0.35, which is why rho barely moved from its initial value.
+
+    Pure-Python gradient ascent (no scipy/numpy).
     """
     team_ids = sorted({f["team_h"] for f in finished_fixtures} | {f["team_a"] for f in finished_fixtures})
     if not team_ids:
-        return {}, 0.25, 0.2
+        return {}, 0.25, -0.10, math.log(1.40)
     idx = {t: i for i, t in enumerate(team_ids)}
     n = len(team_ids)
     att = [0.0] * n
     dfn = [0.0] * n
     gamma = 0.25
     rho = tau
+    mu = math.log(1.40)          # league goals per team per match, refined by the fit
     now = time.time()
     matches = []
     for f in finished_fixtures:
@@ -397,15 +424,18 @@ def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=0.2, iterations=300, lr=
         g_att = [0.0] * n
         g_dfn = [0.0] * n
         g_gamma = 0.0
+        g_mu = 0.0
         g_rho = 0.0
+        w_rho = 0.0          # weight of matches that actually inform rho
         for h, a, x, y, w in matches:
-            lh = math.exp(max(-6.0, min(6.0, att[h] - dfn[a] + gamma)))
-            la = math.exp(max(-6.0, min(6.0, att[a] - dfn[h])))
+            lh = math.exp(max(-6.0, min(6.0, mu + att[h] - dfn[a] + gamma)))
+            la = math.exp(max(-6.0, min(6.0, mu + att[a] - dfn[h])))
             g_att[h] += w * (x - lh)
             g_dfn[a] += w * (lh - x)
             g_att[a] += w * (y - la)
             g_dfn[h] += w * (la - y)
             g_gamma += w * (x - lh)
+            g_mu += w * ((x - lh) + (y - la))
             tc, dtc_lh, dtc_la, dtc_rho = _tau_correction(x, y, lh, la, rho)
             if tc > 0.0:
                 g_att[h] += w * (dtc_lh / tc) * lh
@@ -413,17 +443,31 @@ def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=0.2, iterations=300, lr=
                 g_att[a] += w * (dtc_la / tc) * la
                 g_dfn[h] += w * (dtc_la / tc) * (-la)
                 g_gamma += w * (dtc_lh / tc) * lh
-                g_rho += w * (dtc_rho / tc)
+                g_mu += w * (dtc_lh / tc) * lh + w * (dtc_la / tc) * la
+                if dtc_rho != 0.0:
+                    g_rho += w * (dtc_rho / tc)
+                    w_rho += w
         for i in range(n):
             att[i] += step * g_att[i] / total_w
             dfn[i] += step * g_dfn[i] / total_w
         gamma += step * g_gamma / total_w
-        rho = max(-0.3, min(0.3, rho + step * g_rho / total_w))
+        mu += step * g_mu / total_w
+        # Only the four low-score outcomes carry d(tau)/d(rho); normalising by
+        # the whole fixture list would dilute the step by ~1/0.35.
+        if w_rho > 0.0:
+            rho = max(-0.3, min(0.3, rho + step * g_rho / w_rho))
+        # Centre both parameter vectors; the level belongs to mu alone. Shift mu
+        # so lambda is unchanged by the reparameterisation: att enters lambda with
+        # a +, def with a -, so removing mean(att) lowers lambda (mu must rise)
+        # while removing mean(def) raises it (mu must fall).
         ca = sum(att) / n
+        cd = sum(dfn) / n
         att = [v - ca for v in att]
+        dfn = [v - cd for v in dfn]
+        mu += ca - cd
 
     ratings = {tid: {"att": att[idx[tid]], "def": dfn[idx[tid]]} for tid in team_ids}
-    return ratings, gamma, rho
+    return ratings, gamma, rho, mu
 
 
 _TEAM_RATINGS_CACHE: Optional[Dict[int, Dict[str, float]]] = None
@@ -447,21 +491,52 @@ def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
     w = _load_weights()
     scale = w.get("rating_scale", 2.0)
 
-    dc, gamma, _rho = ({}, 0.25, 0.2)
+    dc, gamma, _rho, _mu = ({}, 0.25, -0.10, math.log(1.40))
     if len(finished) >= 5:
-        dc, gamma, _rho = _fit_dixon_coles(
-            finished, decay=w.get("dixon_coles_decay", 0.03), tau=w.get("dixon_coles_tau", 0.2)
+        dc, gamma, _rho, _mu = _fit_dixon_coles(
+            finished, decay=w.get("dixon_coles_decay", 0.03),
+            tau=w.get("dixon_coles_tau", -0.10),
         )
-    dc_blend = min(1.0, len(finished) / 100.0) if dc else 0.0
+    # Bayesian shrinkage toward the static prior rather than a hard ramp. The old
+    # min(1, n/100) reached full confidence only at ~GW10 and was 0 before any
+    # fixtures, so early-season ratings were entirely the static field below.
+    dc_blend = (len(finished) / (len(finished) + 60.0)) if dc else 0.0
+
+    # `strength_overall_*` is on a ~1000-1400 scale in the FPL API, NOT the 1-5
+    # scale of the `strength` field, while the Dixon-Coles ratings below are
+    # mapped onto [1,5]. Blending the two directly made `att`/`def` ~1290 for
+    # every club, which then clamped to 5.0 -- so for the whole early season
+    # every fixture scored identically and fixture difficulty did nothing.
+    # Min-max normalising the observed values is robust to the actual scale:
+    # it produces the same [1,5] output whether the field is 1000-1400 or 1-5.
+    raws = []
+    for team in teams.values():
+        ov_h = _to_float(team.get("strength_overall_home") or 0.0)
+        ov_a = _to_float(team.get("strength_overall_away") or 0.0)
+        if ov_h and ov_a:
+            raws.append((ov_h + ov_a) / 2.0)
+    lo_raw, hi_raw = (min(raws), max(raws)) if raws else (0.0, 0.0)
+    span = (hi_raw - lo_raw) or 1.0
 
     out = {}
     for tid, team in teams.items():
         ov_h = _to_float(team.get("strength_overall_home") or 0.0)
         ov_a = _to_float(team.get("strength_overall_away") or 0.0)
-        fpl_overall = (ov_h + ov_a) / 2.0 if (ov_h and ov_a) else 3.0
+        if ov_h and ov_a and raws:
+            fpl_overall = 1.0 + 4.0 * (((ov_h + ov_a) / 2.0) - lo_raw) / span
+        else:
+            fpl_overall = 3.0
         if dc and tid in dc:
             dc_att = 3.0 + dc[tid]["att"] * scale
-            dc_def = 3.0 - dc[tid]["def"] * scale
+            # Sign fix. The fit defines lambda_home = exp(mu + att[h] - def[a] + gamma),
+            # so a HIGH def concedes fewer goals, i.e. is a BETTER defence. The old
+            # mapping (3.0 - def*scale) therefore emitted a LOW value for an elite
+            # defence, while every consumer treats a high value as "tough":
+            # _xp_for_fixture uses def_adj = 3.0 / opp_strength_def, so attackers
+            # were being boosted against the best defences and suppressed against
+            # the worst. Verified on synthetic data: elite defences produced
+            # def_adj 1.06 (a boost) and the worst 0.63 (a suppression).
+            dc_def = 3.0 + dc[tid]["def"] * scale
         else:
             dc_att = dc_def = fpl_overall
         att = dc_blend * dc_att + (1.0 - dc_blend) * fpl_overall
@@ -537,12 +612,50 @@ def _get_odds_api_key() -> Optional[str]:
     return key or None
 
 
-def _canonical_club(name: str) -> Optional[str]:
+def _normalise_club_name(name: str) -> str:
+    n = (name or "").lower().strip()
+    n = re.sub(r"[^a-z ]", " ", n)
+    # Corporate suffixes the odds feed includes and FPL does not.
+    n = re.sub(r"\b(fc|afc|association football club|football club)\b", " ", n)
+    return " ".join(n.split())
+
+
+def _canonical_club(name: str, bootstrap: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Odds-feed club name -> FPL short_name.
+
+    The static alias table was a 2024/25 club list (it still contains Ipswich,
+    Leicester and Southampton), so any newly promoted side silently failed to
+    map and its fixture lost odds entirely -- falling back to static ratings
+    with no signal that anything was missing. The live bootstrap is now the
+    primary source, which self-updates every season; the table is only a
+    fallback for genuinely different names ("Spurs" vs "Tottenham Hotspur").
+    """
     if not name:
         return None
-    n = name.lower().strip()
-    n = re.sub(r"[^a-z ]", " ", n)
-    n = " ".join(n.split())
+    n = _normalise_club_name(name)
+    if not n or n == "draw":
+        return None
+
+    try:
+        bs = bootstrap if bootstrap is not None else _get_bootstrap()
+        teams = bs.get("teams", []) or []
+    except Exception:
+        teams = []
+
+    # Exact match on the live club list first.
+    for t in teams:
+        short = t.get("short_name")
+        if not short:
+            continue
+        if n in (_normalise_club_name(t.get("name", "")), _normalise_club_name(short)):
+            return short
+    # Then containment, longest name first so "Manchester United" is not
+    # shadowed by a shorter club whose name is a substring.
+    for t in sorted(teams, key=lambda t: -len(t.get("name", "") or "")):
+        full = _normalise_club_name(t.get("name", ""))
+        if full and (full in n or n in full):
+            return t.get("short_name")
+
     if n in _CLUB_ALIASES:
         return _CLUB_ALIASES[n]
     for alias, code in _CLUB_ALIASES.items():
@@ -589,8 +702,8 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
         return result
 
     for m in matches:
-        home = _canonical_club(m.get("home_team", ""))
-        away = _canonical_club(m.get("away_team", ""))
+        home = _canonical_club(m.get("home_team", ""), bootstrap)
+        away = _canonical_club(m.get("away_team", ""), bootstrap)
         h_id = id_by_short.get(home) if home else None
         a_id = id_by_short.get(away) if away else None
         if h_id is None or a_id is None:
@@ -598,6 +711,7 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
 
         h_prices: List[float] = []
         a_prices: List[float] = []
+        d_prices: List[float] = []
         for bm in m.get("bookmakers", []):
             for mk in bm.get("markets", []):
                 if mk.get("key") != "h2h":
@@ -606,19 +720,30 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
                     price = _to_float(out.get("price"))
                     if price <= 0:
                         continue
-                    code = _canonical_club(out.get("name", ""))
+                    raw_name = out.get("name", "")
+                    code = _canonical_club(raw_name, bootstrap)
                     if code == home:
                         h_prices.append(price)
                     elif code == away:
                         a_prices.append(price)
+                    elif raw_name.strip().lower() == "draw":
+                        d_prices.append(price)
 
+        # De-vig across all THREE outcomes. Previously the draw was discarded --
+        # _canonical_club("Draw") returns None -- and home/away were normalised
+        # against each other alone. That inflates every price: a true 45/28/27
+        # market came back as P(home) = 0.625, a ~39% overstatement, which then
+        # fed market_att = 0.6 + 0.8 * win_prob and the traffic lights.
         if not h_prices or not a_prices:
             continue
-        h_avg = sum(h_prices) / len(h_prices)
-        a_avg = sum(a_prices) / len(a_prices)
-        h_imp = 1.0 / h_avg
-        a_imp = 1.0 / a_avg
-        total = h_imp + a_imp
+        if not d_prices:
+            # A book quoting only two outcomes on a three-way market cannot be
+            # de-vigged correctly; skipping is better than a 39% inflation.
+            continue
+        h_imp = 1.0 / (sum(h_prices) / len(h_prices))
+        a_imp = 1.0 / (sum(a_prices) / len(a_prices))
+        d_imp = 1.0 / (sum(d_prices) / len(d_prices))
+        total = h_imp + a_imp + d_imp
         if total <= 0:
             continue
         result.setdefault(h_id, {})[a_id] = h_imp / total
@@ -832,6 +957,33 @@ def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
 
     return max(0.0, xp + adj)
 
+def _expected_concession_penalty(lam: float, max_goals: Optional[int] = None) -> float:
+    """E[floor(G/2)] for G ~ Poisson(lam): the expected -1s for goals conceded.
+
+    FPL deducts one point per TWO goals conceded, so the expectation is
+    E[floor(G/2)], not E[G]/2. The old -0.5 * xgc treated the step function as
+    linear and over-penalised every keeper and defender by roughly 55% at
+    typical scoring rates (0.65 vs 0.419 at lam = 1.3) -- and worst at LOW lam
+    (139% at 0.6), so elite defences were hurt most.
+
+    The summation bound scales with lam: a fixed cap truncates tail mass that
+    the growing floor(G/2) weight amplifies.
+    """
+    if lam <= 0.0:
+        return 0.0
+    if max_goals is None:
+        # mean + ~10 sd, floored at 20; P(G > bound) is negligible for any
+        # realistic scoreline.
+        max_goals = max(20, int(lam + 10.0 * math.sqrt(lam) + 10))
+    total = 0.0
+    pmf = math.exp(-lam)          # P(G = 0)
+    for g in range(0, max_goals + 1):
+        if g > 0:
+            pmf *= lam / g
+        total += (g // 2) * pmf
+    return total
+
+
 def _poisson_survival(threshold: int, lam: float) -> float:
     """P(X >= threshold) for X ~ Poisson(lam), via the lower tail CDF."""
     if lam <= 0.0 or threshold <= 0:
@@ -879,7 +1031,7 @@ def _load_weights() -> Dict[str, float]:
         "autosub_ref": 1.8,
         "rotation_convexity": 0.4,
         "dixon_coles_decay": 0.03,
-        "dixon_coles_tau": 0.2,
+        "dixon_coles_tau": -0.10,   # football rho is negative; +0.2 was the wrong sign
         "rating_scale": 2.0,
         "eo_tc_mass": 0.03,
         "eo_floor": 15.0,
@@ -927,7 +1079,14 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     xgc90 = _reg(p.get("expected_goals_conceded_per_90"), avg["xgc"])
     saves90 = _reg(p.get("saves_per_90"), avg["saves"])
 
-    def_adj = 3.0 / max(_to_float(f.get("opp_strength_def")), 1.0)
+    # 3.0/x is convex, so it over-rewards the very weakest defences: at the old
+    # floor of 1.0 an attacker facing the bottom club had their xG *tripled*.
+    # That never bit before Stage 4 because every rating clamped to 5.0; fixing
+    # the scale exposed it. The 1.5 floor caps the boost at 2.0x as a stopgap --
+    # the real fix is Stage 5b, which replaces this ratio with the fitted
+    # Dixon-Coles lambda for the fixture and drops the [1,5] round-trip entirely.
+    DEF_ADJ_FLOOR = 1.5
+    def_adj = 3.0 / max(_to_float(f.get("opp_strength_def")), DEF_ADJ_FLOOR)
     att_adj = max(_to_float(f.get("opp_strength_att")), 1.0) / 3.0
 
     # Live market scaling: blend bookmaker-implied win probability with static FDR.
@@ -953,7 +1112,7 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     p_cs = math.exp(-xgc) if xgc < 10 else 0.0
     cs_pts = CS_PTS.get(pos_id, 0) * p_cs * min(emin / 60.0, 1.0) * _w["clean_sheet_confidence"]
 
-    conceded_pts = -0.5 * xgc if pos_id in (1, 2) else 0.0
+    conceded_pts = -_expected_concession_penalty(xgc) if pos_id in (1, 2) else 0.0
     saves_pts = saves90 * frac / 3.0 if pos_id == 1 else 0.0
 
     minutes_pts = 2.0 if emin >= 60 else (1.0 if emin > 0 else 0.0)

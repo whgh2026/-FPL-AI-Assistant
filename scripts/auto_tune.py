@@ -13,19 +13,45 @@ import json
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fpl_tools
+import db
 from db import ensure_calibration_columns, get_prediction_history
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEIGHTS_PATH = os.path.join(ROOT, "weights.json")
-MIN_ROWS = 1000
+
+# Raised from 1000. Rows now carry a model_version and only the current one is
+# fitted, so the archive restarts from zero after Stage 4. With the
+# active-player filter added in Stage 0 that is ~280 rows per gameweek, so 5000
+# is roughly 18 gameweeks -- NOT the ~7 that the unfiltered count would suggest.
+# The UI must derive its "recalibrating at N" copy from the live row count
+# rather than hardcoding a gameweek, because this figure moves whenever the
+# filter or the version boundary does.
+MIN_ROWS = 5000
 DAMPING = 0.05
+
+# Stage 8 repairs the calibration loop itself: the damping caps movement at
+# +/-0.5% per run (~53 runs to move a weight 30%, against a 38-gameweek season),
+# dc_sensitivity is written as a literal 0.0 so dixon_coles_decay's gradient is
+# identically zero, the surrogate does not match production, and a negative
+# prediction blows up the Poisson deviance term. Running coordinate descent
+# before those are fixed drifts the weights on noise, so the job refuses to
+# write unless explicitly enabled.
+ENABLED = os.environ.get("FPL_AUTOTUNE_ENABLED", "0") == "1"
 
 
 def main() -> None:
     ensure_calibration_columns()
-    rows = get_prediction_history()
+    rows = get_prediction_history(model_version=fpl_tools.MODEL_VERSION)
 
     n = len(rows)
+    print(f"Calibration rows for {fpl_tools.MODEL_VERSION}: {n} (threshold {MIN_ROWS})")
+
+    if not ENABLED:
+        print("Auto-tune is disabled pending the Stage 8 calibration repairs "
+              "(damping, dc_sensitivity gradient, surrogate mismatch, loss floor). "
+              "Set FPL_AUTOTUNE_ENABLED=1 to override.")
+        return
+
     if n < MIN_ROWS:
         print(f"Skipping calibration: {n} rows < {MIN_ROWS} threshold (avoid overfitting).")
         return

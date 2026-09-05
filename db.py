@@ -90,6 +90,7 @@ _SCHEMA = (
         rotation_variance DOUBLE PRECISION,
         dc_sensitivity DOUBLE PRECISION,
         minutes_floor DOUBLE PRECISION,
+        model_version TEXT DEFAULT 'v1',
         created_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE (player_id, gameweek))
     """,
@@ -335,6 +336,7 @@ def ensure_calibration_columns():
         ("rotation_variance", "DOUBLE PRECISION"),
         ("dc_sensitivity", "DOUBLE PRECISION"),
         ("base_pts", "DOUBLE PRECISION"),
+        ("model_version", "TEXT DEFAULT 'v1'"),
     ]
     try:
         conn = get_db_connection()
@@ -352,18 +354,32 @@ def ensure_calibration_columns():
         return False
 
 
-def get_prediction_history():
-    """Return calibration rows: predicted_xp, actual_points and the feature columns."""
+def get_prediction_history(model_version=None):
+    """Return calibration rows for one model version.
+
+    Filtering matters: the Dixon-Coles centring and sign fix changed what
+    predicted_xp means, so pre-fix rows carry a systematically different bias.
+    Fitting across the boundary would have the calibrator chase a discontinuity
+    rather than the model's real error. Passing None returns every row, which is
+    only appropriate for inspection, never for tuning.
+    """
     try:
         conn = get_db_connection()
         if conn is None:
             return []
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT predicted_xp, actual_points, base_pts, cameo_mass, rotation_variance, dc_sensitivity "
-                "FROM fpl_predictions WHERE actual_points IS NOT NULL"
-            )
+            if model_version is None:
+                cur.execute(
+                    "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
+                    "rotation_variance, dc_sensitivity "
+                    "FROM fpl_predictions WHERE actual_points IS NOT NULL")
+            else:
+                cur.execute(
+                    "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
+                    "rotation_variance, dc_sensitivity "
+                    "FROM fpl_predictions WHERE actual_points IS NOT NULL "
+                    "AND model_version = %s", (model_version,))
             rows = []
             for r in cur.fetchall():
                 rows.append({
