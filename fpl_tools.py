@@ -1302,6 +1302,15 @@ def _solve_squad(
             prob += start[pid] <= x[pid], f"start_le_x_{pid}"
         prob += pulp.lpSum(start[pid] for pid in ids) == 11, "eleven_starters"
         prob += pulp.lpSum(start[pid] for pid in gk_ids) == 1, "one_start_gk"
+        # Formation legality. Without these, "11 starters and 1 GK" is the only
+        # shape constraint, so the solver is free to value an illegal XI (1-5-5-0,
+        # 1-2-5-3) and then buy players to serve it. select_starting_xi afterwards
+        # returns a *different*, legal, lower-scoring eleven -- meaning the squad
+        # was optimised against a lineup the manager can never field.
+        for pos, lo, hi in (("DEF", 3, 5), ("MID", 2, 5), ("FWD", 1, 3)):
+            pos_start = pulp.lpSum(start[pid] for pid in ids if by_id[pid]["position"] == pos)
+            prob += pos_start >= lo, f"formation_{pos}_min"
+            prob += pos_start <= hi, f"formation_{pos}_max"
         xp_expr = pulp.lpSum(by_id[pid]["xp"] * start[pid] for pid in ids)
         # 12th-man binary: the single highest-value outfield bench slot.
         b1 = pulp.LpVariable.dicts("b1", outfield_ids, cat="Binary")
