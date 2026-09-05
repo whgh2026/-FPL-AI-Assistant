@@ -35,7 +35,8 @@ class HarnessIntegrityTest(unittest.TestCase):
             if name.startswith("_")
             and ("CACHE" in name or name in ("_LEAGUE_AVG", "_LEAGUE_AVG_TS",
                                              "_TEAM_PLAYED", "_TEAM_PLAYED_TS",
-                                             "_TEAM_RATINGS_TS", "_LIVE_CACHE_TS"))
+                                             "_TEAM_RATINGS_TS", "_LIVE_CACHE_TS",
+                                             "_CALENDAR_CACHE_TS"))
         }
         uncovered = found - set(harness._CACHE_RESET) - set(_EXEMPT)
         self.assertEqual(

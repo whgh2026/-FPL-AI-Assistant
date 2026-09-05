@@ -33,6 +33,9 @@ _CACHE_RESET = {
     "_EO_CACHE_TS": float,
     "_LIVE_CACHE": dict,
     "_LIVE_CACHE_TS": float,
+    "_LIVE_CACHE_GW": lambda: None,
+    "_CALENDAR_CACHE": lambda: None,
+    "_CALENDAR_CACHE_TS": float,
 }
 
 

@@ -829,27 +829,21 @@ def _fixture_traffic_lights(team_id: int, fixture_lookup: Dict[int, List[Dict[st
     fixtures = fixture_lookup.get(team_id, [])
     lights: List[str] = []
     for i in range(n):
-        ev = start_event + i
-        fx = next((x for x in fixtures if x.get("event") == ev), None)
-        if fx is None:
-            lights.append("⚪")
+        fxs = _gw_fixtures(fixtures, start_event + i)
+        if not fxs:
+            lights.append("⚪")           # blank gameweek
             continue
-        wp = fx.get("win_prob")
-        if wp is not None:
-            if wp > 0.5:
-                lights.append("🟢")
-            elif wp >= 0.3:
-                lights.append("🟡")
-            else:
-                lights.append("🔴")
+        # A double gets its own marker rather than being shown as whichever
+        # single fixture happened to come first in the list.
+        double = len(fxs) > 1
+        wps = [f.get("win_prob") for f in fxs if f.get("win_prob") is not None]
+        if wps:
+            wp = sum(wps) / len(wps)
+            light = "🟢" if wp > 0.5 else ("🟡" if wp >= 0.3 else "🔴")
         else:
-            opp_def = fx.get("opp_strength_def") or 3
-            if opp_def <= 2.0:
-                lights.append("🟢")
-            elif opp_def <= 3.2:
-                lights.append("🟡")
-            else:
-                lights.append("🔴")
+            opp_def = sum(_to_float(f.get("opp_strength_def") or 3) for f in fxs) / len(fxs)
+            light = "🟢" if opp_def <= 2.0 else ("🟡" if opp_def <= 3.2 else "🔴")
+        lights.append("🔵" if double else light)
     return "[" + " ".join(lights) + "]"
 
 def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
@@ -1148,8 +1142,10 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
 
     fixtures = fixture_lookup.get(team_id, [])
     if event is not None:
-        target = [f for f in fixtures if f.get("event") == event]
+        target = _gw_fixtures(fixtures, event)
         if not target:
+            # "Blank" is a scheduling fact, not a verdict on the player: the
+            # caller must not treat it as a reason to sell. See _fixture_calendar.
             return 0.0, "Blank"
     else:
         target = fixtures[:1] if fixtures else []
@@ -1321,6 +1317,68 @@ def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
     except Exception:
         return 1
 
+def _gw_fixtures(fx: List[Dict[str, Any]], event: int) -> List[Dict[str, Any]]:
+    """Every fixture a club plays in `event` -- two of them in a double.
+
+    `next((x for x in fx if x["event"] == ev), None)` was used at three call
+    sites, so the FDR strip, the traffic lights and the fixture-swing windows
+    all silently saw only the FIRST match of a double gameweek. _player_xp_raw
+    already summed both, so the projection and everything presented alongside it
+    disagreed about how many games a club was playing.
+    """
+    return [x for x in fx if x.get("event") == event]
+
+
+_CALENDAR_CACHE: Optional[Dict[int, Dict[str, Any]]] = None
+_CALENDAR_CACHE_TS: float = 0.0
+BGW_MIN_BLANKS = 4       # clubs without a fixture before a gameweek counts as blank
+DGW_MIN_DOUBLES = 4      # clubs with two fixtures before it counts as double
+
+
+def _fixture_calendar(fixture_lookup=None, start_event=1, n=38) -> Dict[int, Dict[str, Any]]:
+    """{event: {is_bgw, is_dgw, blanks, doubles, playing}} for the season.
+
+    Needed to tell a BLANK apart from a bad fixture. Both currently project 0.0
+    xP for the gameweek, so a premium with no fixture looked identical to a
+    player who is simply out of form -- and the solver would sell him. A blank
+    is a scheduling artefact that resolves; poor form is a property of the
+    player. Chip logic needs the same distinction to target a Free Hit.
+    """
+    global _CALENDAR_CACHE, _CALENDAR_CACHE_TS
+    if _CALENDAR_CACHE is not None and (time.time() - _CALENDAR_CACHE_TS) < 300:
+        return _CALENDAR_CACHE
+    if fixture_lookup is None:
+        fixture_lookup = _build_fixture_lookup()
+
+    counts: Dict[int, Dict[int, int]] = {}
+    for tid, fixtures in fixture_lookup.items():
+        for f in fixtures:
+            ev = f.get("event")
+            if ev is None:
+                continue
+            counts.setdefault(ev, {})
+            counts[ev][tid] = counts[ev].get(tid, 0) + 1
+
+    n_teams = len(fixture_lookup) or 20
+    out = {}
+    for ev in range(start_event, start_event + n):
+        per_team = counts.get(ev, {})
+        playing = sum(1 for c in per_team.values() if c >= 1)
+        blanks = n_teams - playing
+        doubles = sum(1 for c in per_team.values() if c >= 2)
+        out[ev] = {
+            "event": ev,
+            "blanks": blanks,
+            "doubles": doubles,
+            "playing": playing,
+            "is_bgw": blanks >= BGW_MIN_BLANKS,
+            "is_dgw": doubles >= DGW_MIN_DOUBLES,
+        }
+    _CALENDAR_CACHE = out
+    _CALENDAR_CACHE_TS = time.time()
+    return out
+
+
 def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> List[float]:
     """Continuous fixture-ease series for the next n gameweeks (5 = easiest, 0 = blank).
 
@@ -1332,9 +1390,14 @@ def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str,
     fx = fixture_lookup.get(team_id, [])
     out = []
     for i in range(n):
-        ev = start_event + i
-        f = next((x for x in fx if x.get("event") == ev), None)
-        out.append(6.0 - _to_float(f.get("opp_strength_def", 3.0)) if f else 0.0)
+        fs = _gw_fixtures(fx, start_event + i)
+        if not fs:
+            out.append(0.0)          # blank
+            continue
+        # Mean ease across the gameweek's fixtures, then a bonus for a double:
+        # two average games are worth more than one, which a mean alone loses.
+        ease = sum(6.0 - _to_float(f.get("opp_strength_def", 3.0)) for f in fs) / len(fs)
+        out.append(round(min(5.0, ease * (1.0 + 0.5 * (len(fs) - 1))), 2))
     return out
 
 
@@ -1914,7 +1977,12 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
     shared rotation-crisis minutes shock (never independent player draws).
     Returns:
       saa_mean: {pid: [mean xP over GW t=0..n-1]}
-      matrix:   {pid: [n arrays, each length S]}  (for floor/ceiling quantiles)
+      matrix:   {pid: ndarray of shape (S, n)} -- SAMPLES down the rows,
+                gameweeks across the columns. This is the standard Monte Carlo
+                orientation and lets a horizon total be a single contiguous
+                matrix-vector product. The docstring previously advertised the
+                transpose, [n arrays of length S], and both consumers believed
+                it -- which is how "500 sims" came to mean six.
     """
     bootstrap = _get_bootstrap()
     elements = {e["id"]: e for e in bootstrap.get("elements", [])}
@@ -1937,8 +2005,12 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
         pos_of[pid] = POS_MAP.get(e.get("element_type"), "MID")
 
     if not HAS_NUMPY or not ids:
+        # Degenerate single-scenario fallback, shaped (1, n) to match the numpy
+        # path. It previously built [[v] for v in base] -- shape (n, 1), the
+        # opposite convention -- so the two code paths disagreed about the
+        # layout, which is why the mismatch survived so long.
         saa_mean = {pid: [round(v, 2) for v in base[pid]] for pid in ids}
-        matrix = {pid: [[v] for v in base[pid]] for pid in ids}
+        matrix = {pid: [list(base[pid])] for pid in ids}
         return saa_mean, matrix
 
     w = _load_weights()
@@ -1966,6 +2038,7 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
         shock = ashare * att_shock[:, ti, :] + (1.0 - ashare) * def_shock[:, ti, :]  # (S, n)
         min_factor = 1.0 - p0[pid] * crisis[:, ti, :]                                # (S, n)
         xp_s = _np.asarray(base[pid], dtype=float)[None, :] * shock * min_factor      # (S, n)
+        assert xp_s.shape == (S, n), f"scenario matrix must be (S, n), got {xp_s.shape}"
         matrix[pid] = xp_s
         saa_mean[pid] = [round(float(xp_s[:, t].mean()), 2) for t in range(n)]
 
@@ -1995,61 +2068,87 @@ def _scenario_sigmas(matrix, weights=None, n=PLAN_HORIZON):
     return out
 
 
-def _scenario_distribution(selected_ids, matrix, weights=None, n=PLAN_HORIZON):
-    """P5/P50/P95 of a selected squad's horizon points across scenarios."""
+def _horizon_totals(matrix, pids, weights=None, n=PLAN_HORIZON):
+    """{pid: array of length S} -- each player's horizon points per scenario.
+
+    One place that knows the matrix layout is (S, n): samples down the rows,
+    gameweeks across the columns, which is the standard Monte Carlo orientation
+    and what _generate_scenarios has always produced. Both former consumers
+    indexed it as [gameweek][scenario] instead, so `S` resolved to 6 and the
+    loop ran over the first six SCENARIOS rather than the gameweeks -- the
+    "500 sims" in the UI were six.
+    """
+    out = {}
+    for pid in pids:
+        m = matrix.get(pid)
+        if m is None:
+            continue
+        arr = _np.asarray(m, dtype=float)
+        if arr.ndim != 2:
+            continue
+        k = min(n, arr.shape[1])
+        w = _np.asarray((weights or PLAN_WEIGHTS)[:k], dtype=float)
+        out[pid] = arr[:, :k] @ w          # (S, k) @ (k,) -> (S,)
+    return out
+
+
+def _scenario_distribution(selected_ids, matrix, weights=None, n=PLAN_HORIZON,
+                           multipliers=None):
+    """Floor / Expected / Ceiling of a squad's horizon points across scenarios.
+
+    `multipliers` optionally weights each player's contribution (2 for the
+    captain, 0 for the bench), so the spread describes what actually scores
+    rather than all fifteen.
+    """
     sel = [pid for pid in selected_ids if pid in matrix]
-    if not sel:
-        return {"p5": 0.0, "p50": 0.0, "p95": 0.0, "mean": 0.0}
-    S = len(matrix[sel[0]][0])
-    w = weights or PLAN_WEIGHTS[:n]
-    if HAS_NUMPY:
-        totals = _np.zeros(S)
-        for pid in sel:
-            m = matrix[pid]
-            for t in range(min(n, len(m))):
-                totals = totals + w[t] * _np.asarray(m[t])
-        p5 = float(_np.percentile(totals, 5))
-        p50 = float(_np.percentile(totals, 50))
-        p95 = float(_np.percentile(totals, 95))
-        mean = float(totals.mean())
-    else:
-        totals = [0.0] * S
-        for pid in sel:
-            m = matrix[pid]
-            for t in range(min(n, len(m))):
-                wt = w[t]
-                for s in range(S):
-                    totals[s] += wt * m[t][s]
-        ts = sorted(totals)
-        p5 = ts[int(0.05 * (S - 1))]
-        p50 = ts[int(0.5 * (S - 1))]
-        p95 = ts[int(0.95 * (S - 1))]
-        mean = sum(totals) / S
-    return {"p5": round(p5, 2), "p50": round(p50, 2), "p95": round(p95, 2), "mean": round(mean, 2)}
+    if not sel or not HAS_NUMPY:
+        return {"p5": 0.0, "p50": 0.0, "p95": 0.0, "mean": 0.0, "scenarios": 0}
+
+    horizons = _horizon_totals(matrix, sel, weights, n)
+    if not horizons:
+        return {"p5": 0.0, "p50": 0.0, "p95": 0.0, "mean": 0.0, "scenarios": 0}
+
+    mult = multipliers or {}
+    totals = _np.zeros(len(next(iter(horizons.values()))))
+    for pid, h in horizons.items():
+        totals = totals + float(mult.get(pid, 1.0)) * h
+
+    p5, p50, p95 = (float(v) for v in _np.percentile(totals, [5, 50, 95]))
+    # Percentiles are monotone by construction; assert it so a future layout
+    # regression surfaces here rather than as a plausible-looking wrong number.
+    assert p5 <= p50 <= p95, f"non-monotone quantiles: {p5}, {p50}, {p95}"
+    return {"p5": round(p5, 2), "p50": round(p50, 2), "p95": round(p95, 2),
+            "mean": round(float(totals.mean()), 2), "scenarios": int(totals.size)}
 
 
-def _select_stress_scenarios(matrix, K=CVAR_STRESS_K):
-    """Pool the K lowest-aggregate (downside) scenarios -> {pid: [horizon xP per scenario]}.
+def _select_stress_scenarios(matrix, K=CVAR_STRESS_K, selected_ids=None):
+    """The K worst scenarios -> {pid: [horizon xP in each of those scenarios]}.
 
-    Candidate pooling bounds the CVaR auxiliary variables so the blocker MIP stays
-    under the 2s solve-time limit.
+    Pooling bounds the CVaR auxiliary variables so the MIP stays inside its
+    solve-time budget.
+
+    Two fixes. The layout bug above meant argsort ran over a length-6 vector, so
+    `K=50` could only ever return 6 indices and the CVaR term was fed six
+    gameweek slots dressed as scenarios. And the tail was ranked by the
+    POOL-WIDE total -- every candidate the solver might consider -- rather than
+    by the squad being optimised, so it was not the tail of the portfolio the
+    objective cares about. `selected_ids` narrows it to the current squad.
     """
     if not matrix or not HAS_NUMPY:
         return {}
-    first = next(iter(matrix.values()))
-    n_gw = len(first)
-    S = len(first[0])
-    horizons = {}
-    for pid, m in matrix.items():
-        h = _np.zeros(S)
-        for t in range(min(n_gw, len(HORIZON_WEIGHTS))):
-            h = h + HORIZON_WEIGHTS[t] * _np.asarray(m[t])
-        horizons[pid] = h
-    totals = _np.zeros(S)
-    for pid, h in horizons.items():
-        totals = totals + h
+    horizons = _horizon_totals(matrix, list(matrix.keys()), n=len(HORIZON_WEIGHTS))
+    if not horizons:
+        return {}
+
+    rank_over = [pid for pid in (selected_ids or horizons.keys()) if pid in horizons]
+    if not rank_over:
+        rank_over = list(horizons.keys())
+    totals = _np.zeros(len(next(iter(horizons.values()))))
+    for pid in rank_over:
+        totals = totals + horizons[pid]
+
     idx = _np.argsort(totals)[:K]
-    return {pid: [float(horizons[pid][s]) for s in idx] for pid in horizons}
+    return {pid: [float(h[s]) for s in idx] for pid, h in horizons.items()}
 
 
 def _planner_shortlist(pool, current_ids, saa_mean):
@@ -2302,7 +2401,7 @@ def suggest_transfers_for_custom_squad(
     try:
         pool_ids = [p["id"] for p in pool]
         saa_mean, scenario_matrix = _generate_scenarios(pool_ids, fixture_lookup, event, risk=risk)
-        stress_scenarios = _select_stress_scenarios(scenario_matrix)
+        stress_scenarios = _select_stress_scenarios(scenario_matrix, selected_ids=current_ids)
         # Per-player outcome volatility for the Stage 3 search hurdle. Read
         # straight off the (S, n) matrix -- deliberately NOT via
         # _scenario_distribution, which mis-indexes the scenario axis until
@@ -2470,9 +2569,16 @@ def suggest_transfers_for_custom_squad(
         
     std_best_xi = select_starting_xi(std_squad)
 
-    # Scenario distribution of the final recommended squad (floor vs ceiling).
+    # Floor / Expected / Ceiling for what actually SCORES: the starting eleven at
+    # 1x and the captain at 2x. Spreading over all fifteen counted four bench
+    # players who contribute nothing in a normal gameweek, which flattened the
+    # distribution and made the range look narrower than the week really is.
+    _xi_ids = {_pid(p) for p in (std_best_xi.get("xi") or [])}
+    _cap = _pid(std_best_xi.get("captain") or {})
+    _mult = {pid: (2.0 if pid == _cap else 1.0) for pid in _xi_ids}
     scenario_dist = _scenario_distribution(
-        [p["player_id"] for p in std_squad], scenario_matrix, weights=HORIZON_WEIGHTS, n=4
+        list(_xi_ids) or [p["player_id"] for p in std_squad],
+        scenario_matrix, weights=HORIZON_WEIGHTS, n=4, multipliers=_mult,
     ) if scenario_matrix else {}
 
     # ==============================================================
@@ -2766,14 +2872,16 @@ def _fixture_swing_scores(fixture_lookup, start_event, n=6):
         att_ease: List[float] = []
         def_ease: List[float] = []
         for i in range(n):
-            ev = start_event + i
-            f = next((x for x in fx if x.get("event") == ev), None)
-            if f is None:
+            fs = _gw_fixtures(fx, start_event + i)
+            if not fs:
                 att_ease.append(3.0)
                 def_ease.append(3.0)
             else:
-                att_ease.append(6.0 - _to_float(f.get("opp_strength_def", 3.0)))
-                def_ease.append(6.0 - _to_float(f.get("opp_strength_att", 3.0)))
+                scale = 1.0 + 0.5 * (len(fs) - 1)      # doubles count for more
+                att_ease.append(min(5.0, scale * sum(
+                    6.0 - _to_float(f.get("opp_strength_def", 3.0)) for f in fs) / len(fs)))
+                def_ease.append(min(5.0, scale * sum(
+                    6.0 - _to_float(f.get("opp_strength_att", 3.0)) for f in fs) / len(fs)))
         rows.append({
             "team_id": tid,
             "name": team.get("name") or team.get("short_name", "?"),
@@ -2932,12 +3040,16 @@ def calibrate_weights(rows, weights, damping=0.05):
 
 _LIVE_CACHE: Dict[int, Dict[str, Any]] = {}
 _LIVE_CACHE_TS: float = 0.0
+_LIVE_CACHE_GW: Optional[int] = None
 
 
 def get_live_event(gw):
     """Live per-player stats -> {pid: {minutes, total_points, bonus, bps, played}}."""
-    global _LIVE_CACHE, _LIVE_CACHE_TS
-    if _LIVE_CACHE and (time.time() - _LIVE_CACHE_TS) < 60:
+    global _LIVE_CACHE, _LIVE_CACHE_TS, _LIVE_CACHE_GW
+    # The gameweek is part of the key. It was not, so any two different
+    # gameweeks requested inside the 60s window returned the FIRST one's data --
+    # silently serving stale scores to the live H2H tracker.
+    if _LIVE_CACHE and _LIVE_CACHE_GW == gw and (time.time() - _LIVE_CACHE_TS) < 60:
         return _LIVE_CACHE
     try:
         resp = requests.get(f"{BASE_URL}/event/{gw}/live/", timeout=10)
@@ -2957,6 +3069,7 @@ def get_live_event(gw):
         }
     _LIVE_CACHE = out
     _LIVE_CACHE_TS = time.time()
+    _LIVE_CACHE_GW = gw
     return out
 
 

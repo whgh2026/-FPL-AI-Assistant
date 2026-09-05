@@ -60,12 +60,19 @@ class CvarTest(unittest.TestCase):
         if not fpl_tools.HAS_NUMPY:
             self.skipTest("numpy required")
         import numpy as np
+        # Shape is (S, n): three SCENARIOS down the rows, one gameweek across.
+        # This test previously wrote [np.array([10.0, 5.0, 8.0])] -- shape (1, 3)
+        # -- i.e. one scenario over three gameweeks, encoding the transposed
+        # layout the consumers were buggily assuming. The intent (three
+        # scenarios, pick the worst two) is unchanged; only the orientation is
+        # corrected, so the expected values are identical.
         matrix = {
-            1: [np.array([10.0, 5.0, 8.0])],
-            2: [np.array([3.0, 2.0, 4.0])],
+            1: np.array([[10.0], [5.0], [8.0]]),
+            2: np.array([[3.0], [2.0], [4.0]]),
         }
         out = fpl_tools._select_stress_scenarios(matrix, K=2)
-        # Aggregate totals: [13, 7, 12] -> lowest two are scenarios 1 then 2.
+        # Aggregate totals per scenario: [13, 7, 12] -> lowest two are
+        # scenario 1 (7.0) then scenario 2 (12.0).
         self.assertEqual(out[1], [5.0, 8.0])
 
     def test_blocker_solves_with_cvar(self):
