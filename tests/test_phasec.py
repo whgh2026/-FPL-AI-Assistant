@@ -75,7 +75,10 @@ class StrategyModeTest(unittest.TestCase):
         self.assertEqual(fpl_tools._strategy_mode("aggressive"), "divergence")
         self.assertEqual(fpl_tools._strategy_mode("rank_chasing"), "divergence")
         self.assertEqual(fpl_tools._strategy_mode("balanced"), "ev")
-        self.assertEqual(fpl_tools.PHASE2_START_GW, 26)
+        # Was: assertEqual(fpl_tools.PHASE2_START_GW, 26). That constant is gone.
+        # Rank-aware logic is now driven by the chosen strategy rather than the
+        # calendar, so there is no gameweek at which the modes switch on.
+        self.assertFalse(hasattr(fpl_tools, "PHASE2_START_GW"))
 
     def test_blocker_penalises_low_eo(self):
         pool = _squad_pool()

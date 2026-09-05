@@ -173,13 +173,35 @@ def build_squad(bootstrap, name):
     return gk + dfn + mid + fwd
 
 
+def market_pool_entries(bootstrap, fixture_lookup, event, per_pos=None):
+    """A wider candidate pool, so the solver has real freedom over the 15.
+
+    A pool of exactly 2/5/5/3 leaves squad membership fully determined by the
+    positional constraints, so any objective term acting on x[pid] is constant
+    and provably cannot change the answer. Tests that need to observe squad
+    selection (EO, blocker/divergence) must use this rather than a single squad.
+    """
+    per_pos = per_pos or {1: 6, 2: 12, 3: 12, 4: 8}
+    by_pos = _by_pos(bootstrap)
+    teams_by_id = {t["id"]: t["short_name"] for t in bootstrap["teams"]}
+    entries = []
+    for etype, want in per_pos.items():
+        for e in by_pos[etype][:want]:
+            xp, note = fpl_tools._player_xp_horizon(e, fixture_lookup, event)
+            xp_gw, _ = fpl_tools._player_xp(e, fixture_lookup, event=event)
+            entries.append(fpl_tools._pool_entry(
+                e, teams_by_id, xp, note, fpl_tools.POS_MAP[etype],
+                selling_price=e["now_cost"] / 10.0, xp_gw=xp_gw, event=event))
+    return entries
+
+
 def squad_to_pool_entries(bootstrap, squad, fixture_lookup, event, risk="balanced"):
     """Convert bootstrap elements into the pool-entry shape _solve_squad wants."""
     teams_by_id = {t["id"]: t["short_name"] for t in bootstrap["teams"]}
     entries = []
     for e in squad:
-        xp, note = fpl_tools._player_xp_horizon(e, fixture_lookup, event, risk=risk)
-        xp_gw, _ = fpl_tools._player_xp(e, fixture_lookup, event=event, risk=risk)
+        xp, note = fpl_tools._player_xp_horizon(e, fixture_lookup, event)
+        xp_gw, _ = fpl_tools._player_xp(e, fixture_lookup, event=event)
         entries.append(fpl_tools._pool_entry(
             e, teams_by_id, xp, note, fpl_tools.POS_MAP[e["element_type"]],
             selling_price=e["now_cost"] / 10.0, xp_gw=xp_gw, event=event,

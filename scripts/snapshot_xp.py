@@ -47,7 +47,7 @@ def main() -> None:
         pos = fpl_tools.POS_MAP.get(e.get("element_type"))
         if not pos:
             continue
-        xp, _note = fpl_tools._player_xp(e, fixture_lookup, event=gw, risk="balanced")
+        xp, _note = fpl_tools._player_xp(e, fixture_lookup, event=gw)
         p0, pc, pf = fpl_tools._minute_distribution(e, e.get("status", "a"))
         cameo_mass = pc
         rotation_variance = p0 * (1.0 - p0) + pc * (1.0 - pc)
@@ -55,7 +55,7 @@ def main() -> None:
         # Base projection at neutral parameters (independent of the tunable weights).
         fpl_tools._WEIGHTS_CACHE = neutral
         try:
-            base_xp, _ = fpl_tools._player_xp(e, fixture_lookup, event=gw, risk="balanced")
+            base_xp, _ = fpl_tools._player_xp(e, fixture_lookup, event=gw)
         finally:
             fpl_tools._WEIGHTS_CACHE = _orig_cache
         rows.append((e["id"], gw, e.get("web_name", "?"), pos, teams_by_id.get(e["team"], "?"),

@@ -58,7 +58,6 @@ ROLL_TRANSFER_VALUE = 1.5
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
 # Phase C — game theory, effective ownership, and two-set chip scheduling.
-PHASE2_START_GW = 26            # GW26+ switches from pure EV to Blocker/Divergence
 CHIP_SET1_EXPIRY_GW = 19        # Set 1 chips expire at the GW19 deadline (2 Jan 2027 13:30 GMT)
 CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
 CAP_LOCK_BONUS = 2.0            # blocker reward for captaining the consensus (highest-EO) asset
@@ -78,7 +77,7 @@ DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-proje
 # terms leaving the forecast) and Stage 5b (EP_BLEND taper, clean sheets,
 # DefCon). One stamp spanning all three would mix materially different
 # predictions under a single label, which is exactly what versioning is for.
-MODEL_VERSION = "v2-dc-centred"
+MODEL_VERSION = "v3-layer1-clean"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -93,13 +92,13 @@ HIT_FLOOR_PENALTY       = 0.5                          # φ: surcharge on low mi
 #   Balanced:                 -6.5 xP  — clear multi-gameweek upgrade to justify a -4.
 #   Aggressive:               -4.0 xP  — raw mathematical cost, allows tactical punts.
 RISK_PROFILES = {
-    "conservative": {"hit_cost": 8.0, "ow_weight": 0.8, "threat_weight": 0.0, "floor_weight": 1.0, "ft_friction": 2.0, "roll_value": 2.0},
-    "balanced":     {"hit_cost": 6.5, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "ft_friction": 1.5, "roll_value": 1.5},
-    "aggressive":   {"hit_cost": 4.0, "ow_weight": -0.8, "threat_weight": 1.2, "floor_weight": -0.2, "ft_friction": 0.5, "roll_value": 0.5},
+    "conservative": {"hit_cost": 8.0, "ft_friction": 2.0, "roll_value": 2.0},
+    "balanced":     {"hit_cost": 6.5, "ft_friction": 1.5, "roll_value": 1.5},
+    "aggressive":   {"hit_cost": 4.0, "ft_friction": 0.5, "roll_value": 0.5},
     # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
     # leader (hunt low-ownership high-xGI differentials).
-    "rank_protecting": {"hit_cost": 4.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.5, "shield_weight": 0.8, "ft_friction": 2.0},
-    "rank_chasing":    {"hit_cost": 3.0, "ow_weight": 0.0, "threat_weight": 0.0, "floor_weight": 0.0, "hunt_weight": 0.6, "ft_friction": 0.5},
+    "rank_protecting": {"hit_cost": 4.0, "ft_friction": 2.0},
+    "rank_chasing":    {"hit_cost": 3.0, "ft_friction": 0.5},
 }
 
 # Display-label aliases so the UI can pass human-readable mode names.
@@ -161,10 +160,6 @@ BENCH_DEAD_WEIGHT = 0.035
 # assets per position by horizon xP, so the starter/bench/captain binaries
 # (~135 pool entries) solve in well under a second.
 POOL_SHORTLIST = {"GK": 20, "DEF": 35, "MID": 35, "FWD": 30}
-CONSERVATIVE_OW_FLOOR = 5.0
-CONSERVATIVE_OW_PENALTY = 1.0
-AGGRESSIVE_OW_CEILING = 10.0
-AGGRESSIVE_DIFF_BONUS = 0.5
 OUT_STATUSES = {"i", "s", "u", "n"}
 
 # Official FPL formation constraints: exactly 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD,
@@ -909,53 +904,25 @@ def _expected_playing_fraction(p: Dict[str, Any], status: str) -> float:
     _p0, p_cameo, p_full = _minute_distribution(p, status)
     return p_full + (30.0 / 90.0) * p_cameo
 
-def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
-    if xp <= 0:
-        return xp
-
-    # Community transfer momentum (applies to every risk profile): net transfers-in
-    # flag bandwagons (price rises, fixture form) while net transfers-out flag
-    # injury exits / price drops. Kept deliberately small.
-    tin = _to_float(p.get("transfers_in_event"))
-    tout = _to_float(p.get("transfers_out_event"))
-    # Goalkeeper crowd momentum is noisy — nerf it to a tighter band so keeper xP
-    # isn't swung around by bandwagon transfer volume.
-    is_gk = p.get("element_type") == 1 or p.get("position") == "GK"
-    cap = 0.1 if is_gk else 0.3
-    momentum = max(-cap, min(cap, (tin - tout) / 100000.0))
-    xp = max(0.0, xp + momentum)
-
-    prof = _risk_profile(risk)
-    ow = _to_float(p.get("selected_by_percent"))
-    adj = 0.0
-
-    if prof.get("ow_weight", 0.0) != 0.0:
-        ow_score = max(-1.0, min(1.0, (ow - 15.0) / 20.0))
-        adj += prof["ow_weight"] * ow_score
-
-    if prof.get("threat_weight", 0.0) != 0.0:
-        threat_score = max(0.0, min(1.0, _to_float(p.get("threat")) / 300.0))
-        adj += prof["threat_weight"] * threat_score
-
-    if prof.get("floor_weight", 0.0) != 0.0:
-        floor = _expected_minute_fraction(p, p.get("status", "a"))
-        adj += prof["floor_weight"] * (floor - 0.7)
-
-    # Rank Protecting (Shield): overweight high-ownership assets (>30%) to
-    # minimise rank volatility when defending a mini-league lead.
-    if prof.get("shield_weight", 0.0) != 0.0:
-        shield = max(0.0, min(1.0, (ow - 30.0) / 40.0))
-        adj += prof["shield_weight"] * shield
-
-    # Rank Chasing (Hunting): penalise template ownership and overweight
-    # low-ownership (<12%) high-xGI differentials to maximise upside when chasing.
-    if prof.get("hunt_weight", 0.0) != 0.0:
-        xgi = _to_float(p.get("expected_goals_per_90")) + _to_float(p.get("expected_assists_per_90"))
-        template_penalty = min(1.0, ow / 50.0)
-        low_ow_boost = max(0.0, (12.0 - ow) / 12.0) * min(xgi / 0.6, 1.0)
-        adj += prof["hunt_weight"] * (low_ow_boost - template_penalty)
-
-    return max(0.0, xp + adj)
+# NOTE (Layer 1 independence): _risk_adjust was deleted here.
+#
+# It added non-predictive preference terms directly onto the points forecast,
+# on every profile including Balanced:
+#   * transfer momentum, (transfers_in - transfers_out)/100000 clamped to +/-0.3.
+#     Net transfers routinely exceed 500k, so this SATURATED: every bandwagon
+#     player simply received +0.3 xP for being popular. Chasing net transfers is
+#     following the crowd, which is the opposite of an edge.
+#   * ownership, threat, floor, shield and hunt tilts, with unfitted
+#     normalisers (threat/300, (ow-15)/20, (ow-30)/40, (12-ow)/12, xgi/0.6).
+#
+# Three consequences, all now gone: the displayed "xP" was a preference score
+# wearing a forecast's label; the same term was ~2% of a horizon number but
+# ~7.5% of a single-gameweek one; and it poisoned calibration, because
+# snapshot_xp.py stores this value as predicted_xp.
+#
+# Preference belongs in the OBJECTIVE, where it is visible and priced, not in
+# the projection. The strategy modes are now expressed through the EO / blocker
+# / divergence terms in _solve_squad.
 
 def _expected_concession_penalty(lam: float, max_goals: Optional[int] = None) -> float:
     """E[floor(G/2)] for G ~ Poisson(lam): the expected -1s for goals conceded.
@@ -1198,10 +1165,15 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
     return max(xp, 0.0), note
 
 
-def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None, risk: str = "balanced") -> Tuple[float, str]:
+def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None) -> Tuple[float, str]:
+    """Single-gameweek expected points. A pure forecast.
+
+    Takes no `risk` argument by design: strategy must not reach the projection.
+    See the Layer 1 note on _player_xp_raw.
+    """
     raw, note = _player_xp_raw(p, fixture_lookup, event)
     gmod = _load_weights()["global_xP_modifier"]
-    return round(max(_risk_adjust(p, raw, risk), 0.0) * gmod, 2), note
+    return round(max(raw, 0.0) * gmod, 2), note
 
 
 def _is_on_tightrope(p: Dict[str, Any], event: Optional[int] = None) -> bool:
@@ -1226,12 +1198,16 @@ def _is_on_tightrope(p: Dict[str, Any], event: Optional[int] = None) -> bool:
     return False
 
 
-def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, risk: str = "balanced", n: int = 4) -> Tuple[float, str]:
+def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> Tuple[float, str]:
     """Multi-gameweek expected points with geometric decay over the horizon.
 
     xP_horizon = 1.0*xP(GW) + 0.85*xP(GW+1) + 0.70*xP(GW+2) + 0.55*xP(GW+3).
-    Risk adjustment is applied once to the weighted total (it is a single-GW
-    market signal). Blank gameweeks contribute 0 without flagging the player.
+    Blank gameweeks contribute 0 without flagging the player.
+
+    Takes no `risk` argument by design. Previously the risk adjustment was
+    applied once to the *horizon* total here but once to a *single* gameweek in
+    _player_xp, so the identical +/-0.3 momentum term was ~2% of one number and
+    ~7.5% of the other. See the Layer 1 note on _player_xp_raw.
     """
     status = p.get("status", "a")
     if status == "i":
@@ -1265,7 +1241,7 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
         note = f"{chance_val}% Chance"
 
     gmod = _load_weights()["global_xP_modifier"]
-    return round(max(_risk_adjust(p, total, risk), 0.0) * gmod, 2), note
+    return round(max(total, 0.0) * gmod, 2), note
 
 def get_upcoming_gameweek() -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
@@ -1701,7 +1677,7 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
         p_data = players_by_id.get(pick["element"])
         if not p_data:
             continue
-        xp, note = _player_xp(p_data, fixture_lookup, event=gw, risk=risk)
+        xp, note = _player_xp(p_data, fixture_lookup, event=gw)
         squad.append({
             "player_id": p_data["id"],
             "name": f"{p_data['first_name']} {p_data['second_name']}",
@@ -1733,15 +1709,12 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
         "squad": squad
     }
 
-def _ownership_adjust(e, xp, risk):
-    """Tilt xP by ownership to make strategy modes mechanically distinct."""
-    ow = _to_float(e.get("selected_by_percent"))
-    if risk == "conservative" and ow < CONSERVATIVE_OW_FLOOR:
-        return max(0.0, xp - CONSERVATIVE_OW_PENALTY)
-    if risk == "aggressive" and ow < AGGRESSIVE_OW_CEILING:
-        return xp + AGGRESSIVE_DIFF_BONUS
-    return xp
-
+# NOTE (Layer 1 independence): _ownership_adjust was deleted here.
+#
+# It tilted pool xP by ownership "to make strategy modes mechanically distinct",
+# double-counting the ow_weight term that _risk_adjust was already applying. It
+# also compared risk == "conservative" against the raw string, bypassing
+# _RISK_ALIASES, so it silently did nothing for "rank protecting (shield)".
 
 _EO_CACHE: Optional[Dict[int, Dict[str, float]]] = None
 _EO_CACHE_TS: float = 0.0
@@ -1863,7 +1836,7 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
         e = elements[pid]
         row = []
         for t in range(n):
-            xp, _ = _player_xp(e, fixture_lookup, event=event + t, risk=risk)
+            xp, _ = _player_xp(e, fixture_lookup, event=event + t)
             row.append(xp)
         base[pid] = row
         _p0, _pc, _pf = _minute_distribution(e, e.get("status", "a"))
@@ -2114,8 +2087,15 @@ def suggest_transfers_for_custom_squad(
     if current_gw is None:
         current_gw = event
 
+    # Rank-aware logic is driven by the STRATEGY the manager picked, not by the
+    # calendar. This was gated behind current_gw >= PHASE2_START_GW (26), so for
+    # gameweeks 1-25 the EO, blocker, divergence, stack and CVaR terms were all
+    # inert and "Protect my lead" produced a byte-identical squad to "Balanced".
+    # With the strategy tilts now removed from Layer 1 (see _risk_adjust's
+    # deletion note), the objective is the ONLY place strategy can express
+    # itself -- so gating it here would leave the selector doing nothing at all.
     mode = _strategy_mode(risk)
-    phase = 2 if current_gw >= PHASE2_START_GW else 1
+    phase = 2 if mode in ("blocker", "divergence") else 1
     eo_map = _eo_map() if phase >= 2 else None
 
     hit_cost = _risk_profile(risk)["hit_cost"]
@@ -2150,9 +2130,8 @@ def suggest_transfers_for_custom_squad(
         pos = POS_MAP.get(e["element_type"])
         # Multi-GW horizon xP drives the solver; keep the single-GW xP alongside
         # for final lineup/captaincy decisions (which are per-gameweek).
-        xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
-        xp = _ownership_adjust(e, xp, risk)
-        xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
+        xp, note = _player_xp_horizon(e, fixture_lookup, event)
+        xp_gw, _ = _player_xp(e, fixture_lookup, event=event)
         fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
                                 selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr, event=event,
@@ -2171,14 +2150,14 @@ def suggest_transfers_for_custom_squad(
         pos = POS_MAP.get(e["element_type"])
         if not pos:
             continue
-        xp, note = _player_xp_horizon(e, fixture_lookup, event, risk=risk)
+        xp, note = _player_xp_horizon(e, fixture_lookup, event)
         if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable", "No minutes"):
             continue
-        incoming_by_pos[pos].append((_ownership_adjust(e, xp, risk), note, e))
+        incoming_by_pos[pos].append((xp, note, e))
     for pos, entries in incoming_by_pos.items():
         entries.sort(key=lambda t: t[0], reverse=True)
         for xp, note, e in entries[:POOL_SHORTLIST.get(pos, 30)]:
-            xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
+            xp_gw, _ = _player_xp(e, fixture_lookup, event=event)
             fdr = _player_fdr_list(e, fixture_lookup, event)
             pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
                                     holding_map=holding_map,
@@ -2322,7 +2301,7 @@ def suggest_transfers_for_custom_squad(
     for in_id in bought_ids:
         fpl_p = elements_by_id[in_id]
         pos = POS_MAP.get(fpl_p["element_type"])
-        xp, note = _player_xp(fpl_p, fixture_lookup, event=event, risk=risk)
+        xp, note = _player_xp(fpl_p, fixture_lookup, event=event)
         std_squad.append({
             "player_id": fpl_p["id"],
             "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
@@ -2478,7 +2457,7 @@ def rank_players_by_xp(position: str = None, max_price: float = None, limit: int
         if max_price and max_price > 0 and price > max_price:
             continue
 
-        xp, note = _player_xp(p, fixture_lookup, event=event, risk=risk)
+        xp, note = _player_xp(p, fixture_lookup, event=event)
 
         # Hazard icon so unadjusted baselines never mislead the user.
         chance = p.get("chance_of_playing_next_round")

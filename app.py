@@ -720,7 +720,10 @@ def _regression_row(r, high: bool) -> str:
     )
 
 
-def _radar_shortlists(kind: str, limit: int = 12, risk: str = "balanced"):
+def _radar_shortlists(kind: str, limit: int = 12):
+    # No `risk` parameter: the radar ranks on the projection, which is now
+    # strategy-blind by construction. Keeping the argument would imply the
+    # shortlist responds to strategy when it cannot.
     ctx = _bootstrap_ctx()
     if not ctx:
         return []
@@ -735,7 +738,7 @@ def _radar_shortlists(kind: str, limit: int = 12, risk: str = "balanced"):
         if not pos:
             continue
         price = _num(e.get("now_cost")) / 10.0
-        xp4, note = fpl_tools._player_xp_horizon(e, lookup, start, risk=risk, n=4)
+        xp4, note = fpl_tools._player_xp_horizon(e, lookup, start, n=4)
         if note in ("Injured", "Suspended", "Unavailable", "No minutes", "Blank"):
             continue
         if xp4 <= 0:
@@ -1395,7 +1398,7 @@ with tab_planner:
                 for p in bootstrap.get("elements", []):
                     pos = pos_map.get(p["element_type"])
                     if pos:
-                        xp, _ = fpl_tools._player_xp(p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
+                        xp, _ = fpl_tools._player_xp(p, fixture_lookup, event=GW_ID)
                         initial = p['first_name'][0] + "." if p.get('first_name') else ""
                         display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m | {xp} xP"
                         dropdown_options[pos].append((p["id"], display))
@@ -1503,7 +1506,7 @@ with tab_planner:
                                 
                             for pid in active_squad_ids:
                                 fpl_p = players_by_id.get(pid)
-                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
+                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID)
                                 analysed.append({
                                     "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
                                     "team": teams.get(fpl_p["team"], "?"), "team_id": fpl_p["team"],
@@ -1614,7 +1617,7 @@ with tab_planner:
                             for _p in ov["analysed_squad"]:
                                 _fp = _players.get(_p["player_id"])
                                 if _fp:
-                                    _xp, _note = fpl_tools._player_xp(_fp, _fl, event=GW_ID, risk=risk_label.lower())
+                                    _xp, _note = fpl_tools._player_xp(_fp, _fl, event=GW_ID)
                                     _p["xp"] = _xp
                                     _p["status"] = _note
                         except Exception:
@@ -2018,7 +2021,7 @@ with tab_planner:
                             
                             for pid in new_ids:
                                 fpl_p = players_by_id.get(pid)
-                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
+                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID)
                                 analysed_final.append({
                                     "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
                                     "team": teams.get(fpl_p["team"], "?"), "team_id": fpl_p["team"],
@@ -2373,7 +2376,7 @@ with tab_radar:
     st.markdown("#### 🎯 Player Radar Shortlists")
     kind = st.radio("Filter", ["Differentials", "Best Value", "Top Points"], horizontal=True, key="radar_kind")
     kmap = {"Differentials": "differentials", "Best Value": "value", "Top Points": "points"}
-    rows = _radar_shortlists(kmap[kind], limit=12, risk=risk)
+    rows = _radar_shortlists(kmap[kind], limit=12)
     if rows:
         ctx = _bootstrap_ctx()
         lookup = ctx["lookup"]; start = ctx["start"]
