@@ -2,3 +2,5 @@
 venv/
 .claude/
 .streamlit/secrets.toml
+__pycache__/
+*.pyc
