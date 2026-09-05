@@ -1,3 +1,4 @@
+import gzip
 import math
 import os
 import json
@@ -56,6 +57,93 @@ def get_db_connection():
         return psycopg2.connect(url)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+# Every table the application reads or writes, created in one place.
+#
+# `fpl_predictions` and `manager_transfer_ledger` previously had no CREATE
+# statement anywhere in the repository: the calibration snapshot would fail on a
+# fresh database with UndefinedTable, and the ledger's ON CONFLICT DO NOTHING
+# had no unique constraint to act on, so re-running the backfill duplicated rows
+# instead of no-oping.
+#
+# The other tables are also created lazily inside their writers. That is left in
+# place for now (removing the per-insert DDL is Stage 8) -- these statements are
+# idempotent, so running both is harmless.
+_SCHEMA = (
+    # Calibration loop: pre-deadline predictions, joined to realised points.
+    """
+    CREATE TABLE IF NOT EXISTS fpl_predictions (
+        id BIGSERIAL PRIMARY KEY,
+        player_id INTEGER NOT NULL,
+        gameweek INTEGER NOT NULL,
+        player_name TEXT,
+        position TEXT,
+        team TEXT,
+        predicted_xp DOUBLE PRECISION,
+        actual_points DOUBLE PRECISION,
+        base_pts DOUBLE PRECISION,
+        cameo_mass DOUBLE PRECISION,
+        rotation_variance DOUBLE PRECISION,
+        dc_sensitivity DOUBLE PRECISION,
+        minutes_floor DOUBLE PRECISION,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (player_id, gameweek))
+    """,
+    "CREATE INDEX IF NOT EXISTS fpl_predictions_gw_idx ON fpl_predictions (gameweek)",
+    # Ledger: establishes true purchase price, and therefore selling price, per
+    # manager. The UNIQUE is what makes the backfill's ON CONFLICT idempotent.
+    """
+    CREATE TABLE IF NOT EXISTS manager_transfer_ledger (
+        id BIGSERIAL PRIMARY KEY,
+        manager_id BIGINT NOT NULL,
+        player_id INTEGER NOT NULL,
+        gameweek INTEGER NOT NULL,
+        direction TEXT NOT NULL,
+        purchase_price DOUBLE PRECISION,
+        selling_price DOUBLE PRECISION,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (manager_id, player_id, gameweek, direction))
+    """,
+    "CREATE INDEX IF NOT EXISTS manager_ledger_mgr_idx ON manager_transfer_ledger (manager_id)",
+    # Archive of the raw FPL bootstrap, so the Stage 8 backtester can replay a
+    # gameweek against the data the model actually saw at the time. Payload is
+    # gzipped JSON: raw is ~3MB, compressed ~250KB.
+    """
+    CREATE TABLE IF NOT EXISTS bootstrap_snapshots (
+        id BIGSERIAL PRIMARY KEY,
+        gameweek INTEGER NOT NULL,
+        captured_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        captured_at TIMESTAMPTZ DEFAULT NOW(),
+        payload BYTEA NOT NULL,
+        UNIQUE (gameweek, captured_date))
+    """,
+)
+
+
+def run_migrations():
+    """Create every table the app needs. Idempotent; safe to call on each boot.
+
+    Returns True on success, False if the database is unreachable or the DDL
+    failed -- callers that care should surface that rather than assume success.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    try:
+        with conn.cursor() as cur:
+            for stmt in _SCHEMA:
+                cur.execute(stmt)
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 
 def _reconstruct_holdings(rows):
@@ -291,6 +379,66 @@ def get_prediction_history():
             conn.close()
     except Exception:
         return []
+
+
+def save_bootstrap_snapshot(bootstrap, gameweek):
+    """Archive the raw FPL bootstrap for later replay.
+
+    One row per (gameweek, date), so re-running on the same day overwrites
+    rather than accumulating. Payload is gzipped JSON.
+
+    This is what the Stage 8 backtester replays against: without an archive of
+    what the model could see at the time, "did this change help?" is not an
+    answerable question. Every day this is not running is a day of history lost,
+    which is why it lands in Stage 0 rather than alongside the backtester.
+    """
+    try:
+        payload = gzip.compress(json.dumps(bootstrap, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return False
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO bootstrap_snapshots (gameweek, payload) VALUES (%s, %s) "
+                "ON CONFLICT (gameweek, captured_date) DO UPDATE "
+                "SET payload = EXCLUDED.payload, captured_at = NOW()",
+                (int(gameweek), psycopg2.Binary(payload)),
+            )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def load_bootstrap_snapshot(gameweek, captured_date=None):
+    """Return an archived bootstrap dict, or None. Used by the backtester."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            if captured_date is None:
+                cur.execute(
+                    "SELECT payload FROM bootstrap_snapshots WHERE gameweek = %s "
+                    "ORDER BY captured_at DESC LIMIT 1", (int(gameweek),))
+            else:
+                cur.execute(
+                    "SELECT payload FROM bootstrap_snapshots "
+                    "WHERE gameweek = %s AND captured_date = %s", (int(gameweek), captured_date))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return json.loads(gzip.decompress(bytes(row[0])).decode("utf-8"))
+    except Exception:
+        return None
+    finally:
+        conn.close()
 
 
 def save_plan(manager_id, gameweek, plan):

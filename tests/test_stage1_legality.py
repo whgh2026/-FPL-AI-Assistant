@@ -60,7 +60,7 @@ class FormationLegalityTest(unittest.TestCase):
         """Every fixture squad must yield a legal XI from the MIP itself."""
         with harness.synthetic_world() as (bs, _fx):
             lookup = fpl_tools._build_fixture_lookup(bs)
-            for name, _desc in harness.SQUAD_SPECS:
+            for name, _desc in harness.active_squads():
                 with self.subTest(squad=name):
                     squad = harness.build_squad(bs, name)
                     entries = harness.squad_to_pool_entries(bs, squad, lookup, EVENT)
@@ -78,7 +78,7 @@ class FormationLegalityTest(unittest.TestCase):
         """The 2/5/5/3 split and the 3-per-club cap hold on every solve."""
         with harness.synthetic_world() as (bs, _fx):
             lookup = fpl_tools._build_fixture_lookup(bs)
-            for name, _desc in harness.SQUAD_SPECS:
+            for name, _desc in harness.active_squads():
                 with self.subTest(squad=name):
                     entries = harness.squad_to_pool_entries(
                         bs, harness.build_squad(bs, name), lookup, EVENT)

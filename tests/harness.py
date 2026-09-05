@@ -112,6 +112,21 @@ SMOKE_SQUADS = [
 ]
 
 
+def active_squads():
+    """Squad names for the current scope.
+
+    20 squads x 4 solve paths is 80 MILP solves; at the deterministic profile's
+    60s ceiling that is a worst case no one wants blocking a pull request. So
+    per-commit CI runs the 5-squad smoke set (both traps included, so the Stage 1
+    gate keeps its teeth) and the nightly job runs all 20.
+
+    FPL_GOLDEN_SCOPE=full forces the complete set locally.
+    """
+    if os.environ.get("FPL_GOLDEN_SCOPE", "full").lower() == "smoke":
+        return [(n, d) for n, d in SQUAD_SPECS if n in SMOKE_SQUADS]
+    return list(SQUAD_SPECS)
+
+
 def _by_pos(bootstrap):
     out = {1: [], 2: [], 3: [], 4: []}
     for e in bootstrap["elements"]:

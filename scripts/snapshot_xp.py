@@ -12,16 +12,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import psycopg2
 import fpl_tools
+import db
 
 
 def _connect():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(url)
+    return psycopg2.connect(url, connect_timeout=10)
 
 
 def main() -> None:
+    # Schema first. This script writes base_pts/cameo_mass/rotation_variance/
+    # dc_sensitivity/minutes_floor, but ensure_calibration_columns() was only
+    # ever called from auto_tune.py -- so on a fresh database the Friday
+    # snapshot failed with UndefinedColumn, and the columns only appeared the
+    # following Wednesday. The migration belongs with the writer.
+    db.run_migrations()
+    db.ensure_calibration_columns()
+
     bootstrap = fpl_tools._get_bootstrap()
     fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
     teams_by_id = {t["id"]: t.get("short_name", t.get("name", "?")) for t in bootstrap.get("teams", [])}
