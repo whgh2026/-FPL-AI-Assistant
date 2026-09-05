@@ -29,10 +29,13 @@ except ImportError:
 # Decaying transfer tax (anti-whipsaw). Lives in db.py (persistent ledger); fall
 # back to a no-op if the module is unavailable so the solver stays importable.
 try:
-    from db import calculate_decaying_tax
+    from db import calculate_decaying_tax, save_team_ratings
 except ImportError:
     def calculate_decaying_tax(current_gw, purchase_gw, status="a"):
         return 0.0
+
+    def save_team_ratings(ratings, gameweek=None):
+        return False
 
 BASE_URL = "https://fantasy.premierleague.com/api"
 
@@ -83,7 +86,7 @@ _RISK_ALIASES = {
 # easy fixtures across the 4-GW horizon).
 ROTATION_PAIR_BONUS = 0.35
 ROTATION_MAX_PRICE = 4.5
-ROTATION_EASY_FDR = 2
+ROTATION_EASY = 4.0   # continuous fixture-ease floor (6 - opp_strength_def) for a rotation pair
 
 # ======================================================================
 # FUTURE COMMERCIAL ROADMAP — remaining optimization edges (next phase)
@@ -117,12 +120,13 @@ TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
 HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1: scales the -4 hit to the 4-GW horizon
 ROLL_HURDLE = 1.5                    # immediate-GW xP bar when holding exactly 1 FT
-# Bench slot activation probabilities. The reserve keeper (~5%) never comes on
-# for partial cameos, which is what permanently suppresses backup-GK churn
-# without a magic friction constant; the outfield bench slots are valued at a
-# uniform ~12% (the mean of B1 0.30 / B2 0.06 / B3 0.01) for Phase A.
+# Convex bench ordering (Λ): the reserve keeper (~5%) never comes on for partial
+# cameos (which suppresses backup-GK churn); the outfield bench is two-tiered —
+# the "12th man" (B1, ~30%) is the likeliest autosub, while B2/B3 are near-dead
+# capital (~3.5%, the mean of 0.06/0.01).
 BENCH_GK_WEIGHT = 0.05
-BENCH_OUTFIELD_WEIGHT = 0.12
+BENCH_B1_WEIGHT = 0.30
+BENCH_DEAD_WEIGHT = 0.035
 # Market candidate shortlist entering the MIP: the manager's 15 plus the top
 # assets per position by horizon xP, so the starter/bench/captain binaries
 # (~135 pool entries) solve in well under a second.
@@ -169,6 +173,14 @@ def _get_bootstrap() -> Dict[str, Any]:
 
 def _get_fixtures() -> List[Dict[str, Any]]:
     return _cached_json(f"{BASE_URL}/fixtures/?future=1")
+
+
+def _get_all_fixtures() -> List[Dict[str, Any]]:
+    """Full-season fixtures (results + schedule) for the Dixon-Coles fit."""
+    try:
+        return _cached_json(f"{BASE_URL}/fixtures/")
+    except Exception:
+        return []
 
 def _to_float(v: Any) -> float:
     try:
@@ -262,17 +274,150 @@ def _league_averages() -> Dict[str, Dict[str, float]]:
     _LEAGUE_AVG_TS = time.time()
     return _LEAGUE_AVG
 
-def _team_strength(team: Dict[str, Any], away: bool, which: str) -> float:
-    suffix = "away" if away else "home"
-    if which == "def":
-        val = team.get(f"strength_defence_{suffix}")
-    else:
-        val = team.get(f"strength_attack_{suffix}")
-    if val in (None, 0):
-        val = team.get(f"strength_overall_{suffix}")
-    if val in (None, 0):
-        val = 3.0
-    return float(val)
+def _weeks_ago(kickoff_time: Any, now: float) -> float:
+    try:
+        dt = dateutil.parser.isoparse(str(kickoff_time))
+        return max(0.0, (now - dt.timestamp()) / (7.0 * 86400.0))
+    except Exception:
+        return 0.0
+
+
+def _tau_correction(x: float, y: float, lh: float, la: float, rho: float):
+    """Dixon-Coles low-score correction and its partial derivatives.
+
+    Returns (tau, d_tau/d_lh, d_tau/d_la, d_tau/d_rho). Corrects the 0-0, 1-0,
+    0-1 and 1-1 scorelines which the independent-Poisson model over-predicts.
+    """
+    if x == 0 and y == 0:
+        return 1.0 - lh * la * rho, -la * rho, -lh * rho, -lh * la
+    if x == 1 and y == 0:
+        return 1.0 + lh * rho, rho, 0.0, lh
+    if x == 0 and y == 1:
+        return 1.0 + la * rho, 0.0, rho, la
+    if x == 1 and y == 1:
+        return 1.0 - rho, 0.0, 0.0, -1.0
+    return 1.0, 0.0, 0.0, 0.0
+
+
+def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=0.2, iterations=300, lr=0.1):
+    """Time-decayed Dixon-Coles bivariate Poisson -> ({team_id: {'att','def'}}, gamma, rho).
+
+    lambda_home = exp(att[h] - def[a] + gamma); lambda_away = exp(att[a] - def[h]).
+    Attack strengths are centred (zero mean) for identifiability; defence absorbs
+    the overall scoring level. Pure-Python gradient ascent (no scipy/numpy).
+    """
+    team_ids = sorted({f["team_h"] for f in finished_fixtures} | {f["team_a"] for f in finished_fixtures})
+    if not team_ids:
+        return {}, 0.25, 0.2
+    idx = {t: i for i, t in enumerate(team_ids)}
+    n = len(team_ids)
+    att = [0.0] * n
+    dfn = [0.0] * n
+    gamma = 0.25
+    rho = tau
+    now = time.time()
+    matches = []
+    for f in finished_fixtures:
+        h = idx.get(f.get("team_h"))
+        a = idx.get(f.get("team_a"))
+        if h is None or a is None:
+            continue
+        x = _to_float(f.get("team_h_score"))
+        y = _to_float(f.get("team_a_score"))
+        w = math.exp(-decay * _weeks_ago(f.get("kickoff_time"), now))
+        matches.append((h, a, x, y, w))
+
+    total_w = sum(w for _, _, _, _, w in matches) or 1.0
+    for it in range(iterations):
+        step = lr * (0.5 ** (it // 100))
+        g_att = [0.0] * n
+        g_dfn = [0.0] * n
+        g_gamma = 0.0
+        g_rho = 0.0
+        for h, a, x, y, w in matches:
+            lh = math.exp(max(-6.0, min(6.0, att[h] - dfn[a] + gamma)))
+            la = math.exp(max(-6.0, min(6.0, att[a] - dfn[h])))
+            g_att[h] += w * (x - lh)
+            g_dfn[a] += w * (lh - x)
+            g_att[a] += w * (y - la)
+            g_dfn[h] += w * (la - y)
+            g_gamma += w * (x - lh)
+            tc, dtc_lh, dtc_la, dtc_rho = _tau_correction(x, y, lh, la, rho)
+            if tc > 0.0:
+                g_att[h] += w * (dtc_lh / tc) * lh
+                g_dfn[a] += w * (dtc_lh / tc) * (-lh)
+                g_att[a] += w * (dtc_la / tc) * la
+                g_dfn[h] += w * (dtc_la / tc) * (-la)
+                g_gamma += w * (dtc_lh / tc) * lh
+                g_rho += w * (dtc_rho / tc)
+        for i in range(n):
+            att[i] += step * g_att[i] / total_w
+            dfn[i] += step * g_dfn[i] / total_w
+        gamma += step * g_gamma / total_w
+        rho = max(-0.3, min(0.3, rho + step * g_rho / total_w))
+        ca = sum(att) / n
+        att = [v - ca for v in att]
+
+    ratings = {tid: {"att": att[idx[tid]], "def": dfn[idx[tid]]} for tid in team_ids}
+    return ratings, gamma, rho
+
+
+_TEAM_RATINGS_CACHE: Optional[Dict[int, Dict[str, float]]] = None
+_TEAM_RATINGS_TS: float = 0.0
+
+
+def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
+    """Continuous Dixon-Coles attack/defence ratings per team on a [1,5]-ish scale.
+
+    Blended with FPL overall strength early in the season (few finished fixtures)
+    and shifted toward pure Dixon-Coles as results accrue. Returns
+    {team_id: {'att','def','att_home','att_away','def_home','def_away'}}.
+    """
+    global _TEAM_RATINGS_CACHE, _TEAM_RATINGS_TS
+    if _TEAM_RATINGS_CACHE is not None and (time.time() - _TEAM_RATINGS_TS) < 300:
+        return _TEAM_RATINGS_CACHE
+
+    bootstrap = _get_bootstrap()
+    teams = {t["id"]: t for t in bootstrap.get("teams", [])}
+    finished = [f for f in _get_all_fixtures() if f.get("finished")]
+    w = _load_weights()
+    scale = w.get("rating_scale", 2.0)
+
+    dc, gamma, _rho = ({}, 0.25, 0.2)
+    if len(finished) >= 5:
+        dc, gamma, _rho = _fit_dixon_coles(
+            finished, decay=w.get("dixon_coles_decay", 0.03), tau=w.get("dixon_coles_tau", 0.2)
+        )
+    dc_blend = min(1.0, len(finished) / 100.0) if dc else 0.0
+
+    out = {}
+    for tid, team in teams.items():
+        ov_h = _to_float(team.get("strength_overall_home") or 0.0)
+        ov_a = _to_float(team.get("strength_overall_away") or 0.0)
+        fpl_overall = (ov_h + ov_a) / 2.0 if (ov_h and ov_a) else 3.0
+        if dc and tid in dc:
+            dc_att = 3.0 + dc[tid]["att"] * scale
+            dc_def = 3.0 - dc[tid]["def"] * scale
+        else:
+            dc_att = dc_def = fpl_overall
+        att = dc_blend * dc_att + (1.0 - dc_blend) * fpl_overall
+        dfn = dc_blend * dc_def + (1.0 - dc_blend) * fpl_overall
+        half = (gamma / 2.0) * scale
+        out[tid] = {
+            "att": round(att, 2),
+            "def": round(dfn, 2),
+            "att_home": round(min(5.0, max(1.0, att + half)), 2),
+            "att_away": round(min(5.0, max(1.0, att - half)), 2),
+            "def_home": round(min(5.0, max(1.0, dfn + half)), 2),
+            "def_away": round(min(5.0, max(1.0, dfn - half)), 2),
+        }
+    _TEAM_RATINGS_CACHE = out
+    _TEAM_RATINGS_TS = time.time()
+    try:
+        save_team_ratings(out, _next_gameweek(bootstrap))
+    except Exception:
+        pass
+    return out
 
 # ------------------------------------------------------------------
 # Live odds (The Odds API) integration
@@ -431,19 +576,23 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
         return {}
 
     win_probs = _fetch_market_win_probs(bootstrap)
+    ratings = _team_attack_def_ratings()
 
     lookup: Dict[int, List[Dict[str, Any]]] = {}
     for f in fixtures:
         h, a = f["team_h"], f["team_a"]
         event = f.get("event")
+        rh = ratings.get(h, {})
+        ra = ratings.get(a, {})
         home_fx = {
             "event": event,
             "is_home": True,
             "opponent": a,
             "kickoff_time": f.get("kickoff_time"),
-            "difficulty": f.get("team_h_difficulty") or 3,
-            "opp_strength_def": _team_strength(teams.get(a, {}), away=True, which="def"),
-            "opp_strength_att": _team_strength(teams.get(a, {}), away=True, which="att"),
+            # Continuous Dixon-Coles matchup: the away side's attack/defence when
+            # on the road (venue-adjusted). Higher def = tougher for our attackers.
+            "opp_strength_def": ra.get("def_away", 3.0),
+            "opp_strength_att": ra.get("att_away", 3.0),
             "win_prob": win_probs.get(h, {}).get(a),
         }
         away_fx = {
@@ -451,9 +600,8 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
             "is_home": False,
             "opponent": h,
             "kickoff_time": f.get("kickoff_time"),
-            "difficulty": f.get("team_a_difficulty") or 3,
-            "opp_strength_def": _team_strength(teams.get(h, {}), away=False, which="def"),
-            "opp_strength_att": _team_strength(teams.get(h, {}), away=False, which="att"),
+            "opp_strength_def": rh.get("def_home", 3.0),
+            "opp_strength_att": rh.get("att_home", 3.0),
             "win_prob": win_probs.get(a, {}).get(h),
         }
         lookup.setdefault(h, []).append(home_fx)
@@ -486,10 +634,10 @@ def _fixture_traffic_lights(team_id: int, fixture_lookup: Dict[int, List[Dict[st
             else:
                 lights.append("🔴")
         else:
-            fdr = fx.get("difficulty") or 3
-            if fdr <= 2:
+            opp_def = fx.get("opp_strength_def") or 3
+            if opp_def <= 2.0:
                 lights.append("🟢")
-            elif fdr == 3:
+            elif opp_def <= 3.2:
                 lights.append("🟡")
             else:
                 lights.append("🔴")
@@ -507,6 +655,70 @@ def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
     else:
         frac = 1.0
     return max(0.0, min(1.0, frac))
+
+
+_TEAM_PLAYED: Optional[Dict[int, int]] = None
+_TEAM_PLAYED_TS: float = 0.0
+
+
+def _team_played_map() -> Dict[int, int]:
+    global _TEAM_PLAYED, _TEAM_PLAYED_TS
+    if _TEAM_PLAYED is not None and (time.time() - _TEAM_PLAYED_TS) < 300:
+        return _TEAM_PLAYED
+    bootstrap = _get_bootstrap()
+    _TEAM_PLAYED = {t["id"]: int(t.get("played") or 0) for t in bootstrap.get("teams", [])}
+    _TEAM_PLAYED_TS = time.time()
+    return _TEAM_PLAYED
+
+
+def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, float]:
+    """Tri-state minutes distribution (P(M=0), P(1<=M<=59), P(M>=60)).
+
+    Derived from season starts, minutes and the team's games played, scaled by the
+    FPL availability flag. GKs are all-or-nothing (keepers never register cameos).
+    """
+    if status in OUT_STATUSES:
+        return (1.0, 0.0, 0.0)
+    chance = p.get("chance_of_playing_next_round")
+    if chance is None:
+        chance = p.get("chance_of_playing_this_round")
+    avail = 1.0 if chance is None else max(0.0, min(1.0, _to_float(chance) / 100.0))
+
+    is_gk = (p.get("element_type") == 1) or (p.get("position") == "GK")
+    starts = _to_float(p.get("starts"))
+    minutes = _to_float(p.get("minutes"))
+    games = max(starts, float(_team_played_map().get(p.get("team"), 0)), 1.0)
+
+    if is_gk:
+        start_rate = min(1.0, starts / games) if starts > 0 else (1.0 if minutes >= 60 else 0.0)
+        p_full = avail * start_rate
+        p_cameo = 0.0
+    else:
+        if starts > 0:
+            start_rate = min(1.0, starts / games)
+        else:
+            # Starts unreported: infer from minutes (treat as full-game starts) so a
+            # 1000-minute player is a nailed starter, not a 100% cameo sub.
+            start_rate = min(1.0, (minutes / 90.0) / games) if minutes > 0 else 0.0
+        sub_minutes = max(0.0, minutes - start_rate * games * 90.0)
+        sub_apps = sub_minutes / 30.0
+        sub_rate = min(sub_apps / games, max(0.0, 1.0 - start_rate))
+        p_full = avail * start_rate
+        p_cameo = avail * sub_rate
+
+    p0 = 1.0 - p_full - p_cameo
+    total = p_full + p_cameo + p0
+    if total > 0:
+        p_full /= total
+        p_cameo /= total
+        p0 /= total
+    return (max(0.0, p0), max(0.0, p_cameo), max(0.0, p_full))
+
+
+def _expected_playing_fraction(p: Dict[str, Any], status: str) -> float:
+    """Expected minutes/90 from the tri-state distribution."""
+    _p0, p_cameo, p_full = _minute_distribution(p, status)
+    return p_full + (30.0 / 90.0) * p_cameo
 
 def _risk_adjust(p: Dict[str, Any], xp: float, risk: str) -> float:
     if xp <= 0:
@@ -596,7 +808,16 @@ def _load_weights() -> Dict[str, float]:
     global _WEIGHTS_CACHE
     if _WEIGHTS_CACHE is not None:
         return _WEIGHTS_CACHE
-    defaults = {"global_xP_modifier": 1.0, "home_advantage": 1.0, "clean_sheet_confidence": 1.0}
+    defaults = {
+        "global_xP_modifier": 1.0,
+        "home_advantage": 1.0,
+        "clean_sheet_confidence": 1.0,
+        "autosub_ref": 1.8,
+        "rotation_convexity": 0.4,
+        "dixon_coles_decay": 0.03,
+        "dixon_coles_tau": 0.2,
+        "rating_scale": 2.0,
+    }
     weights = dict(defaults)
     try:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.json")
@@ -695,8 +916,6 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
     if _to_float(p.get("minutes", 0)) <= 0 and (event is None or event > 1):
         return 0.0, "No minutes"
 
-    min_frac = _expected_minute_fraction(p, status)
-
     fixtures = fixture_lookup.get(team_id, [])
     if event is not None:
         target = [f for f in fixtures if f.get("event") == event]
@@ -714,13 +933,27 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
     elif chance_val is not None and chance_val < 100:
         note = f"{chance_val}% Chance"
 
-    our_total = sum(_xp_for_fixture(p, f, 90.0 * min_frac, pos_id) for f in target)
+    # Categorical minutes (the cameo guard): P(M=0) / P(1<=M<=59) / P(M>=60).
+    p0, p_cameo, p_full = _minute_distribution(p, status)
+
+    xp_full = sum(_xp_for_fixture(p, f, 90.0, pos_id) for f in target)
+    xp_cameo = sum(_xp_for_fixture(p, f, 30.0, pos_id) for f in target)
+    our_total = p_full * xp_full + p_cameo * xp_cameo
+
+    _w = _load_weights()
+    # A 1-59 cameo earns ~1pt but blocks an autosub worth ~autosub_ref: net negative.
+    cameo_penalty = p_cameo * max(0.0, _w.get("autosub_ref", 1.8) - xp_cameo)
+    # Rotation convexity discount: unpredictable starters carry extra variance.
+    variance = p0 * (1.0 - p0) + p_cameo * (1.0 - p_cameo)
+    rotation_penalty = _w.get("rotation_convexity", 0.4) * variance
+    our_total = our_total - cameo_penalty - rotation_penalty
 
     ep_next = _to_float(p.get("ep_next"))
     if ep_next > 0:
-        # Availability haircut applied to BOTH the model projection and FPL's own
-        # projection, so doubtful assets never display an unadjusted baseline.
-        xp = (1.0 - EP_BLEND) * our_total + EP_BLEND * ep_next * min_frac
+        # Availability-adjusted minutes fraction applied to FPL's own projection,
+        # so doubtful assets never display an unadjusted baseline.
+        blend_frac = p_full + (30.0 / 90.0) * p_cameo
+        xp = (1.0 - EP_BLEND) * our_total + EP_BLEND * ep_next * blend_frac
     else:
         xp = our_total
 
@@ -850,14 +1083,19 @@ def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
         return 1
 
 def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> List[float]:
-    """Fixture Difficulty Rating for the next n gameweeks (5 = blank/hard)."""
+    """Continuous fixture-ease series for the next n gameweeks (5 = easiest, 0 = blank).
+
+    Ease = 6 - opponent's Dixon-Coles defensive strength, replacing the official
+    1-5 FDR so an elite attack against a leaky defence reads differently to the
+    same attack against an elite defence.
+    """
     team_id = p.get("team")
     fx = fixture_lookup.get(team_id, [])
     out = []
     for i in range(n):
         ev = start_event + i
         f = next((x for x in fx if x.get("event") == ev), None)
-        out.append(float(f.get("difficulty", 3)) if f else 5.0)
+        out.append(6.0 - _to_float(f.get("opp_strength_def", 3.0)) if f else 0.0)
     return out
 
 
@@ -905,7 +1143,7 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         "xp": xp,
         "status": note,
         "on_yellow_card_tightrope": _is_on_tightrope(e, event),
-        "minutes_floor": _expected_minute_fraction(e, e.get("status", "a")),
+        "minutes_floor": _expected_playing_fraction(e, e.get("status", "a")),
     }
     if selling_price is not None:
         entry["sell_price"] = selling_price
@@ -957,9 +1195,9 @@ def _solve_squad(
 
     # Objective. Back-up players are discounted to their autosub activation
     # probability: the reserve keeper ~5% (never comes on for partial cameos) and
-    # the outfield bench slots a uniform ~12% for Phase A. The discount is removed
-    # under Bench Boost (every bench player scores) — but captaincy (one starter
-    # scores double) applies in every gameweek.
+    # the outfield bench is two-tier convex (B1 ~30%, B2/B3 ~3.5%). The discount
+    # is removed under Bench Boost (every bench player scores) — but captaincy
+    # (one starter scores double) applies in every gameweek.
     gk_ids = [pid for pid in ids if by_id[pid]["position"] == "GK"]
     outfield_ids = [pid for pid in ids if by_id[pid]["position"] != "GK"]
 
@@ -969,14 +1207,22 @@ def _solve_squad(
         start = None
     else:
         # Role assignment: exactly 11 starters (1 GK + 10 outfield) at 1.0x, the
-        # remaining 4 bench slots at their activation-probability weight.
+        # remaining 4 bench slots at their activation-probability weight. The
+        # outfield bench is convex: the "12th man" (B1) is worth ~30% (likeliest
+        # autosub) while B2/B3 are near-dead capital (~3.5%).
         start = pulp.LpVariable.dicts("start", ids, cat="Binary")
         for pid in ids:
             prob += start[pid] <= x[pid], f"start_le_x_{pid}"
         prob += pulp.lpSum(start[pid] for pid in ids) == 11, "eleven_starters"
         prob += pulp.lpSum(start[pid] for pid in gk_ids) == 1, "one_start_gk"
         xp_expr = pulp.lpSum(by_id[pid]["xp"] * start[pid] for pid in ids)
-        xp_expr += BENCH_OUTFIELD_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid]) for pid in outfield_ids)
+        # 12th-man binary: the single highest-value outfield bench slot.
+        b1 = pulp.LpVariable.dicts("b1", outfield_ids, cat="Binary")
+        for pid in outfield_ids:
+            prob += b1[pid] <= x[pid] - start[pid], f"b1_le_bench_{pid}"
+        prob += pulp.lpSum(b1[pid] for pid in outfield_ids) == 1, "one_b1"
+        xp_expr += BENCH_B1_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * b1[pid] for pid in outfield_ids)
+        xp_expr += BENCH_DEAD_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid] - b1[pid]) for pid in outfield_ids)
         xp_expr += BENCH_GK_WEIGHT * pulp.lpSum(by_id[pid]["xp"] * (x[pid] - start[pid]) for pid in gk_ids)
 
     # Captaincy uplift: the armband doubles one starter's score every gameweek.
@@ -1011,7 +1257,7 @@ def _solve_squad(
             fa, fb = by_id[pa].get("fdr"), by_id[pb].get("fdr")
             if not fa or not fb or len(fa) < 4 or len(fb) < 4:
                 continue
-            if all(min(fa[i], fb[i]) <= ROTATION_EASY_FDR for i in range(4)):
+            if all(min(fa[i], fb[i]) >= ROTATION_EASY for i in range(4)):
                 z = pulp.LpVariable(f"rot_{pa}_{pb}", cat="Binary")
                 prob += z <= x[pa], f"rot_a_{pa}_{pb}"
                 prob += z <= x[pb], f"rot_b_{pa}_{pb}"
@@ -1627,3 +1873,134 @@ def get_regression_candidates(min_minutes: int = 360, threshold: float = 1.5) ->
     out["sell_high"].sort(key=lambda r: r["residual"], reverse=True)
     out["buy_low"].sort(key=lambda r: r["residual"])
     return out
+
+
+def _lin_slope(series: List[float]) -> float:
+    """Least-squares slope of a series against its index (per-GW trend)."""
+    n = len(series)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    mx = (n - 1) / 2.0
+    my = sum(series) / n
+    num = sum((xs[i] - mx) * (series[i] - my) for i in range(n))
+    den = sum((xs[i] - mx) ** 2 for i in range(n))
+    return num / den if den else 0.0
+
+
+def _fixture_swing_scores(fixture_lookup, start_event, n=6):
+    """Rank clubs by the forward slope of their fixture difficulty.
+
+    Attackers face the opponent's defence (att_ease = 6 - opp_def); defenders face
+    the opponent's attack (def_ease = 6 - opp_att). A positive slope = improving
+    fixtures (prime entry window); negative = deteriorating (exit window).
+    """
+    bootstrap = _get_bootstrap()
+    teams = {t["id"]: t for t in bootstrap.get("teams", [])}
+    rows = []
+    for tid, team in teams.items():
+        fx = fixture_lookup.get(tid, [])
+        att_ease: List[float] = []
+        def_ease: List[float] = []
+        for i in range(n):
+            ev = start_event + i
+            f = next((x for x in fx if x.get("event") == ev), None)
+            if f is None:
+                att_ease.append(3.0)
+                def_ease.append(3.0)
+            else:
+                att_ease.append(6.0 - _to_float(f.get("opp_strength_def", 3.0)))
+                def_ease.append(6.0 - _to_float(f.get("opp_strength_att", 3.0)))
+        rows.append({
+            "team_id": tid,
+            "name": team.get("name") or team.get("short_name", "?"),
+            "att_slope": round(_lin_slope(att_ease), 3),
+            "def_slope": round(_lin_slope(def_ease), 3),
+            "att_ease": [round(v, 1) for v in att_ease],
+            "def_ease": [round(v, 1) for v in def_ease],
+        })
+    rows.sort(key=lambda r: r["att_slope"], reverse=True)
+    return rows
+
+
+_NON_PLAYING_NOTES = ("Injured", "Suspended", "Unavailable", "No minutes", "OUT", "Blank")
+
+
+def _squad_structural_health(squad, bank):
+    """Audit squad structure: stranded capital, enabler efficiency, formation
+    optionality, and price-point pivot liquidity.
+
+    Returns a list of {label, ok, detail} for rendering in the UI.
+    """
+    checks = []
+
+    xi = select_starting_xi(squad)
+    bench = xi.get("bench") or []
+    # bench[0] = reserve GK, bench[1..3] = outfield B1/B2/B3 (descending xP)
+
+    # 1. Stranded bench capital
+    bench_cost = sum(_to_float(p.get("price", 0.0)) for p in bench)
+    stranded = bench_cost > 15.0
+    checks.append({
+        "label": "Stranded bench capital",
+        "ok": not stranded,
+        "detail": f"Bench costs £{bench_cost:.1f}m {'(> £15.0m)' if stranded else '(≤ £15.0m)'}.",
+    })
+
+    # 2. Enabler efficiency: non-playing outfield assets > £4.0m on B2/B3
+    dead = []
+    for slot_p in bench[2:4]:
+        if slot_p.get("position") == "GK":
+            continue
+        non_playing = slot_p.get("status") in _NON_PLAYING_NOTES or _to_float(slot_p.get("xp", 0.0)) <= 0.1
+        if non_playing and _to_float(slot_p.get("price", 0.0)) > 4.0:
+            dead.append(f"{slot_p.get('name', '?')} (£{_to_float(slot_p.get('price', 0.0)):.1f}m)")
+    checks.append({
+        "label": "Enabler efficiency (B2/B3)",
+        "ok": not dead,
+        "detail": ("Non-playing >£4.0m enablers: " + "; ".join(dead)) if dead else "No overpriced dead assets on bench slots 2/3.",
+    })
+
+    # 3. Formation optionality: formations within 5% of peak XI xP
+    by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    for p in squad:
+        by_pos.setdefault(p.get("position"), []).append(p)
+    for pos in by_pos:
+        by_pos[pos].sort(key=lambda x: _to_float(x.get("xp", 0.0)), reverse=True)
+    form_xp = []
+    for d, m, f in VALID_FORMATIONS:
+        if len(by_pos["GK"]) < 1 or len(by_pos["DEF"]) < d or len(by_pos["MID"]) < m or len(by_pos["FWD"]) < f:
+            continue
+        xi_players = by_pos["GK"][:1] + by_pos["DEF"][:d] + by_pos["MID"][:m] + by_pos["FWD"][:f]
+        form_xp.append(sum(_to_float(x.get("xp", 0.0)) for x in xi_players))
+    peak = max(form_xp) if form_xp else 0.0
+    within = sum(1 for v in form_xp if v >= 0.95 * peak) if peak > 0 else 0
+    optionality_ok = within >= 3
+    checks.append({
+        "label": "Formation optionality",
+        "ok": optionality_ok,
+        "detail": f"{within} formation(s) within 5% of peak xP ({'flexible' if optionality_ok else 'inflexible'}).",
+    })
+
+    # 4. Price-point liquidity: can the squad fund a one-transfer 3-5-2 <-> 3-4-3 pivot?
+    def _cheapest(pos):
+        ps = [p for p in squad if p.get("position") == pos]
+        return min((_to_float(p.get("price", 0.0)) for p in ps), default=0.0)
+
+    cheapest_fwd = _cheapest("FWD")
+    cheapest_mid = _cheapest("MID")
+    cheapest_def = _cheapest("DEF")
+    mid_to_fwd = cheapest_fwd - cheapest_mid
+    def_to_mid = cheapest_mid - cheapest_def
+    deadlock = (mid_to_fwd > 0 and bank < mid_to_fwd) or (def_to_mid > 0 and bank < def_to_mid)
+    checks.append({
+        "label": "Price-point pivot liquidity",
+        "ok": not deadlock,
+        "detail": (
+            f"Bank £{bank:.1f}m; MID→FWD gap £{max(0.0, mid_to_fwd):.1f}m, DEF→MID gap £{max(0.0, def_to_mid):.1f}m."
+            if not deadlock else
+            f"Deadlock: bank £{bank:.1f}m cannot fund the cheapest formation-pivot swap."
+        ),
+    })
+
+    return checks

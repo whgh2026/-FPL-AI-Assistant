@@ -1,1 +1,1 @@
-{"global_xP_modifier": 1.0, "home_advantage": 1.0, "clean_sheet_confidence": 1.0}
+{"global_xP_modifier": 1.0, "home_advantage": 1.0, "clean_sheet_confidence": 1.0, "autosub_ref": 1.8, "rotation_convexity": 0.4, "dixon_coles_decay": 0.03, "dixon_coles_tau": 0.2, "rating_scale": 2.0}

@@ -163,3 +163,46 @@ def log_decision(manager_id, gameweek, action, delta_xp, hits=0, chip=None, tran
             conn.close()
     except Exception:
         return False
+
+
+def save_team_ratings(ratings, gameweek=None):
+    """Persist a Dixon-Coles team-ratings snapshot for audit / warm-start."""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS team_strength_ratings ("
+                "id BIGSERIAL PRIMARY KEY,"
+                "team_id INTEGER NOT NULL,"
+                "gameweek INTEGER,"
+                "att DOUBLE PRECISION,"
+                "def DOUBLE PRECISION,"
+                "created_at TIMESTAMPTZ DEFAULT NOW())"
+            )
+            rows = []
+            for tid, r in (ratings or {}).items():
+                rows.append((int(tid), gameweek, float(r.get("att", 0.0)), float(r.get("def", 0.0))))
+            if rows:
+                cur.executemany(
+                    "INSERT INTO team_strength_ratings (team_id, gameweek, att, def) "
+                    "VALUES (%s, %s, %s, %s)",
+                    rows,
+                )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def log_squad_health(manager_id, gameweek, checks):
+    """Log the structural-health flags as a decision-log row (action='health')."""
+    try:
+        summary = " | ".join(f"{'OK' if c.get('ok') else 'FLAG'}:{c.get('label')}" for c in (checks or []))
+        return log_decision(manager_id, gameweek, "health", 0.0, hits=0, chip=None, transfers=summary)
+    except Exception:
+        return False

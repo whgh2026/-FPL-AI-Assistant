@@ -7,7 +7,7 @@ import dateutil.parser
 from dateutil import tz
 import datetime
 import time
-from db import get_or_backfill_manager_history, log_decision
+from db import get_or_backfill_manager_history, log_decision, log_squad_health
 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
@@ -582,27 +582,29 @@ def _web_name(p) -> str:
     return wn or p.get("name", "?")
 
 
-def _fdr_cell(fdr) -> str:
-    fdr = int(fdr)
-    if fdr <= 2:
+def _fdr_cell(ease) -> str:
+    """Colour a fixture-ease cell (5 = easiest, 1 = hardest)."""
+    e = round(float(ease), 1)
+    if e >= 4.0:
         bg = "#00F5A0"
-    elif fdr == 3:
+    elif e >= 3.0:
         bg = "#fbbf24"
     else:
         bg = "#f43f5e"
-    return f'<div class="fdr-cell" style="background:{bg}">{fdr}</div>'
+    return f'<div class="fdr-cell" style="background:{bg}">{e}</div>'
 
 
 # ------------------------------------------------------------------
 # Insights Lab — Fixture Rotation Solver & Team Strength Index
 # ------------------------------------------------------------------
-def _team_fdr_series(team_id, lookup, start, n: int = 6):
+def _team_ease_series(team_id, lookup, start, n: int = 6):
+    """Continuous fixture-ease series (higher = easier) from Dixon-Coles ratings."""
     fx = {f.get("event"): f for f in lookup.get(team_id, [])}
     series = []
     for i in range(n):
         ev = start + i
         f = fx.get(ev)
-        series.append(int(f.get("difficulty") or 5) if f else 5)
+        series.append(6.0 - _num(f.get("opp_strength_def") or 3.0) if f else 0.0)
     return series
 
 
@@ -613,41 +615,36 @@ def _fixture_rotation_matrix(anchor_team_id=None, n: int = 6, top: int = 8):
     lookup = ctx["lookup"]
     start = ctx["start"]
     team_ids = [t["id"] for t in ctx["bootstrap"].get("teams", [])]
-    fdr_by_id = {tid: _team_fdr_series(tid, lookup, start, n) for tid in team_ids}
+    ease_by_id = {tid: _team_ease_series(tid, lookup, start, n) for tid in team_ids}
     pairings = []
     for i in range(len(team_ids)):
         for j in range(i + 1, len(team_ids)):
             t1, t2 = team_ids[i], team_ids[j]
-            mins = [min(a, b) for a, b in zip(fdr_by_id[t1], fdr_by_id[t2])]
-            avg = sum(mins) / len(mins)
-            pairings.append({"t1": t1, "t2": t2, "avg": avg, "series": mins})
-    pairings.sort(key=lambda x: x["avg"])
+            best = [max(a, b) for a, b in zip(ease_by_id[t1], ease_by_id[t2])]
+            avg = sum(best) / len(best)
+            pairings.append({"t1": t1, "t2": t2, "avg": avg, "series": best})
+    pairings.sort(key=lambda x: x["avg"], reverse=True)
     if anchor_team_id is not None:
         pairings = [p for p in pairings if anchor_team_id in (p["t1"], p["t2"])]
     return pairings[:top]
 
 
 def _team_strength_index():
+    ratings = fpl_tools._team_attack_def_ratings()
     ctx = _bootstrap_ctx()
     if not ctx:
         return []
     rows = []
     for t in ctx["bootstrap"].get("teams", []):
+        r = ratings.get(t["id"], {})
         rows.append({
             "id": t["id"],
             "name": t.get("name", "?"),
             "code": t.get("code"),
-            "home": _num(t.get("strength_overall_home")),
-            "away": _num(t.get("strength_overall_away")),
+            "att": r.get("att", 3.0),
+            "def": r.get("def", 3.0),
         })
-    all_v = [r["home"] for r in rows] + [r["away"] for r in rows]
-    lo, hi = min(all_v), max(all_v)
-    span = (hi - lo) or 1.0
-    for r in rows:
-        r["home5"] = round(1.0 + 4.0 * (r["home"] - lo) / span, 1)
-        r["away5"] = round(1.0 + 4.0 * (r["away"] - lo) / span, 1)
-        r["combined"] = round((r["home5"] + r["away5"]) / 2.0, 2)
-    rows.sort(key=lambda x: x["combined"], reverse=True)
+    rows.sort(key=lambda x: (x["att"] + x["def"]), reverse=True)
     return rows
 
 
@@ -873,8 +870,8 @@ def _player_market_signal(p, ctx) -> float:
     wp = fx.get("win_prob")
     if wp is not None:
         return max(0.0, min(100.0, wp * 100.0))
-    fdr = fx.get("difficulty") or 3
-    return max(0.0, min(100.0, 60.0 - (fdr - 3) * 10.0))
+    opp_def = fx.get("opp_strength_def") or 3
+    return max(0.0, min(100.0, 60.0 - (opp_def - 3) * 10.0))
 
 
 def _player_form_signal(p, ctx) -> float:
@@ -1045,11 +1042,11 @@ def _render_player_inspector(squad) -> None:
             except:
                 pass
         wp = fx.get("win_prob")
-        fdr = fx.get("difficulty") or 3
+        opp_def = fx.get("opp_strength_def") or 3
         if wp is not None:
-            odds_desc = f"Market Win Probability: {wp * 100:.0f}% · Official FPL Difficulty: {fdr}/5"
+            odds_desc = f"Market Win Probability: {wp * 100:.0f}% · Opp. defence: {opp_def:.1f}/5"
         else:
-            odds_desc = f"Market Odds Pending · Official FPL Difficulty: {fdr}/5"
+            odds_desc = f"Market Odds Pending · Opp. defence (Dixon-Coles): {opp_def:.1f}/5"
             
         fx_rows += (
             f'<div class="insp-fixture">'
@@ -1722,6 +1719,27 @@ with tab_planner:
 
 
     
+            with st.expander("🩺 Squad Structural Health & Stranded Capital", expanded=False):
+                try:
+                    health = fpl_tools._squad_structural_health(ov["analysed_squad"], float(ov.get("bank", 0.0)))
+                    try:
+                        log_squad_health(manager_id.strip(), GW_ID, health)
+                    except Exception:
+                        pass
+                    for h in health:
+                        icon = "✅" if h["ok"] else "⚠️"
+                        st.markdown(
+                            f'<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid #1e293b;">'
+                            f'<span style="flex:0 0 auto;">{icon}</span>'
+                            f'<div style="flex:1;min-width:0;">'
+                            f'<div style="color:#E2E8F0;font-weight:600;">{h["label"]}</div>'
+                            f'<div class="tc-meta">{h["detail"]}</div>'
+                            f'</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                except Exception:
+                    st.caption("Structural health unavailable.")
+
             with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
                 explainer_bullets = []
     
@@ -2142,31 +2160,53 @@ with tab_insights:
                     f'<div class="fdr-strip">{cells}</div>'
                     f'</div></div>'
                 )
-            st.markdown(_card(html, "Top Rotation Pairings · lowest combined FDR"), unsafe_allow_html=True)
+            st.markdown(_card(html, "Top Rotation Pairings · highest combined ease"), unsafe_allow_html=True)
         else:
             st.info("No rotation pairings found.")
 
-        st.markdown("#### 🛡️ Team Strength Index")
+        st.markdown("#### 🛡️ Team Strength Index (Dixon-Coles)")
         strengths = _team_strength_index()
         if strengths:
             grid = '<div class="grid">'
             for s in strengths:
-                home_pct = int(s["home5"] / 5 * 100)
-                away_pct = int(s["away5"] / 5 * 100)
+                att_pct = int(s["att"] / 5 * 100)
+                def_pct = int(s["def"] / 5 * 100)
                 grid += (
                     f'<div class="strength-card">'
                     f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
                     f'{_badge_img(s["id"], large=True)} <span style="font-weight:700;color:#E2E8F0;">{s["name"]}</span>'
                     f'</div>'
-                    f'<div style="font-size:0.7rem;color:#94a3b8;">Home {s["home5"]:.1f}/5</div>'
-                    f'<div class="strength-bar"><div class="strength-fill-home" style="width:{home_pct}%"></div></div>'
-                    f'<div style="font-size:0.7rem;color:#94a3b8;">Away {s["away5"]:.1f}/5</div>'
-                    f'<div class="strength-bar"><div class="strength-fill-away" style="width:{away_pct}%"></div></div>'
-                    f'<div style="margin-top:6px;">Combined <span class="strength-num">{s["combined"]:.2f}</span> / 5</div>'
+                    f'<div style="font-size:0.7rem;color:#94a3b8;">Attack {s["att"]:.1f}/5</div>'
+                    f'<div class="strength-bar"><div class="strength-fill-home" style="width:{att_pct}%"></div></div>'
+                    f'<div style="font-size:0.7rem;color:#94a3b8;">Defence {s["def"]:.1f}/5</div>'
+                    f'<div class="strength-bar"><div class="strength-fill-away" style="width:{def_pct}%"></div></div>'
                     f'</div>'
                 )
             grid += "</div>"
-            st.markdown(_card(grid, "20 Clubs Ranked by Combined Strength"), unsafe_allow_html=True)
+            st.markdown(_card(grid, "20 Clubs Ranked by Attack + Defence"), unsafe_allow_html=True)
+
+        st.markdown("#### 📈 Fixture Swing Score (Entry / Exit Windows)")
+        swings = fpl_tools._fixture_swing_scores(ctx["lookup"], ctx["start"], n=6)
+        if swings:
+            enter = [s for s in swings if s["att_slope"] > 0][:5]
+            exit_ = sorted([s for s in swings if s["att_slope"] < 0], key=lambda s: s["att_slope"])[:5]
+            c_enter, c_exit = st.columns(2)
+            with c_enter:
+                html = "".join(
+                    f'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
+                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:#E2E8F0;">{s["name"]}</span>'
+                    f'<span style="margin-left:auto;color:#10b981;font-weight:700;">+{s["att_slope"]:.2f}</span></div>'
+                    for s in enter
+                )
+                st.markdown(_card(html or '<div style="color:#64748b;">No improving fixtures.</div>', "🟢 Prime entry windows (attackers)"), unsafe_allow_html=True)
+            with c_exit:
+                html = "".join(
+                    f'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
+                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:#E2E8F0;">{s["name"]}</span>'
+                    f'<span style="margin-left:auto;color:#ef4444;font-weight:700;">{s["att_slope"]:.2f}</span></div>'
+                    for s in exit_
+                )
+                st.markdown(_card(html or '<div style="color:#64748b;">No deteriorating fixtures.</div>', "🔴 Exit windows (attackers)"), unsafe_allow_html=True)
 
 with tab_radar:
     st.markdown("### 📡 Player Radar & Market")
