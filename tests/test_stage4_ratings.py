@@ -203,7 +203,7 @@ class ModelVersionTest(unittest.TestCase):
         # Bumped by Stage 2 (strategy terms leaving the forecast). Stage 5b will
         # bump it again; each stage that changes what _player_xp returns must,
         # or auto_tune fits across a heterogeneous population under one label.
-        self.assertEqual(fpl_tools.MODEL_VERSION, "v3-layer1-clean")
+        self.assertEqual(fpl_tools.MODEL_VERSION, "v4-xp-overhaul")
 
     def test_weights_are_reset_to_neutral(self):
         """A global_xP_modifier fitted against the old biased scale would undo

@@ -130,6 +130,16 @@ def build_players(teams, rng):
                     "expected_goals_conceded_per_90": round(1.55 - 0.55 * t["_def"] * 2, 3),
                     "saves_per_90": round(saves, 2),
                     "influence": round(120 * quality, 1),
+                    # Real per-player defensive counts, so the DefCon model has
+                    # per-player signal to work with rather than a positional
+                    # constant. Spread deliberately WIDE within a position: the
+                    # bug being guarded against gave every defender an identical
+                    # +1.36, so a fixture where they genuinely differ is the only
+                    # way to prove the fix.
+                    "clearances_blocks_interceptions": int(
+                        minutes / 90.0 * (2.0 + 9.0 * (j / 5.0) if etype == 2 else 1.0 + 2.0 * (j / 5.0))),
+                    "tackles": int(minutes / 90.0 * (1.0 + 3.0 * ((j + etype) % 4) / 3.0)),
+                    "recoveries": int(minutes / 90.0 * (2.0 + 7.0 * ((j + 1) % 5) / 4.0)),
                     "threat": round(180 * quality, 1),
                     "bps": round(220 * quality, 1),
                     "selected_by_percent": str(round(1.0 + 28.0 * quality ** 3, 1)),

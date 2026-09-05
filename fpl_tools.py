@@ -49,7 +49,8 @@ BASE_URL = "https://fantasy.premierleague.com/api"
 # ------------------------------------------------------------------
 # Configuration / constants
 # ------------------------------------------------------------------
-EP_BLEND = 0.5                 
+EP_BLEND = 0.5                 # max weight on FPL's own ep_next, at zero minutes
+EP_BLEND_FADE_MINUTES = 600.0  # ...decaying to zero by here (~GW8 for a starter)
 # The real FPL penalty, charged ONCE, in the gameweek it is paid. Never scaled
 # by the horizon: the objective is sum(w_t * xP_t) with w_0 = 1.0, so a one-off
 # cost belongs at w_0. Previously hit_cost was inflated per risk profile (6.5
@@ -63,6 +64,14 @@ HIT_HURDLE = {"conservative": 2.5, "balanced": 1.0, "aggressive": 0.0,
               "rank_protecting": 2.0, "rank_chasing": 0.0}
 MAX_HIT_TRANSFERS = 3          
 PRIOR_MINUTES = 270.0          
+# Weak Beta prior on the start rate: 2 pseudo-starts in 3 pseudo-games, i.e. a
+# prior mean of 0.67. Deliberately ABOVE 0.5 -- a player with minutes on the
+# clock is more likely than not a starter, so a symmetric prior would drag
+# nailed players down. Light enough that real evidence dominates quickly:
+# 10 starts from 10 games reads 0.92, while at GW4 a single rest moves 4/4 from
+# 0.86 to 0.71 rather than 1.00 to 0.75.
+PRIOR_STARTS = 2.0
+PRIOR_GAMES = 3.0
 WILDCARD_SCARCITY_COST = 55.0
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
@@ -79,6 +88,11 @@ PLAN_WEIGHTS = [1.0, 0.85, 0.7, 0.55, 0.45, 0.35]  # decay over the planning hor
 # Phase E — auto-calibration, CVaR hedging, live tracking.
 CVAR_STRESS_K = 50              # pooled downside scenarios for the CVaR tail
 DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-projection
+# Plausible bounds on a team's expected goals in a single fixture. The most
+# lopsided real Premier League matchup sits near 3.5; 5.0 leaves headroom while
+# still bounding the tail.
+LAMBDA_MIN = 0.15
+LAMBDA_MAX = 5.0
 
 # Stamp on every calibration row, so auto_tune only ever fits against a
 # homogeneous population of predictions. It must be bumped by ANY stage that
@@ -86,7 +100,7 @@ DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-proje
 # terms leaving the forecast) and Stage 5b (EP_BLEND taper, clean sheets,
 # DefCon). One stamp spanning all three would mix materially different
 # predictions under a single label, which is exactly what versioning is for.
-MODEL_VERSION = "v3-layer1-clean"
+MODEL_VERSION = "v4-xp-overhaul"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -492,6 +506,11 @@ def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=-0.10, iterations=300, l
 
 _TEAM_RATINGS_CACHE: Optional[Dict[int, Dict[str, float]]] = None
 _TEAM_RATINGS_TS: float = 0.0
+# The raw fit, kept because the [1,5] mapping is lossy. Stage 4 fixed that
+# mapping's sign and scale, but a rating squashed onto an ordinal band and then
+# read back as 3.0/x is still a poor substitute for the Poisson rate the model
+# actually estimated. _fixture_lambdas reads this instead.
+_DC_RAW: Dict[str, Any] = {}
 
 
 def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
@@ -570,6 +589,8 @@ def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
             "def_home": round(min(5.0, max(1.0, dfn + half)), 2),
             "def_away": round(min(5.0, max(1.0, dfn - half)), 2),
         }
+    global _DC_RAW
+    _DC_RAW = {"ratings": dc, "gamma": gamma, "mu": _mu, "rho": _rho}
     _TEAM_RATINGS_CACHE = out
     _TEAM_RATINGS_TS = time.time()
     try:
@@ -774,6 +795,37 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
     return result
 
 
+def _fixture_lambdas(home_id: int, away_id: int) -> Tuple[float, float]:
+    """(lambda_home, lambda_away): expected goals for each side in this fixture.
+
+    This is what the Dixon-Coles fit actually estimates, and it was being thrown
+    away. The ratings were squashed onto a [1,5] ordinal band and read back as
+    def_adj = 3.0 / opp_strength_def -- a convex ratio that loses the goal rate
+    entirely. rho was captured as _rho and never referenced again, so the tau
+    correction, whose whole purpose is to fix P(0-0) -- the clean sheet -- was
+    fitted and discarded.
+
+    Falls back to the league average when there is no fit yet (early season).
+    """
+    raw = _DC_RAW or {}
+    ratings = raw.get("ratings") or {}
+    mu = raw.get("mu", math.log(1.40))
+    gamma = raw.get("gamma", 0.25)
+    if home_id not in ratings or away_id not in ratings:
+        base = math.exp(mu)
+        return base * math.exp(gamma), base
+    h, a = ratings[home_id], ratings[away_id]
+    lam_h = math.exp(max(-6.0, min(6.0, mu + h["att"] - a["def"] + gamma)))
+    lam_a = math.exp(max(-6.0, min(6.0, mu + a["att"] - h["def"])))
+    # Clamp to a football-plausible range. The exponent guard above only bounds
+    # lambda at exp(6) ~ 403, which is no guard at all: an extreme rating gap --
+    # from a thin early-season fit, or a promoted side with a bad run -- can
+    # produce a rate no fixture supports, and lambda feeds the clean-sheet
+    # probability and the concession expectation directly.
+    return (min(LAMBDA_MAX, max(LAMBDA_MIN, lam_h)),
+            min(LAMBDA_MAX, max(LAMBDA_MIN, lam_a)))
+
+
 def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[int, List[Dict[str, Any]]]:
     if bootstrap is None:
         bootstrap = _get_bootstrap()
@@ -793,9 +845,12 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
         event = f.get("event")
         rh = ratings.get(h, {})
         ra = ratings.get(a, {})
+        lam_h, lam_a = _fixture_lambdas(h, a)
         home_fx = {
             "event": event,
             "is_home": True,
+            "lam_for": lam_h,
+            "lam_against": lam_a,
             "opponent": a,
             "kickoff_time": f.get("kickoff_time"),
             # Continuous Dixon-Coles matchup: the away side's attack/defence when
@@ -807,6 +862,8 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
         away_fx = {
             "event": event,
             "is_home": False,
+            "lam_for": lam_a,
+            "lam_against": lam_h,
             "opponent": h,
             "kickoff_time": f.get("kickoff_time"),
             "opp_strength_def": rh.get("def_home", 3.0),
@@ -898,7 +955,16 @@ def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, 
         p_cameo = 0.0
     else:
         if starts > 0:
-            start_rate = min(1.0, starts / games)
+            # Shrunk toward "probably a starter". Unlike the attacking rates,
+            # which get PRIOR_MINUTES via _reg, start_rate had no prior at all --
+            # so at GW4, with games = 4, a single rest swung a nailed starter
+            # from 1.00 to 0.75 and the whole projection with it, because minutes
+            # multiply every other component.
+            #
+            # This is the small-sample half of the minutes problem. The staleness
+            # half -- a season-long rate that lags a player whose role changed --
+            # needs per-match history from element-summary and is Tranche 2.
+            start_rate = min(1.0, (starts + PRIOR_STARTS) / (games + PRIOR_GAMES))
         else:
             # Starts unreported: infer from minutes (treat as full-game starts) so a
             # 1000-minute player is a nailed starter, not a 100% cameo sub.
@@ -982,22 +1048,61 @@ def _poisson_survival(threshold: int, lam: float) -> float:
     return max(0.0, min(1.0, 1.0 - cdf))
 
 
-def _defcon_expected_pts(p: Dict[str, Any], emin: float, pos_id: int) -> float:
-    """Expected points from the 2026/27 Defensive Contribution bonus.
+def _defcon_rate_per90(p: Dict[str, Any], pos_id: int) -> float:
+    """The player's own defensive-action rate per 90, shrunk to a positional prior.
 
-    DEF: +2 points for reaching 10 CBIT actions in a match.
-    MID/FWD: +2 points for reaching 12 CBIRT actions in a match.
+    Reads the real per-player counts FPL publishes -- defensive_contribution,
+    clearances_blocks_interceptions, tackles, recoveries -- none of which the
+    previous implementation touched. It used `influence` as a proxy:
+
+        rate = base * (0.6 + 0.4 * min(influence / 60.0, 2.0))
+
+    `influence` is a SEASON-CUMULATIVE figure, so min(influence/60, 2.0)
+    saturates at 2.0 for essentially every regular starter. The result was
+    rate = 8.0 * 1.4 = 11.2 for EVERY defender, P(X >= 10) ~ 0.68, and therefore
+    +1.36 xP identically for all of them -- a flat positional bias toward
+    defenders in every comparison the solver made, with no per-player signal.
+    """
+    minutes = _to_float(p.get("minutes"))
+    prior = DEFCON_BASE_PER90.get(pos_id, 0.0)
+    if minutes <= 0:
+        return prior
+
+    per90 = None
+    direct = _to_float(p.get("defensive_contribution_per_90"))
+    if direct > 0:
+        per90 = direct
+    else:
+        total = _to_float(p.get("defensive_contribution"))
+        if total <= 0:
+            # Reconstruct from components. DEF are scored on CBIT (clearances,
+            # blocks, interceptions, tackles); MID/FWD on CBIRT, which adds ball
+            # recoveries.
+            total = (_to_float(p.get("clearances_blocks_interceptions"))
+                     + _to_float(p.get("tackles")))
+            if pos_id in (3, 4):
+                total += _to_float(p.get("recoveries"))
+        if total > 0:
+            per90 = total * 90.0 / minutes
+
+    if per90 is None:
+        return prior
+    # Same empirical-Bayes shape as the attacking rates: weight the player's own
+    # rate by minutes played against a positional prior.
+    return (per90 * minutes + prior * PRIOR_MINUTES) / (minutes + PRIOR_MINUTES)
+
+
+def _defcon_expected_pts(p: Dict[str, Any], emin: float, pos_id: int) -> float:
+    """Expected points from the Defensive Contribution bonus.
+
+    DEF: +2 for reaching 10 CBIT actions. MID/FWD: +2 for reaching 12 CBIRT.
     """
     if pos_id not in DEFCON_THRESHOLD:
         return 0.0
     frac = emin / 90.0
     if frac <= 0.0:
         return 0.0
-    base = DEFCON_BASE_PER90.get(pos_id, 0.0)
-    # Influence (ICC) captures tackles/interceptions/clearances, so we nudge the
-    # involvement rate up for defensively busy roles.
-    influence = _to_float(p.get("influence"))
-    rate = base * (0.6 + 0.4 * min(influence / 60.0, 2.0))
+    rate = _defcon_rate_per90(p, pos_id)
     p_meet = _poisson_survival(DEFCON_THRESHOLD[pos_id], rate * frac)
     return 2.0 * p_meet
 
@@ -1094,11 +1199,29 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     xa = xa90 * frac * def_adj * venue_att
     attack_pts = xg * GOAL_PTS.get(pos_id, 4) + xa * 3.0
 
-    xgc = xgc90 * frac * att_adj * venue_def
-    p_cs = math.exp(-xgc) if xgc < 10 else 0.0
-    cs_pts = CS_PTS.get(pos_id, 0) * p_cs * min(emin / 60.0, 1.0) * _w["clean_sheet_confidence"]
+    # Clean sheets are a TEAM-MATCH event, computed from the fixture's expected
+    # goals against and independent of how long this player is on the pitch.
+    #
+    # Previously: xgc = xgc90 * frac * ... and then p_cs = exp(-xgc), with the
+    # minutes fraction INSIDE the exponent. A 30-minute cameo therefore produced
+    # xgc = 1.3 * 0.333 = 0.43 -> P(CS) = 65%, against 27% for the same player
+    # over 90 minutes. Playing less does not make your team more likely to keep a
+    # clean sheet; rotation-risk defenders were systematically over-valued.
+    #
+    # The player-level requirement is a threshold, not a rate: FPL awards the
+    # clean sheet at 60+ minutes. The caller evaluates this function once at 90
+    # and once at 30 and weights by P(full) / P(cameo), so the threshold is
+    # simply whether this branch clears 60.
+    lam_against = _to_float(f.get("lam_against")) or (xgc90 * att_adj * venue_def)
+    lam_against = max(0.0, lam_against * venue_def)
+    p_cs_team = math.exp(-lam_against) if lam_against < 10 else 0.0
+    plays_60 = 1.0 if emin >= 60 else 0.0
+    cs_pts = CS_PTS.get(pos_id, 0) * p_cs_team * plays_60 * _w["clean_sheet_confidence"]
 
-    conceded_pts = -_expected_concession_penalty(xgc) if pos_id in (1, 2) else 0.0
+    # Goals conceded is a per-appearance deduction, so it scales with the share
+    # of the match played rather than being a whole-match event.
+    conceded_pts = (-_expected_concession_penalty(lam_against * frac)
+                    if pos_id in (1, 2) else 0.0)
     saves_pts = saves90 * frac / 3.0 if pos_id == 1 else 0.0
 
     minutes_pts = 2.0 if emin >= 60 else (1.0 if emin > 0 else 0.0)
@@ -1161,6 +1284,7 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
 
     # Categorical minutes (the cameo guard): P(M=0) / P(1<=M<=59) / P(M>=60).
     p0, p_cameo, p_full = _minute_distribution(p, status)
+    minutes_played = _to_float(p.get("minutes"))
 
     xp_full = sum(_xp_for_fixture(p, f, 90.0, pos_id) for f in target)
     xp_cameo = sum(_xp_for_fixture(p, f, 30.0, pos_id) for f in target)
@@ -1176,10 +1300,24 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
 
     ep_next = _to_float(p.get("ep_next"))
     if ep_next > 0:
+        # EP_BLEND was a flat 0.5: half of every single-gameweek projection was
+        # FPL's own ep_next. Three problems. It capped the model's edge at half
+        # the vendor baseline no matter how good the rest became; it
+        # double-counted fixture difficulty, since ep_next already embeds it and
+        # our_total applies def_adj/att_adj on top; and _player_xp_horizon blends
+        # the SAME ep_next into GW+1/+2/+3, halving fixture sensitivity in every
+        # future week. It also capped the benefit of the Stage 4 ratings work at
+        # roughly 50%.
+        #
+        # Now a shrinkage prior for thin-data players only: full weight at zero
+        # minutes, decaying to nothing by ~600 minutes (about GW8 for a starter).
+        # Whether the model beats ep_next head-to-head is a question for the
+        # Stage 8 scorecard, which logs both against actuals.
+        ep_w = max(0.0, min(EP_BLEND, EP_BLEND * (1.0 - minutes_played / EP_BLEND_FADE_MINUTES)))
         # Availability-adjusted minutes fraction applied to FPL's own projection,
         # so doubtful assets never display an unadjusted baseline.
         blend_frac = p_full + (30.0 / 90.0) * p_cameo
-        xp = (1.0 - EP_BLEND) * our_total + EP_BLEND * ep_next * blend_frac
+        xp = (1.0 - ep_w) * our_total + ep_w * ep_next * blend_frac
     else:
         xp = our_total
 
