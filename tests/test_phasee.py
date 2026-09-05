@@ -90,7 +90,7 @@ class CvarTest(unittest.TestCase):
         current_ids = set(range(1, 16))
         eo_map = {pid: {"eo": 20.0} for pid in current_ids}
         cvar = {pid: [5.0] * 10 for pid in current_ids}  # 10 stress scenarios
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=current_ids,
             hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
             eo_map=eo_map, mode="blocker", phase=2, cvar_scenarios=cvar,

@@ -127,7 +127,7 @@ class StrategyReHomingTest(unittest.TestCase):
 
             picks = {}
             for mode in ("blocker", "divergence"):
-                sel, _ = fpl_tools._solve_squad(
+                sel, _, _parts = fpl_tools._solve_squad(
                     entries, budget=budget, eo_map=eo_map, mode=mode, phase=2)
                 self.assertIsNotNone(sel, f"{mode} produced no squad")
                 picks[mode] = sorted(sel)

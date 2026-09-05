@@ -50,11 +50,20 @@ BASE_URL = "https://fantasy.premierleague.com/api"
 # Configuration / constants
 # ------------------------------------------------------------------
 EP_BLEND = 0.5                 
-HIT_COST = 4.0                 
+# The real FPL penalty, charged ONCE, in the gameweek it is paid. Never scaled
+# by the horizon: the objective is sum(w_t * xP_t) with w_0 = 1.0, so a one-off
+# cost belongs at w_0. Previously hit_cost was inflated per risk profile (6.5
+# balanced, 8.0 conservative) and then multiplied AGAIN by HORIZON_SUM (3.1),
+# charging up to 24.8 points for a -4 and making hits effectively impossible.
+HIT_COST = 4.0
+# Risk appetite is now an explicit, separately-named hurdle rather than a
+# corrupted cost. Balanced demands a genuine +5.0 over the horizon to justify a
+# -4, which is roughly where serious FPL modellers sit.
+HIT_HURDLE = {"conservative": 2.5, "balanced": 1.0, "aggressive": 0.0,
+              "rank_protecting": 2.0, "rank_chasing": 0.0}
 MAX_HIT_TRANSFERS = 3          
 PRIOR_MINUTES = 270.0          
 WILDCARD_SCARCITY_COST = 55.0
-ROLL_TRANSFER_VALUE = 1.5
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
 # Phase C — game theory, effective ownership, and two-set chip scheduling.
@@ -81,9 +90,27 @@ MODEL_VERSION = "v3-layer1-clean"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
-ROLLED_FT_SHAPE         = [1.0, 0.8, 0.55, 0.25, 0.05]  # convex-down marginal value of the 1st..5th banked FT
-LIQUIDITY_BONUS_PER_05M = 0.2                          # xP per £0.5m held unspent in the bank
-HIT_FLOOR_PENALTY       = 0.5                          # φ: surcharge on low minutes-floor acquisitions
+# Marginal value of the 1st..5th banked free transfer, concave by construction.
+# Replaces ROLL_TRANSFER_VALUE * ROLLED_FT_SHAPE, which stacked a per-profile
+# scalar on top of a shape and produced up to 3.98 points of banking reward.
+FT_OPTION_MARGINAL = [1.30, 1.00, 0.65, 0.30, 0.05]
+
+# Terminal cash is worth a little optionality -- it funds a later upgrade without
+# a restructuring hit -- but only a little, and only ONCE. The previous
+# LIQUIDITY_BONUS_PER_05M = 0.2 per GBP 0.5m was linear and uncapped, so
+# downgrading a 12.0m midfielder to a 5.0m one ADDED 2.8 points to the objective:
+# the solver was being paid to make the squad worse. Capped at 1.0m of credit,
+# i.e. 0.05 points total. Decision utility, never shown as football points.
+LIQUIDITY_PER_M    = 0.05
+LIQUIDITY_CAP_M    = 1.0
+
+# In-objective search brake. Removing the five stacked frictions leaves the MIP
+# free to churn on noise (a +0.1 xP "upgrade" is inside the model's own error),
+# so a separable linear hurdle stays -- separable because it must remain linear.
+# Post-solve gating was the alternative and is worse: it leaves holes in
+# transfer bundles and risks re-solve cycling inside the interactive budget.
+HURDLE_BASE = 0.8
+HURDLE_SIGMA_WEIGHT = 1.2
 
 # Hit hurdle rate calibration — the -4 transfer cost scales with the active risk
 # profile to prevent hyperactive churn. Defensive profiles demand a far larger
@@ -92,13 +119,13 @@ HIT_FLOOR_PENALTY       = 0.5                          # φ: surcharge on low mi
 #   Balanced:                 -6.5 xP  — clear multi-gameweek upgrade to justify a -4.
 #   Aggressive:               -4.0 xP  — raw mathematical cost, allows tactical punts.
 RISK_PROFILES = {
-    "conservative": {"hit_cost": 8.0, "ft_friction": 2.0, "roll_value": 2.0},
-    "balanced":     {"hit_cost": 6.5, "ft_friction": 1.5, "roll_value": 1.5},
-    "aggressive":   {"hit_cost": 4.0, "ft_friction": 0.5, "roll_value": 0.5},
+    "conservative": {},
+    "balanced":     {},
+    "aggressive":   {},
     # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
     # leader (hunt low-ownership high-xGI differentials).
-    "rank_protecting": {"hit_cost": 4.0, "ft_friction": 2.0},
-    "rank_chasing":    {"hit_cost": 3.0, "ft_friction": 0.5},
+    "rank_protecting": {},
+    "rank_chasing":    {},
 }
 
 # Display-label aliases so the UI can pass human-readable mode names.
@@ -144,11 +171,9 @@ DEFCON_BASE_PER90 = {2: 8.0, 3: 5.0, 4: 2.5}
 DEFCON_THRESHOLD = {2: 10, 3: 12, 4: 12}
 # Transfer friction: positional penalty applied per player sold, so the solver
 # won't churn a goalkeeper (or, to a lesser extent, a defender) for a marginal gain.
-TRANSFER_FRICTION = {"GK": 1.5, "DEF": 0.5, "MID": 0.1, "FWD": 0.1}
 # Rolling 4-gameweek horizon weights for multi-week xP projection.
 HORIZON_WEIGHTS = [1.0, 0.85, 0.70, 0.55]
-HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1: scales the -4 hit to the 4-GW horizon
-ROLL_HURDLE = 1.5                    # immediate-GW xP bar when holding exactly 1 FT
+HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1. NOT a hit multiplier: see HIT_COST.
 # Convex bench ordering (Λ): the reserve keeper (~5%) never comes on for partial
 # cameos (which suppresses backup-GK churn); the outfield bench is two-tiered —
 # the "12th man" (B1, ~30%) is the likeliest autosub, while B2/B3 are near-dead
@@ -1313,6 +1338,31 @@ def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str,
     return out
 
 
+def _pair_by_price(sold, bought, pool_by_id):
+    """Pair sold -> bought within a position, minimising total price distance.
+
+    The MIP selects a SET of 15; there is no causal "A replaced B" in its output.
+    The previous approach sorted both sides by xP and zipped them, which invented
+    a mapping and then hung every per-row figure and rationale off the invention.
+    Matching on price at least reflects how the money actually moved. n <= 5 per
+    position, so exhaustive matching is trivially cheap.
+    """
+    import itertools
+    if not sold or not bought:
+        return []
+    k = min(len(sold), len(bought))
+    best, best_cost = None, None
+    for s_perm in itertools.permutations(sold, k):
+        for b_perm in itertools.permutations(bought, k):
+            cost = sum(
+                abs(pool_by_id[b]["price"]
+                    - pool_by_id[s].get("sell_price", pool_by_id[s]["price"]))
+                for s, b in zip(s_perm, b_perm))
+            if best_cost is None or cost < best_cost:
+                best_cost, best = cost, list(zip(s_perm, b_perm))
+    return best or []
+
+
 def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
                         out_e: Dict[str, Any], in_e: Dict[str, Any]) -> str:
     """Plain-English explanation for why this transfer is recommended."""
@@ -1379,7 +1429,6 @@ def _solve_squad(
     hit_config: Optional[Dict[str, Any]] = None,
     bench_boost: bool = False,
     scarcity_cost: float = 0.0,
-    roll_value: float = 0.0,
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
     eo_map: Optional[Dict[int, Dict[str, float]]] = None,
@@ -1387,9 +1436,9 @@ def _solve_squad(
     phase: int = 1,
     rival_ids: Optional[set] = None,
     cvar_scenarios: Optional[Dict[int, List[float]]] = None,
-) -> Tuple[Optional[List[int]], Optional[float]]:
+) -> Tuple[Optional[List[int]], Optional[float], Dict[str, float]]:
     if not HAS_PULP:
-        return None, None
+        return None, None, {}
 
     by_id = {p["id"]: p for p in pool}
     ids = list(by_id.keys())
@@ -1465,7 +1514,13 @@ def _solve_squad(
             prob += captain[pid] <= start[pid], f"captain_le_start_{pid}"
         else:
             prob += captain[pid] <= x[pid], f"captain_le_x_{pid}"
-    xp_expr += pulp.lpSum(by_id[pid]["xp"] * captain[pid] for pid in ids)
+    # Valued at the SINGLE-gameweek xP, not the horizon total. The armband is
+    # re-chosen every week, so adding a full horizon-weighted duplicate
+    # over-rewarded the best horizon asset by ~3.1 gameweeks of points and
+    # systematically distorted which premium the solver bought. Falls back to
+    # the horizon value only when xp_gw is absent from the pool entry.
+    xp_expr += pulp.lpSum(
+        by_id[pid].get("xp_gw", by_id[pid]["xp"]) * captain[pid] for pid in ids)
 
     # Phase-2 game-theory objective: EO alignment (blocker) vs ceiling variance
     # (divergence). All terms are linear (constant-coefficient penalties/rewards,
@@ -1532,15 +1587,12 @@ def _solve_squad(
                         prob += z >= x[pa] + x[pb] - 1, f"stack_ge_{pa}_{pb}"
                         xp_expr = xp_expr + stack_w * z
 
-    # Positional transfer friction: subtract a penalty for every player sold
-    # ((1 - x[pid]) == 1 for outgoing players). This stops the solver burning a
-    # transfer/hit on a GK (1.5) or DEF (0.5) unless the xP uplift is substantial.
-    if must_include_ids is not None:
-        friction = pulp.lpSum(
-            TRANSFER_FRICTION.get(by_id[pid]["position"], 0.0) * (1 - x[pid])
-            for pid in must_include_ids if pid in by_id
-        )
-        xp_expr = xp_expr - friction
+    # Positional transfer friction (TRANSFER_FRICTION) was removed in Stage 3.
+    # It was one of five overlapping anti-transfer penalties, and it also applied
+    # on Wildcard and Free Hit solves -- which pass must_include_ids -- taxing a
+    # full 15-player rebuild by ~6.3 points for the privilege. The one case it
+    # was really guarding, churning the starting keeper, is expressed better as
+    # part of the search hurdle than as a standing charge on every sale.
 
     # Automated budget rotation pairing: reward complementary budget-defender
     # pairs (<= £4.5m) whose fixtures alternate easy (FDR 1-2) across the horizon,
@@ -1561,9 +1613,25 @@ def _solve_squad(
                 rotation_bonus += ROTATION_PAIR_BONUS * z
     xp_expr = xp_expr + rotation_bonus
 
-    # Cash reserve liquidity: holding cash enables a 1-move upgrade later without a
-    # restructuring hit, so reward residual budget rather than always maxing it out.
-    xp_expr = xp_expr + LIQUIDITY_BONUS_PER_05M * (budget - spend) / 0.5
+    # Terminal cash optionality, capped. See LIQUIDITY_PER_M: the previous form
+    # was linear and uncapped, so freeing GBP 7m by downgrading a premium ADDED
+    # 2.8 points to the objective. Linearised with an auxiliary variable bounded
+    # by both the cap and the actual residual bank.
+    liquidity_term = 0.0
+    if LIQUIDITY_PER_M > 0:
+        liq = pulp.LpVariable("liquidity", lowBound=0, upBound=LIQUIDITY_CAP_M)
+        prob += liq <= budget - spend, "liquidity_le_bank"
+        liquidity_term = LIQUIDITY_PER_M * liq
+        xp_expr = xp_expr + liquidity_term
+
+    # Components are tracked separately so the caller can render a waterfall that
+    # actually reconciles with what the solver maximised. Previously the UI
+    # recomputed a naive sum(xp_in - xp_out) that excluded captaincy, bench
+    # weights, CVaR, stacking, EO and tax -- so the recommendation and its stated
+    # justification could disagree, and the roll hurdle tested a different
+    # quantity from the one being optimised.
+    parts = {"squad_xp": xp_expr, "hit_cost": 0.0, "ft_option": 0.0,
+             "hurdle": 0.0, "scarcity": 0.0, "liquidity": liquidity_term}
 
     if must_include_ids is not None and hit_config is not None:
         transfers = pulp.lpSum((1 - x[pid]) for pid in must_include_ids if pid in by_id)
@@ -1572,51 +1640,70 @@ def _solve_squad(
             prob += transfers <= max_t, "max_transfers"
         hits = pulp.LpVariable("hits", lowBound=0, cat="Integer")
         prob += hits >= transfers - hit_config["free_transfers"], "hits_lb"
-        # Transfer friction: each free transfer used costs ft_friction xP, so the
-        # solver values holding FTs. Hits stack the -4 penalty on top.
-        ft_friction = hit_config.get("ft_friction", 0.0)
-        obj = xp_expr - hit_config["hit_cost"] * hits - ft_friction * (transfers - hits)
 
-        # Minutes-floor hit-hurdle scaling: a rotational punt (low expected-minute
-        # floor) faces a higher effective hurdle than a nailed starter, because the
-        # -4 is guaranteed while the payoff is far more variable.
-        incoming = [pid for pid in ids if pid not in must_include_ids]
-        floor_risk = pulp.lpSum(
-            max(0.0, 1.0 - by_id[pid].get("minutes_floor", 1.0)) * x[pid]
-            for pid in incoming
-        )
-        obj = obj - HIT_FLOOR_PENALTY * hit_config["hit_cost"] * floor_risk
+        # The real -4, charged once, plus an explicit risk hurdle. Deleted with
+        # it: ft_friction (a second charge per transfer) and HIT_FLOOR_PENALTY,
+        # which was gated on hit_config["hit_cost"] rather than on `hits` and so
+        # fired even at ZERO hits -- charging up to 4 points for a rotation-risk
+        # signing made on a free transfer.
+        hit_charge = hit_config.get("hit_cost", HIT_COST) * hits
+        parts["hit_cost"] = -hit_charge
+        obj = xp_expr - hit_charge
 
-        # Wildcard scarcity: activating the chip (any transfer) incurs a fixed
-        # full-season opportunity cost, so the solver holds it unless the rebuilt
-        # squad decisively outscores the current squad over the horizon.
+        # Separable search hurdle. Each transfer must clear a base bar plus a
+        # penalty proportional to the incoming player's own outcome volatility,
+        # so a volatile punt faces a higher bar than a nailed upgrade. Separable
+        # (per-player, not per-pair) to keep the program linear.
+        # Zeroed on Wildcard / Free Hit solves: a chip rebuild is a deliberate
+        # 15-player reshape, and charging a churn brake per leg would tax it by
+        # ~15 points for doing exactly what the chip is for. This is the same
+        # defect TRANSFER_FRICTION had, so it is not being reintroduced here.
+        # hurdle_scale multiplies the WHOLE bar, base and sigma alike. Zeroing
+        # only the base would leave 1.2*sigma per leg, which on a 15-player
+        # rebuild is ~30 legs of volatility premium -- still a large phantom tax
+        # on a chip whose entire purpose is the reshape.
+        hurdle_scale = float(hit_config.get("hurdle_scale", 1.0))
+        hurdle_expr = 0.0
+        for pid in ids if hurdle_scale > 0 else []:
+            sigma = float(by_id[pid].get("sigma", 0.0) or 0.0)
+            # Base is split across the two legs so a swap costs HURDLE_BASE in
+            # total; sigma is charged per leg because each side carries its own
+            # outcome volatility.
+            bar = hurdle_scale * (HURDLE_BASE / 2.0 + HURDLE_SIGMA_WEIGHT * sigma)
+            if pid in must_include_ids:
+                hurdle_expr = hurdle_expr + bar * (1 - x[pid])   # selling
+            else:
+                hurdle_expr = hurdle_expr + bar * x[pid]          # buying
+        parts["hurdle"] = -hurdle_expr
+        obj = obj - hurdle_expr
+
+        # Wildcard scarcity: activating the chip incurs a fixed full-season
+        # opportunity cost, so the solver holds it unless the rebuild decisively
+        # outscores the current squad.
         if scarcity_cost > 0 and max_t is not None:
             chip_used = pulp.LpVariable("chip_used", cat="Binary")
             prob += transfers <= max_t * chip_used, "chip_used_force"
+            parts["scarcity"] = -scarcity_cost * chip_used
             obj = obj - scarcity_cost * chip_used
 
-        # Value of a rolled transfer: banking free transfers holds strategic
-        # optionality, so reward each unspent FT carried forward with a diminishing
-        # marginal curve (the 1st banked FT is worth more than the 5th).
+        # Option value of banking a free transfer, on a concave marginal curve.
         free_transfers = hit_config.get("free_transfers", 0)
-        if roll_value > 0 and max_t is not None and 0 < free_transfers <= 5:
+        if max_t is not None and 0 < free_transfers <= 5:
             rolled = free_transfers - transfers + hits   # == max(0, F - T) at optimality
             y = pulp.LpVariable.dicts("roll_ft", range(1, 6), cat="Binary")
             prob += rolled == pulp.lpSum(y[k] for k in range(1, 6)), "roll_ft_sum"
             for k in range(2, 6):
                 prob += y[k] <= y[k - 1], f"roll_ft_mono_{k}"
-            obj = obj + roll_value * pulp.lpSum(ROLLED_FT_SHAPE[k - 1] * y[k] for k in range(1, 6))
+            ft_option = pulp.lpSum(FT_OPTION_MARGINAL[k - 1] * y[k] for k in range(1, 6))
+            parts["ft_option"] = ft_option
+            obj = obj + ft_option
 
-        for pid in must_include_ids:
-            if pid not in by_id:
-                continue
-            p = by_id[pid]
-            purchase_gw = p.get("purchase_gw")
-            if purchase_gw is None and holding_map is not None:
-                purchase_gw = holding_map.get(pid)
-            tax = calculate_decaying_tax(current_gw, purchase_gw, p.get("status", "a"))
-            if tax > 0:
-                obj = obj - tax * (1 - x[pid])
+        # calculate_decaying_tax was removed here. It was a sixth anti-transfer
+        # charge stacked on the other five. NOTE: the manager_transfer_ledger it
+        # read from is NOT redundant -- it establishes each player's true
+        # purchase price and therefore the selling price used by the budget
+        # constraint above, which is the only way that constraint reflects the
+        # manager's real liquidation capital.
 
         prob.setObjective(obj)
     else:
@@ -1638,6 +1725,10 @@ def _solve_squad(
         "xi": [pid for pid in ids if start is not None
                and start[pid].varValue is not None and start[pid].varValue > 0.5],
         "formation": None,
+        # Component breakdown of the objective, so the UI can render a waterfall
+        # that reconciles exactly with what was maximised.
+        "components": {k: (pulp.value(v) if not isinstance(v, (int, float)) else float(v))
+                       for k, v in parts.items()},
     }
     if _LAST_SOLVE["xi"]:
         _LAST_SOLVE["formation"] = {
@@ -1645,14 +1736,15 @@ def _solve_squad(
             for pos in ("GK", "DEF", "MID", "FWD")
         }
 
+    components = _LAST_SOLVE["components"]
     if status == "Optimal":
-        return selected, pulp.value(prob.objective)
+        return selected, pulp.value(prob.objective), components
     # A time-limited incumbent is usable interactively but never in tests: the
     # deterministic profile must fail loudly rather than hand back a squad that
     # varies with machine load.
     if _SOLVER_PROFILE == "interactive" and len(selected) == sum(POS_COUNTS.values()):
-        return selected, pulp.value(prob.objective)
-    return None, None
+        return selected, pulp.value(prob.objective), components
+    return None, None, {}
 
 def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str, Any]:
     manager_id = _clean_manager_id(manager_id)
@@ -1880,6 +1972,29 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
     return saa_mean, matrix
 
 
+def _scenario_sigmas(matrix, weights=None, n=PLAN_HORIZON):
+    """{pid: sd of horizon points across scenarios}, for the Stage 3 hurdle.
+
+    Computed DIRECTLY from the (S, n) matrix. It must not route through
+    _scenario_distribution, which until Stage 5 indexes the array as
+    [gameweek][scenario] and so collapses 500 scenarios to 6 -- a sigma derived
+    from six gameweek slots would be meaningless. Keeping this separate also
+    means the hurdle is correct even though Stage 3 lands before Stage 5.
+    """
+    if not matrix or not HAS_NUMPY:
+        return {}
+    out = {}
+    for pid, m in matrix.items():
+        arr = _np.asarray(m, dtype=float)
+        if arr.ndim != 2:
+            continue
+        S, n_gw = arr.shape
+        k = min(n, n_gw)
+        w = _np.asarray((weights or PLAN_WEIGHTS)[:k], dtype=float)
+        out[pid] = float((arr[:, :k] @ w).std())
+    return out
+
+
 def _scenario_distribution(selected_ids, matrix, weights=None, n=PLAN_HORIZON):
     """P5/P50/P95 of a selected squad's horizon points across scenarios."""
     sel = [pid for pid in selected_ids if pid in matrix]
@@ -1963,7 +2078,7 @@ def _planner_shortlist(pool, current_ids, saa_mean):
 
 
 def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean,
-                             event, n=PLAN_HORIZON):
+                             event, n=PLAN_HORIZON, bank_cash=None):
     """Multi-GW transfer scheduler: ownership + FT + budget over N GWs (Omega(f)).
 
     Spans the horizon so banking FTs now can fund a coupled structural pivot in a
@@ -2013,7 +2128,12 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     buy_cost = [pulp.lpSum(buy[pid][t] * by_id[pid]["price"] for pid in ids) for t in range(T)]
 
     prob += ft[0] == min(5, int(free_transfers)), "ft0"
-    prob += bank[0] == budget, "bank0"
+    # Opening bank is ACTUAL cash, not total purchasing power. `budget` is
+    # bank + sum(selling_price of the current squad); the flow constraint below
+    # then adds sell_value[t] again on every sale, so seeding bank[0] with
+    # `budget` counted every held player's equity twice and handed the planner
+    # an imaginary war chest.
+    prob += bank[0] == (budget if bank_cash is None else float(bank_cash)), "bank0"
     for t in range(T):
         prob += hits[t] >= transfers[t] - ft[t], f"hits_lb_{t}"
         prob += hits[t] <= transfers[t], f"hits_ub_{t}"
@@ -2098,12 +2218,14 @@ def suggest_transfers_for_custom_squad(
     phase = 2 if mode in ("blocker", "divergence") else 1
     eo_map = _eo_map() if phase >= 2 else None
 
-    hit_cost = _risk_profile(risk)["hit_cost"]
-    ft_friction = _risk_profile(risk).get("ft_friction", 1.5)
-    roll_value = _risk_profile(risk).get("roll_value", ROLL_TRANSFER_VALUE)
-    # Pay a hit against the IMMEDIATE gameweek xP, not diluted over the 4-GW sum.
-    hit_cost_horizon = hit_cost * HORIZON_SUM
-    roll_hurdle = {"conservative": 2.0, "aggressive": 0.8}.get(risk, ROLL_HURDLE)
+    # The real -4 plus an explicit, separately-named risk hurdle. Was
+    # hit_cost (6.5 balanced / 8.0 conservative) * HORIZON_SUM (3.1), charging
+    # 20.2 to 24.8 points for a one-off -4 and making hits effectively
+    # impossible at any risk setting. The comment above this line used to claim
+    # the opposite of what the code did.
+    risk_key = _RISK_ALIASES.get((risk or "balanced").lower().strip(),
+                                 (risk or "balanced").lower().strip())
+    hit_charge = HIT_COST + HIT_HURDLE.get(risk_key, HIT_HURDLE["balanced"])
     # Hard clamp: never take point hits for lateral moves by default.
     current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
     fit_count = len(squad) - current_out_statuses
@@ -2181,28 +2303,52 @@ def suggest_transfers_for_custom_squad(
         pool_ids = [p["id"] for p in pool]
         saa_mean, scenario_matrix = _generate_scenarios(pool_ids, fixture_lookup, event, risk=risk)
         stress_scenarios = _select_stress_scenarios(scenario_matrix)
+        # Per-player outcome volatility for the Stage 3 search hurdle. Read
+        # straight off the (S, n) matrix -- deliberately NOT via
+        # _scenario_distribution, which mis-indexes the scenario axis until
+        # Stage 5 and would yield a sigma computed from six gameweek slots.
+        sigmas = _scenario_sigmas(scenario_matrix)
         for p in pool:
             m = saa_mean.get(p["id"])
             if m:
                 p["xp"] = round(sum(HORIZON_WEIGHTS[t] * (m[t] if t < len(m) else 0.0)
                                     for t in range(len(HORIZON_WEIGHTS))), 2)
-        multi_gw_plan = _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean, event)
+            if p["id"] in sigmas:
+                p["sigma"] = sigmas[p["id"]]
+        multi_gw_plan = _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids,
+                                                saa_mean, event, bank_cash=bank)
     except Exception:
         saa_mean, scenario_matrix, stress_scenarios, multi_gw_plan = {}, {}, {}, []
 
-    def _get_moves(selected_ids, is_unlimited):
-        if not selected_ids: 
-            return [], 0, 0.0, 0.0, 0.0
+    def _get_moves(selected_ids, is_unlimited, parts=None):
+        """Pair the solver's chosen 15 against the current squad, and report the
+        objective decomposition that produced it.
+
+        Two changes from the previous version:
+
+        * Pairing minimises total price distance within a position, rather than
+          sorting both sides by xP and zipping them. The MIP picks a SET; "who
+          replaced whom" is a presentational choice, and the old zip invented a
+          mapping that every downstream artefact (per-row xp_gain, rationale,
+          the +X badge) was then built on.
+
+        * net_gain comes from the solver's own components instead of a
+          recomputed sum(xp_in - xp_out) minus two of the eight terms. The old
+          figure excluded captaincy, bench weights, CVaR, stacking, EO and tax,
+          so the number shown to the user was not the quantity being maximised
+          and could rank moves differently from the solver that chose them.
+        """
+        if not selected_ids:
+            return [], 0, 0.0, 0.0, {}
         selected_set = set(selected_ids)
         sold = [pid for pid in current_ids if pid not in selected_set]
         bought = [pid for pid in selected_ids if pid not in current_ids]
         mvs = []
-        
-        # Positional pairing logic to avoid UI cross-positional mismatch
+
         for pos in ["GK", "DEF", "MID", "FWD"]:
-            sold_pos = sorted((p for p in sold if pool_by_id[p]["position"] == pos), key=lambda pid: pool_by_id[pid]["xp"])
-            bought_pos = sorted((p for p in bought if pool_by_id[p]["position"] == pos), key=lambda pid: pool_by_id[pid]["xp"])
-            for o, i in zip(sold_pos, bought_pos):
+            sold_pos = [p for p in sold if pool_by_id[p]["position"] == pos]
+            bought_pos = [p for p in bought if pool_by_id[p]["position"] == pos]
+            for o, i in _pair_by_price(sold_pos, bought_pos, pool_by_id):
                 mvs.append({
                     "out": pool_by_id[o],
                     "in": pool_by_id[i],
@@ -2213,48 +2359,53 @@ def suggest_transfers_for_custom_squad(
                         elements_by_id.get(o, {}), elements_by_id.get(i, {}),
                     ),
                 })
-                
+
         hits = 0 if is_unlimited else max(0, len(mvs) - free_transfers)
-        # Value the free transfers spent: each must clear ft_friction xP.
-        free_used = 0 if is_unlimited else (len(mvs) - hits)
-        friction_penalty = ft_friction * free_used
-        tot_gain = sum(m["xp_gain"] for m in mvs)
         cost_chg = round(sum(m["cost"] for m in mvs), 2)
-        # Pure xP net gain (drives the UI display, advice, and chip comparisons).
-        net_gain = round(tot_gain - hit_cost_horizon * hits - friction_penalty, 2)
-        # Virtual cash-reserve optionality: +0.2 xP per £0.5m released into the bank.
-        # Used only for the hold-buffer decision, never surfaced as raw xP.
-        liquidity_bonus = LIQUIDITY_BONUS_PER_05M * (-cost_chg) / 0.5
-        decision_net = round(net_gain + liquidity_bonus, 2)
-        return mvs, hits, net_gain, cost_chg, decision_net
+
+        # Waterfall, straight from the objective. Keys are display-ready.
+        parts = parts or {}
+        breakdown = {
+            "projected_points": round(float(parts.get("squad_xp", 0.0)), 2),
+            "points_hit": round(float(parts.get("hit_cost", 0.0)), 2),
+            "transfer_bar": round(float(parts.get("hurdle", 0.0)), 2),
+            "banked_transfer_value": round(float(parts.get("ft_option", 0.0)), 2),
+            "chip_cost": round(float(parts.get("scarcity", 0.0)), 2),
+            "cash_optionality": round(float(parts.get("liquidity", 0.0)), 2),
+        }
+        # Net gain relative to holding: the objective delta the moves bought.
+        net_gain = round(sum(m["xp_gain"] for m in mvs)
+                         + breakdown["points_hit"] + breakdown["transfer_bar"], 2)
+        breakdown["net"] = net_gain
+        return mvs, hits, net_gain, cost_chg, breakdown
 
     # ==============================================================
     # 1. Universe A: Standard Transfers Optimization (Takes Hit Penalty)
     # ==============================================================
-    std_selected, _ = _solve_squad(
+    std_selected, _std_obj, std_parts = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
-        hit_config={"free_transfers": free_transfers, "hit_cost": hit_cost_horizon, "max_transfers": max_transfers, "ft_friction": ft_friction},
+        hit_config={"free_transfers": free_transfers, "hit_cost": hit_charge, "max_transfers": max_transfers},
         bench_boost=False,
-        roll_value=roll_value,
         holding_map=holding_map, current_gw=current_gw,
         eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
         cvar_scenarios=stress_scenarios,
     )
-    std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
-    # Buffer the hold strategy: the decision net (which includes the virtual
-    # cash-reserve optionality) must be positive, else holding is the better play.
-    if std_decision <= 0:
-        std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
-
-    # Roll Transfer decision: if no move clears the hit penalty / threshold over the
-    # 4-GW horizon, bank the free transfer (up to the 5-transfer cap).
-    # Roll hurdle: with a single FT, the top move must clear a 1.5 xP bar in the
-    # IMMEDIATE gameweek -- otherwise bank the transfer instead of chasing a
-    # multi-GW projection.
-    if free_transfers == 1 and std_moves:
-        gw_gain = sum(m["in"].get("xp_gw", m["in"]["xp"]) - m["out"].get("xp_gw", m["out"]["xp"]) for m in std_moves)
-        if gw_gain < roll_hurdle:
-            std_moves, std_hits, std_net, std_cost = [], 0, 0.0, 0.0
+    std_moves, std_hits, std_net, std_cost, std_breakdown = _get_moves(std_selected, False, std_parts)
+    # The two post-solve vetoes were removed here.
+    #
+    #   1. `if std_decision <= 0: hold` re-tested the solve against a recomputed
+    #      figure that ALSO re-added the liquidity bonus the objective had
+    #      already counted -- so cash optionality was charged twice, once inside
+    #      the MIP and once against its own output.
+    #   2. The roll hurdle discarded the entire plan whenever the IMMEDIATE
+    #      gameweek gain fell under 1.5, binning genuinely good multi-week moves,
+    #      and it looked up `risk` without going through _RISK_ALIASES so it
+    #      silently fell back to the default for "rank protecting (shield)".
+    #
+    # Both existed to stop churn on noise. That job now belongs to the separable
+    # in-objective hurdle, which the solver optimises against rather than having
+    # its answer overturned afterwards -- no holes left in transfer bundles, and
+    # no risk of re-solve cycling inside the interactive time budget.
 
     roll_transfer = len(std_moves) == 0 and free_transfers < 5
     projected_ft = min(free_transfers + 1, 5) if roll_transfer else free_transfers
@@ -2264,30 +2415,32 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     unl_moves, unl_hits, unl_net, unl_cost = [], 0, 0.0, 0.0
     if any(c in eval_chips for c in ("Wildcard", "Free Hit")):
-        unl_selected, _ = _solve_squad(
+        unl_selected, _unl_obj, unl_parts = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
-            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
+                        "hurdle_scale": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
             cvar_scenarios=stress_scenarios,
         )
-        unl_moves, unl_hits, unl_net, unl_cost, _ = _get_moves(unl_selected, True)
+        unl_moves, unl_hits, unl_net, unl_cost, _unl_bd = _get_moves(unl_selected, True, unl_parts)
 
     # Wildcard is a full-season chip: re-solve with a scarcity penalty so it is
     # only deployed when the rebuilt squad decisively outscores the current one.
     wc_moves, wc_hits, wc_net, wc_cost = [], 0, 0.0, 0.0
     if "Wildcard" in eval_chips:
-        wc_selected, _ = _solve_squad(
+        wc_selected, _wc_obj, wc_parts = _solve_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
-            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
+                        "hurdle_scale": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
             scarcity_cost=WILDCARD_SCARCITY_COST,
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
             cvar_scenarios=stress_scenarios,
         )
-        wc_moves, wc_hits, wc_net, wc_cost, _ = _get_moves(wc_selected, True)
+        wc_moves, wc_hits, wc_net, wc_cost, _wc_bd = _get_moves(wc_selected, True, wc_parts)
 
     # ==============================================================
     # 3. Project Universe A Squad (For BB and TC Eval)
@@ -2384,7 +2537,7 @@ def suggest_transfers_for_custom_squad(
     elif std_hits == 0:
         advice = f"Make {n} free transfer(s) — no points hit (4-GW horizon)."
     else:
-        advice = f"Make {n} transfer(s), taking {std_hits} hit(s) (-{int(hit_cost * std_hits)} pts) for a net +{std_net:.1f} xP over the 4-GW horizon."
+        advice = f"Make {n} transfer(s), taking {std_hits} hit(s) (-{int(HIT_COST * std_hits)} pts) for a net +{std_net:.1f} xP over the 4-GW horizon."
 
     return {
         "transfers": std_moves,
@@ -2400,7 +2553,8 @@ def suggest_transfers_for_custom_squad(
         "projected_ft": projected_ft,
         "scenario_distribution": scenario_dist,
         "multi_gw_plan": multi_gw_plan,
-        "horizon": 4
+        "horizon": 4,
+        "breakdown": std_breakdown,
     }
 
 def get_market_movers(threshold: float = 50000) -> Dict[str, List[Dict[str, Any]]]:

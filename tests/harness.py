@@ -173,6 +173,26 @@ def build_squad(bootstrap, name):
     return gk + dfn + mid + fwd
 
 
+def squad_as_manager_input(bootstrap, squad):
+    """Shape a fixture squad the way suggest_transfers_for_custom_squad wants."""
+    teams = {t["id"]: t["short_name"] for t in bootstrap["teams"]}
+    out = []
+    for e in squad:
+        price = e["now_cost"] / 10.0
+        out.append({
+            "player_id": e["id"],
+            "name": e["web_name"],
+            "team": teams.get(e["team"], "?"),
+            "position": fpl_tools.POS_MAP[e["element_type"]],
+            "price": price,
+            "purchase_price": price,
+            "selling_price": price,
+            "status": "Available",
+            "xp": 0.0,
+        })
+    return out
+
+
 def market_pool_entries(bootstrap, fixture_lookup, event, per_pos=None):
     """A wider candidate pool, so the solver has real freedom over the 15.
 

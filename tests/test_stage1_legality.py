@@ -65,7 +65,7 @@ class FormationLegalityTest(unittest.TestCase):
                     squad = harness.build_squad(bs, name)
                     entries = harness.squad_to_pool_entries(bs, squad, lookup, EVENT)
                     budget = sum(e["price"] for e in entries)
-                    selected, _obj = fpl_tools._solve_squad(entries, budget=budget)
+                    selected, _obj, _parts = fpl_tools._solve_squad(entries, budget=budget)
                     self.assertIsNotNone(selected, f"{name}: solver returned no squad")
 
                     form = fpl_tools._LAST_SOLVE["formation"]
@@ -84,7 +84,7 @@ class FormationLegalityTest(unittest.TestCase):
                         bs, harness.build_squad(bs, name), lookup, EVENT)
                     by_id = {e["id"]: e for e in entries}
                     budget = sum(e["price"] for e in entries)
-                    selected, _ = fpl_tools._solve_squad(entries, budget=budget)
+                    selected, _, _parts = fpl_tools._solve_squad(entries, budget=budget)
 
                     chosen = [by_id[pid] for pid in selected]
                     self.assertEqual(_formation(chosen),
@@ -109,7 +109,7 @@ class FormationLegalityTest(unittest.TestCase):
                 bs, harness.build_squad(bs, "balanced"), lookup, EVENT)
             by_id = {e["id"]: e for e in entries}
             budget = sum(e["price"] for e in entries)
-            selected, _ = fpl_tools._solve_squad(entries, budget=budget, bench_boost=True)
+            selected, _, _parts = fpl_tools._solve_squad(entries, budget=budget, bench_boost=True)
             chosen = [by_id[pid] for pid in selected]
             self.assertEqual(_formation(chosen), {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3})
             self.assertEqual(fpl_tools._LAST_SOLVE["xi"], [])
@@ -135,7 +135,7 @@ class SolverProfileTest(unittest.TestCase):
             budget = sum(e["price"] for e in entries)
             runs = []
             for _ in range(3):
-                selected, obj = fpl_tools._solve_squad(entries, budget=budget)
+                selected, obj, _parts = fpl_tools._solve_squad(entries, budget=budget)
                 runs.append((sorted(selected), round(obj, 6)))
             self.assertEqual(runs[0], runs[1])
             self.assertEqual(runs[1], runs[2])

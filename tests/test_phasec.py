@@ -82,18 +82,26 @@ class StrategyModeTest(unittest.TestCase):
 
     def test_blocker_penalises_low_eo(self):
         pool = _squad_pool()
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=set(range(1, 16)),
-            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
+            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1,
+                        # hurdle_scale=0: these tests isolate the EO terms. With the
+                        # Stage 3 churn brake active they would measure the brake
+                        # instead, since the EO bonus here (0.25) is well inside it.
+                        "hurdle_scale": 0.0},
             eo_map=_eo_map_high_low(), mode="blocker", phase=2,
         )
         self.assertNotIn(99, sel)  # low-EO incoming is penalised in blocker mode
 
     def test_divergence_rewards_low_eo(self):
         pool = _squad_pool()
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=set(range(1, 16)),
-            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
+            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1,
+                        # hurdle_scale=0: these tests isolate the EO terms. With the
+                        # Stage 3 churn brake active they would measure the brake
+                        # instead, since the EO bonus here (0.25) is well inside it.
+                        "hurdle_scale": 0.0},
             eo_map=_eo_map_high_low(), mode="divergence", phase=2,
         )
         self.assertIn(99, sel)  # low-EO differential is rewarded in divergence mode
@@ -101,9 +109,13 @@ class StrategyModeTest(unittest.TestCase):
     def test_phase1_no_eo_terms(self):
         # In phase 1 the EO terms are inactive; the solver still solves cleanly.
         pool = _squad_pool()
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=set(range(1, 16)),
-            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
+            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1,
+                        # hurdle_scale=0: these tests isolate the EO terms. With the
+                        # Stage 3 churn brake active they would measure the brake
+                        # instead, since the EO bonus here (0.25) is well inside it.
+                        "hurdle_scale": 0.0},
             eo_map=_eo_map_high_low(), mode="blocker", phase=1,
         )
         self.assertEqual(len(sel), 15)
