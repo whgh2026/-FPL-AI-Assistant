@@ -7,7 +7,7 @@ import dateutil.parser
 from dateutil import tz
 import datetime
 import time
-from db import get_or_backfill_manager_history, log_decision, log_squad_health
+from db import get_or_backfill_manager_history, log_decision, log_squad_health, save_chip_play
 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
@@ -1480,6 +1480,11 @@ with tab_planner:
                                 override_squad.append(selected[0])
     
             st.markdown("<br>", unsafe_allow_html=True)
+            rival_manager_id = st.text_input(
+                "Rival Manager ID (optional — Blocker mode shadows this team)",
+                key="rival_id_input",
+                help="In Phase 2 (GW26+), Conservative/Blocker mode aligns your squad with this rival's players to protect a lead.",
+            )
             if st.button("⚽ Run the Numbers (In the Engine We Trust)", type="primary", use_container_width=True, key="btn_analyse_override"):
                 
                 active_squad_ids = override_squad if show_override else [p["player_id"] for p in st.session_state.get("squad_preview", {}).get("squad", [])]
@@ -1516,10 +1521,19 @@ with tab_planner:
                                 })
                             
                             holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
+                            rival_ids = None
+                            if rival_manager_id and rival_manager_id.strip():
+                                try:
+                                    _rv = fpl_tools.score_my_squad(rival_manager_id.strip(), GW_ID)
+                                    rival_ids = {p["player_id"] for p in _rv.get("squad", [])}
+                                except Exception:
+                                    rival_ids = None
+                            st.session_state["rival_ids"] = rival_ids
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
                                 analysed, float(bank_val), int(st.session_state.get("available_ft", 1)), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                                 holding_map=holding_map, current_gw=GW_ID,
-                                allow_hits=st.session_state.get("ov_allow_hits", False))
+                                allow_hits=st.session_state.get("ov_allow_hits", False),
+                                rival_ids=rival_ids)
 
                             try:
                                 log_decision(
@@ -1568,11 +1582,11 @@ with tab_planner:
                 key="risk",
                 help="Tunes the transfer hurdle rate and competitive posture.",
                 captions=[
-                    "Standard transfer hurdle rate; balanced risk-reward profile.",
-                    "High hurdle rate; prioritises rolling and banking free transfers (Park the Bus).",
-                    "Lower hurdle rate; accepts point hits (-4) if immediate upside justifies it.",
-                    "Weights effective ownership (EO) to mirror template picks and protect rank.",
-                    "Deprecates template picks; targets low-ownership differentials with high underlying metrics (Fergie Time).",
+                    "Standard transfer hurdle rate; risk-neutral EV maximisation.",
+                    "Phase 2 (GW26+): Blocker — shadows the template/rival to protect a lead (locks the consensus captain, penalises low-EO differentials).",
+                    "Phase 2 (GW26+): Divergence — hunts ceiling variance to close a deficit (low-EO differentials + club stacks).",
+                    "Alias for Conservative/Blocker: mirror template picks and protect rank.",
+                    "Alias for Aggressive/Divergence: target low-ownership differentials with high underlying metrics.",
                 ],
                 on_change=clear_transfer_cache,
             )
@@ -1600,7 +1614,8 @@ with tab_planner:
                             ov["analysed_squad"], ov["bank"], ov["ft"],
                             eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                             holding_map=holding_map, current_gw=GW_ID,
-                            allow_hits=st.session_state.get("ov_allow_hits", False)
+                            allow_hits=st.session_state.get("ov_allow_hits", False),
+                            rival_ids=st.session_state.get("rival_ids")
                         )
                         ov["transfers"] = tr
                     except Exception as e:
@@ -1615,6 +1630,18 @@ with tab_planner:
             chip_options = ["None (Hold Chips)"] + ALL_CHIPS
 
             st.markdown("#### Confirm Active Chip")
+            try:
+                inv = fpl_tools._chip_inventory(GW_ID)
+                played = fpl_tools.get_played_chips(manager_id.strip())
+                set1_remaining = [c for c in inv["set1"] if c not in played]
+                if inv["set1"]:
+                    st.caption(f"Set 1 chips (expire GW{inv['expiry_gw']}): {', '.join(set1_remaining) or 'all played'}.")
+                else:
+                    st.caption(f"Set 2 chips active (GW{inv['expiry_gw'] + 1}–38): {', '.join(inv['set2'])}.")
+                if GW_ID >= 17 and set1_remaining:
+                    st.warning(f"⚠️ Set 1 chips ({', '.join(set1_remaining)}) expire at the GW{inv['expiry_gw']} deadline — play or lose them.")
+            except Exception:
+                pass
             confirmed_chip = st.radio(
                 "Select which chip you will actively play this Gameweek (Only 1 allowed):",
                 chip_options,
@@ -1711,6 +1738,8 @@ with tab_planner:
                             chip=confirmed_chip,
                             transfers="; ".join(f"{m['out']['name']}->{m['in']['name']}" for m in moves) or "HOLD",
                         )
+                        if confirmed_chip and confirmed_chip != "None (Hold Chips)":
+                            save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
                     except Exception:
                         pass
                     st.session_state["manual_final"] = lineup
@@ -1739,6 +1768,39 @@ with tab_planner:
                         )
                 except Exception:
                     st.caption("Structural health unavailable.")
+
+            with st.expander("📊 EO & Rank Risk Diagnostic", expanded=False):
+                try:
+                    eo_map = fpl_tools._eo_map()
+                    _b = fpl_tools._get_bootstrap()
+                    names = {e["id"]: e.get("web_name") or e.get("second_name") or str(e["id"]) for e in _b.get("elements", [])}
+                    lineup = fpl_tools.select_starting_xi(ov["analysed_squad"])
+                    xi_ids = {p["player_id"] for p in lineup["xi"]}
+                    cap_id = lineup["captain"]["player_id"] if lineup.get("captain") else None
+                    squad_ids = {p["player_id"] for p in ov["analysed_squad"]}
+                    rows = []
+                    for p in ov["analysed_squad"]:
+                        eo = eo_map.get(p["player_id"], {}).get("eo", 0.0)
+                        if p["player_id"] in xi_ids and eo > 100.0 and p["player_id"] != cap_id:
+                            per_pt = fpl_tools._rank_exposure(1, eo, 1.0)
+                            rows.append(("⚠️ Inverted", names.get(p["player_id"], p.get("name", "?")), f"EO {eo:.0f}% · {per_pt:+.2f} pts/point (rank drops when they score)"))
+                    for pid, eo_d in eo_map.items():
+                        if eo_d.get("eo", 0.0) > 80.0 and pid not in squad_ids:
+                            per_pt = fpl_tools._rank_exposure(0, eo_d.get("eo", 0.0), 1.0)
+                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (unowned)"))
+                    if rows:
+                        html = "".join(
+                            f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
+                            f'<div style="flex:0 0 auto;font-weight:700;">{flag}</div>'
+                            f'<div style="flex:1;min-width:0;"><div style="color:#E2E8F0;font-weight:600;">{name}</div>'
+                            f'<div class="tc-meta">{detail}</div></div></div>'
+                            for flag, name, detail in rows
+                        )
+                        st.markdown(_card(html, "Rank-risk exposures"), unsafe_allow_html=True)
+                    else:
+                        st.caption("No inverted exposures or leveraged shorts detected.")
+                except Exception:
+                    st.caption("EO diagnostic unavailable.")
 
             with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
                 explainer_bullets = []

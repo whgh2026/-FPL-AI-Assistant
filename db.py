@@ -206,3 +206,33 @@ def log_squad_health(manager_id, gameweek, checks):
         return log_decision(manager_id, gameweek, "health", 0.0, hits=0, chip=None, transfers=summary)
     except Exception:
         return False
+
+
+def save_chip_play(manager_id, gameweek, chip):
+    """Record a chip activation in the local ledger (idempotent per manager/GW/chip)."""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS chip_plays ("
+                "id BIGSERIAL PRIMARY KEY,"
+                "manager_id TEXT NOT NULL,"
+                "gameweek INTEGER NOT NULL,"
+                "chip TEXT NOT NULL,"
+                "created_at TIMESTAMPTZ DEFAULT NOW(),"
+                "UNIQUE (manager_id, gameweek, chip))"
+            )
+            cur.execute(
+                "INSERT INTO chip_plays (manager_id, gameweek, chip) VALUES (%s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (str(manager_id), int(gameweek), chip),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False

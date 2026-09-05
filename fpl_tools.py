@@ -50,6 +50,12 @@ WILDCARD_SCARCITY_COST = 55.0
 ROLL_TRANSFER_VALUE = 1.5
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
+# Phase C — game theory, effective ownership, and two-set chip scheduling.
+PHASE2_START_GW = 26            # GW26+ switches from pure EV to Blocker/Divergence
+CHIP_SET1_EXPIRY_GW = 19        # Set 1 chips expire at the GW19 deadline (2 Jan 2027 13:30 GMT)
+CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
+CAP_LOCK_BONUS = 2.0            # blocker reward for captaining the consensus (highest-EO) asset
+
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
 ROLLED_FT_SHAPE         = [1.0, 0.8, 0.55, 0.25, 0.05]  # convex-down marginal value of the 1st..5th banked FT
@@ -817,6 +823,13 @@ def _load_weights() -> Dict[str, float]:
         "dixon_coles_decay": 0.03,
         "dixon_coles_tau": 0.2,
         "rating_scale": 2.0,
+        "eo_tc_mass": 0.03,
+        "eo_floor": 15.0,
+        "eo_ceil": 10.0,
+        "block_weight": 0.04,
+        "diverge_weight": 0.05,
+        "stack_weight": 0.3,
+        "track_weight": 0.5,
     }
     weights = dict(defaults)
     try:
@@ -1132,7 +1145,8 @@ def _transfer_rationale(out_entry: Dict[str, Any], in_entry: Dict[str, Any],
 def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note: str, pos: str,
                 selling_price: Optional[float] = None, xp_gw: Optional[float] = None,
                 fdr: Optional[List[float]] = None, event: Optional[int] = None,
-                holding_map: Optional[Dict[Any, int]] = None) -> Dict[str, Any]:
+                holding_map: Optional[Dict[Any, int]] = None,
+                eo: Optional[float] = None) -> Dict[str, Any]:
     entry = {
         "id": e["id"],
         "name": f"{e['first_name']} {e['second_name']}",
@@ -1153,6 +1167,8 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         entry["fdr"] = fdr
     if holding_map is not None:
         entry["purchase_gw"] = holding_map.get(e["id"])
+    if eo is not None:
+        entry["eo"] = eo
     return entry
 
 def _solve_squad(
@@ -1165,6 +1181,10 @@ def _solve_squad(
     roll_value: float = 0.0,
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
+    eo_map: Optional[Dict[int, Dict[str, float]]] = None,
+    mode: str = "ev",
+    phase: int = 1,
+    rival_ids: Optional[set] = None,
 ) -> Tuple[Optional[List[int]], Optional[float]]:
     if not HAS_PULP:
         return None, None
@@ -1235,6 +1255,54 @@ def _solve_squad(
         else:
             prob += captain[pid] <= x[pid], f"captain_le_x_{pid}"
     xp_expr += pulp.lpSum(by_id[pid]["xp"] * captain[pid] for pid in ids)
+
+    # Phase-2 game-theory objective: EO alignment (blocker) vs ceiling variance
+    # (divergence). All terms are linear (constant-coefficient penalties/rewards,
+    # pairwise stack binaries) so the MIP stays under 2s.
+    if phase >= 2 and eo_map and mode in ("blocker", "divergence"):
+        w = _load_weights()
+        if mode == "blocker":
+            eo_floor = w.get("eo_floor", 15.0)
+            block_w = w.get("block_weight", 0.04)
+            # Penalise selecting sub-floor EO differentials.
+            xp_expr = xp_expr - block_w * pulp.lpSum(
+                max(0.0, eo_floor - eo_map.get(pid, {}).get("eo", 0.0)) * x[pid]
+                for pid in ids
+            )
+            # Lock the consensus captain (highest-EO selected player).
+            if ids:
+                consensus = max(ids, key=lambda pid: eo_map.get(pid, {}).get("eo", 0.0))
+                xp_expr = xp_expr + CAP_LOCK_BONUS * captain[consensus]
+            # Mirror a rival squad (tracking-error alignment) when provided.
+            if rival_ids:
+                track_w = w.get("track_weight", 0.5)
+                xp_expr = xp_expr - track_w * pulp.lpSum(
+                    (1 - x[pid]) for pid in rival_ids if pid in by_id
+                )
+        else:  # divergence
+            eo_ceil = w.get("eo_ceil", 10.0)
+            div_w = w.get("diverge_weight", 0.05)
+            # Reward sub-ceiling EO differentials (high-ceiling low-EO punts).
+            xp_expr = xp_expr + div_w * pulp.lpSum(
+                max(0.0, eo_ceil - eo_map.get(pid, {}).get("eo", 0.0)) * x[pid]
+                for pid in ids
+            )
+            # Correlated attacking-stack covariance bonus (top-3 attackers/club).
+            stack_w = w.get("stack_weight", 0.3)
+            attack_ids = [pid for pid in ids if by_id[pid]["position"] in ("MID", "FWD")]
+            by_team: Dict[int, List[int]] = {}
+            for pid in attack_ids:
+                by_team.setdefault(by_id[pid]["team_id"], []).append(pid)
+            for team_pids in by_team.values():
+                team_pids = sorted(team_pids, key=lambda pid: by_id[pid]["xp"], reverse=True)[:3]
+                for a in range(len(team_pids)):
+                    for b in range(a + 1, len(team_pids)):
+                        pa, pb = team_pids[a], team_pids[b]
+                        z = pulp.LpVariable(f"stack_{pa}_{pb}", cat="Binary")
+                        prob += z <= x[pa], f"stack_a_{pa}_{pb}"
+                        prob += z <= x[pb], f"stack_b_{pa}_{pb}"
+                        prob += z >= x[pa] + x[pb] - 1, f"stack_ge_{pa}_{pb}"
+                        xp_expr = xp_expr + stack_w * z
 
     # Positional transfer friction: subtract a penalty for every player sold
     # ((1 - x[pid]) == 1 for outgoing players). This stops the solver burning a
@@ -1398,6 +1466,104 @@ def _ownership_adjust(e, xp, risk):
     return xp
 
 
+_EO_CACHE: Optional[Dict[int, Dict[str, float]]] = None
+_EO_CACHE_TS: float = 0.0
+
+
+def _captain_distribution(elements, n: int = 10) -> Dict[int, float]:
+    """Estimate captain % across players (sum ~100%) from ownership-weighted xP.
+
+    FPL exposes no captain/TC percentages for free, so we model captaincy as the
+    ownership-weighted xP share of the top-N candidates, normalised to ~100%.
+    """
+    candidates = []
+    for e in elements:
+        ow = _to_float(e.get("selected_by_percent"))
+        if ow <= 0:
+            continue
+        xp = _to_float(e.get("ep_next")) or _to_float(e.get("points_per_game")) or 1.0
+        candidates.append((e["id"], ow * max(xp, 1.0)))
+    candidates.sort(key=lambda t: t[1], reverse=True)
+    top = candidates[:n]
+    total = sum(wt for _, wt in top) or 1.0
+    return {pid: 100.0 * (wt / total) for pid, wt in top}
+
+
+def _eo_map() -> Dict[int, Dict[str, float]]:
+    """Effective ownership per player: ownership + captain + 2*tc (all in %)."""
+    global _EO_CACHE, _EO_CACHE_TS
+    if _EO_CACHE is not None and (time.time() - _EO_CACHE_TS) < 300:
+        return _EO_CACHE
+    bootstrap = _get_bootstrap()
+    elements = bootstrap.get("elements", [])
+    cap_dist = _captain_distribution(elements)
+    w = _load_weights()
+    tc_mass = w.get("eo_tc_mass", 0.03) * 100.0
+    top_pid = max(cap_dist, key=cap_dist.get) if cap_dist else None
+    out = {}
+    for e in elements:
+        pid = e["id"]
+        ow = _to_float(e.get("selected_by_percent"))
+        cap = cap_dist.get(pid, 0.0)
+        tc = tc_mass if pid == top_pid else 0.0
+        out[pid] = {
+            "ownership": round(ow, 2),
+            "captain": round(cap, 2),
+            "tc": round(tc, 2),
+            "eo": round(ow + cap + 2.0 * tc, 2),
+        }
+    _EO_CACHE = out
+    _EO_CACHE_TS = time.time()
+    return out
+
+
+def _rank_exposure(multiplier: int, eo: float, points: float) -> float:
+    """Δ_i = points * (m_i - EO_i/100): marginal rank PnL of player i scoring `points`."""
+    return points * (float(multiplier) - eo / 100.0)
+
+
+def _strategy_mode(risk: str) -> str:
+    """Map a strategy label to a Phase-2 game-theory mode (ev / blocker / divergence)."""
+    key = (risk or "balanced").lower().strip()
+    key = _RISK_ALIASES.get(key, key)
+    if key in ("conservative", "rank_protecting"):
+        return "blocker"
+    if key in ("aggressive", "rank_chasing"):
+        return "divergence"
+    return "ev"
+
+
+def _chip_inventory(current_gw):
+    """Which chips are playable in Set 1 (GW1-19) vs Set 2 (GW20-38)."""
+    gw = int(current_gw or 1)
+    set1 = CHIPS if gw <= CHIP_SET1_EXPIRY_GW else []
+    set2 = CHIPS if gw > CHIP_SET1_EXPIRY_GW else []
+    return {"set1": set1, "set2": set2, "expiry_gw": CHIP_SET1_EXPIRY_GW}
+
+
+def _chip_reservation_threshold(chip: str, gw: int) -> float:
+    """Declining reservation hurdle as the Set-1 deadline approaches."""
+    base = {"Wildcard": 55.0, "Free Hit": 20.0, "Bench Boost": 15.0, "Triple Captain": 15.0}.get(chip, 99.0)
+    gw = int(gw)
+    if gw >= 18:
+        return 0.0   # forced exercise: play on any positive gain
+    if gw >= 15:
+        return 10.0  # dropped hurdle
+    return base
+
+
+def get_played_chips(manager_id: str) -> List[str]:
+    """Chip names the manager has already played (from FPL history)."""
+    try:
+        manager_id = _clean_manager_id(manager_id)
+        resp = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10)
+        resp.raise_for_status()
+        chips = resp.json().get("chips") or []
+        return [c.get("name") for c in chips if c.get("name")]
+    except Exception:
+        return []
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def suggest_transfers_for_custom_squad(
     squad: List[Dict[str, Any]], 
@@ -1409,6 +1575,7 @@ def suggest_transfers_for_custom_squad(
     holding_map: Optional[Dict[Any, int]] = None,
     current_gw: Optional[int] = None,
     allow_hits: bool = False,
+    rival_ids: Optional[set] = None,
 ) -> Dict[str, Any]:
     bootstrap = _get_bootstrap()
     fixture_lookup = _build_fixture_lookup(bootstrap)
@@ -1420,6 +1587,10 @@ def suggest_transfers_for_custom_squad(
 
     if current_gw is None:
         current_gw = event
+
+    mode = _strategy_mode(risk)
+    phase = 2 if current_gw >= PHASE2_START_GW else 1
+    eo_map = _eo_map() if phase >= 2 else None
 
     hit_cost = _risk_profile(risk)["hit_cost"]
     ft_friction = _risk_profile(risk).get("ft_friction", 1.5)
@@ -1459,7 +1630,8 @@ def suggest_transfers_for_custom_squad(
         fdr = _player_fdr_list(e, fixture_lookup, event)
         pool.append(_pool_entry(e, teams_by_id, xp, note, pos,
                                 selling_price=sell_by_id.get(pid), xp_gw=xp_gw, fdr=fdr, event=event,
-                                holding_map=holding_map))
+                                holding_map=holding_map,
+                                eo=(eo_map.get(pid, {}).get("eo") if eo_map else None)))
         seen.add(pid)
 
     # Candidate shortlist: the full market (~700 players) is dominated by ~400
@@ -1483,7 +1655,8 @@ def suggest_transfers_for_custom_squad(
             xp_gw, _ = _player_xp(e, fixture_lookup, event=event, risk=risk)
             fdr = _player_fdr_list(e, fixture_lookup, event)
             pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
-                                    holding_map=holding_map))
+                                    holding_map=holding_map,
+                                    eo=(eo_map.get(e["id"], {}).get("eo") if eo_map else None)))
             seen.add(e["id"])
 
     # Total purchasing power = Bank + sum(selling price of the current squad).
@@ -1541,6 +1714,7 @@ def suggest_transfers_for_custom_squad(
         bench_boost=False,
         roll_value=roll_value,
         holding_map=holding_map, current_gw=current_gw,
+        eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
     )
     std_moves, std_hits, std_net, std_cost, std_decision = _get_moves(std_selected, False)
     # Buffer the hold strategy: the decision net (which includes the virtual
@@ -1571,6 +1745,7 @@ def suggest_transfers_for_custom_squad(
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15, "ft_friction": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
             holding_map=holding_map, current_gw=current_gw,
+            eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
         )
         unl_moves, unl_hits, unl_net, unl_cost, _ = _get_moves(unl_selected, True)
 
@@ -1584,6 +1759,7 @@ def suggest_transfers_for_custom_squad(
             bench_boost=("Bench Boost" in eval_chips),
             scarcity_cost=WILDCARD_SCARCITY_COST,
             holding_map=holding_map, current_gw=current_gw,
+            eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
         )
         wc_moves, wc_hits, wc_net, wc_cost, _ = _get_moves(wc_selected, True)
 
@@ -1631,18 +1807,18 @@ def suggest_transfers_for_custom_squad(
 
     ranked_chips = sorted(chip_scores.items(), key=lambda x: x[1], reverse=True)
     
-    # Ultra-Strict Compelling Reason Thresholds
-    THRESHOLDS = {"Wildcard": 55.0, "Free Hit": 20.0, "Bench Boost": 15.0, "Triple Captain": 10.0}
-    
+    # Dynamic reservation thresholds (decline toward the Set-1 GW19 deadline).
     chip_advice_list = []
     if len(eval_chips) > 1:
         chip_advice_list.append("⚠️ <b>Official FPL Rule:</b> You may only activate 1 chip per Gameweek. The system has ranked your selections below based on mathematical scarcity:")
+    if current_gw >= 17:
+        chip_advice_list.append(f"⏳ <b>Set 1 chip deadline:</b> first-half chips expire at the GW{CHIP_SET1_EXPIRY_GW} deadline — play any positive-gain chip now or lose the asset.")
 
     recommended_chip = "None (Hold Chips)"
     best_chip_gain = 0.0
 
     for chip_name, score in ranked_chips:
-        threshold = THRESHOLDS.get(chip_name, 99.0)
+        threshold = _chip_reservation_threshold(chip_name, current_gw)
         passed_threshold = score >= threshold
         
         # Wildcard exception: Lower xP barrier if squad is ravaged by injuries
