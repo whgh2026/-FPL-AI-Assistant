@@ -170,6 +170,48 @@ VALID_FORMATIONS = [
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _LAST_FETCH_TIME = None
 
+# ------------------------------------------------------------------
+# Solver profiles
+# ------------------------------------------------------------------
+# CBC is only deterministic single-threaded, and a wall-clock timeLimit returns
+# whatever incumbent the timer happens to catch. Two profiles, because the two
+# callers want different contracts:
+#
+#   "deterministic" - tests and golden files. Optimality must be *proven*; a
+#       timeout is a hard failure, never a silently-compared incumbent.
+#   "interactive"   - the live app. Latency is the contract; an unproven gap is
+#       acceptable but must be reported so the UI never claims "optimal".
+#
+# threads=1 in both: multi-threaded branch-and-bound is non-deterministic by
+# design and would make golden files flap on a loaded runner.
+SOLVER_PROFILES = {
+    "deterministic": {"threads": 1, "timeLimit": 60.0, "gapRel": 0.0},
+    "interactive":   {"threads": 1, "timeLimit": 0.8, "gapRel": 0.01},
+}
+_SOLVER_PROFILE = os.environ.get("FPL_SOLVER_PROFILE", "interactive")
+
+# Diagnostics from the most recent _solve_squad call. Read by tests (to assert
+# formation legality on the XI the MIP actually chose) and by the UI (to decide
+# between "optimal" and "best plan found in the time available").
+_LAST_SOLVE: Dict[str, Any] = {}
+
+
+def set_solver_profile(name: str) -> None:
+    """Select a solver profile. Raises on an unknown name rather than silently
+    falling back, so a typo in CI can't quietly disable determinism."""
+    global _SOLVER_PROFILE
+    if name not in SOLVER_PROFILES:
+        raise ValueError(f"unknown solver profile {name!r}; expected one of {sorted(SOLVER_PROFILES)}")
+    _SOLVER_PROFILE = name
+
+
+def get_solver_profile() -> str:
+    return _SOLVER_PROFILE
+
+
+def _make_solver():
+    return pulp.PULP_CBC_CMD(msg=0, **SOLVER_PROFILES[_SOLVER_PROFILE])
+
 def _cached_json(url: str, ttl: int = 300) -> Any:
     global _LAST_FETCH_TIME
     now = time.time()
@@ -1436,12 +1478,37 @@ def _solve_squad(
     else:
         prob.setObjective(xp_expr)
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    if pulp.LpStatus[prob.status] != "Optimal":
-        return None, None
-
+    global _LAST_SOLVE
+    prob.solve(_make_solver())
+    status = pulp.LpStatus[prob.status]
     selected = [pid for pid in ids if x[pid].varValue is not None and x[pid].varValue > 0.5]
-    return selected, pulp.value(prob.objective)
+
+    # Record what the MIP actually chose, so tests can assert on the XI (the
+    # `start` binaries are otherwise invisible to callers) and the UI can tell
+    # a proven optimum from a time-limited incumbent.
+    _LAST_SOLVE = {
+        "status": status,
+        "proven_optimal": status == "Optimal",
+        "profile": _SOLVER_PROFILE,
+        "selected": selected,
+        "xi": [pid for pid in ids if start is not None
+               and start[pid].varValue is not None and start[pid].varValue > 0.5],
+        "formation": None,
+    }
+    if _LAST_SOLVE["xi"]:
+        _LAST_SOLVE["formation"] = {
+            pos: sum(1 for pid in _LAST_SOLVE["xi"] if by_id[pid]["position"] == pos)
+            for pos in ("GK", "DEF", "MID", "FWD")
+        }
+
+    if status == "Optimal":
+        return selected, pulp.value(prob.objective)
+    # A time-limited incumbent is usable interactively but never in tests: the
+    # deterministic profile must fail loudly rather than hand back a squad that
+    # varies with machine load.
+    if _SOLVER_PROFILE == "interactive" and len(selected) == sum(POS_COUNTS.values()):
+        return selected, pulp.value(prob.objective)
+    return None, None
 
 def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str, Any]:
     manager_id = _clean_manager_id(manager_id)

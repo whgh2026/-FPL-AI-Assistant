@@ -1,0 +1,1202 @@
+[
+ {
+  "event": 1,
+  "finished": true,
+  "id": 1,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": 0,
+  "team_h": 1,
+  "team_h_score": 2
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 2,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": 1,
+  "team_h": 3,
+  "team_h_score": 7
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 3,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": 0,
+  "team_h": 4,
+  "team_h_score": 0
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 4,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": 0,
+  "team_h": 5,
+  "team_h_score": 2
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 5,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 17,
+  "team_a_score": 0,
+  "team_h": 6,
+  "team_h_score": 4
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 6,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 16,
+  "team_a_score": 1,
+  "team_h": 7,
+  "team_h_score": 2
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 7,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 15,
+  "team_a_score": 1,
+  "team_h": 8,
+  "team_h_score": 2
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 8,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 14,
+  "team_a_score": 0,
+  "team_h": 9,
+  "team_h_score": 2
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 9,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 13,
+  "team_a_score": 1,
+  "team_h": 10,
+  "team_h_score": 1
+ },
+ {
+  "event": 1,
+  "finished": true,
+  "id": 10,
+  "kickoff_time": "2026-08-03T14:00:00Z",
+  "team_a": 12,
+  "team_a_score": 2,
+  "team_h": 11,
+  "team_h_score": 2
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 11,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": 1,
+  "team_h": 1,
+  "team_h_score": 1
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 12,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": 2,
+  "team_h": 4,
+  "team_h_score": 2
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 13,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": 0,
+  "team_h": 5,
+  "team_h_score": 3
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 14,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": 1,
+  "team_h": 6,
+  "team_h_score": 2
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 15,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": 0,
+  "team_h": 7,
+  "team_h_score": 3
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 16,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 17,
+  "team_a_score": 1,
+  "team_h": 8,
+  "team_h_score": 3
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 17,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 16,
+  "team_a_score": 1,
+  "team_h": 9,
+  "team_h_score": 1
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 18,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 15,
+  "team_a_score": 1,
+  "team_h": 10,
+  "team_h_score": 3
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 19,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 14,
+  "team_a_score": 3,
+  "team_h": 11,
+  "team_h_score": 4
+ },
+ {
+  "event": 2,
+  "finished": true,
+  "id": 20,
+  "kickoff_time": "2026-08-04T14:00:00Z",
+  "team_a": 13,
+  "team_a_score": 0,
+  "team_h": 12,
+  "team_h_score": 1
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 21,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": 2,
+  "team_h": 1,
+  "team_h_score": 3
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 22,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": 3,
+  "team_h": 5,
+  "team_h_score": 3
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 23,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": 3,
+  "team_h": 6,
+  "team_h_score": 3
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 24,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": 2,
+  "team_h": 7,
+  "team_h_score": 1
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 25,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": 0,
+  "team_h": 8,
+  "team_h_score": 5
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 26,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": 1,
+  "team_h": 9,
+  "team_h_score": 2
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 27,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 17,
+  "team_a_score": 3,
+  "team_h": 10,
+  "team_h_score": 3
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 28,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 16,
+  "team_a_score": 1,
+  "team_h": 11,
+  "team_h_score": 1
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 29,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 15,
+  "team_a_score": 1,
+  "team_h": 12,
+  "team_h_score": 2
+ },
+ {
+  "event": 3,
+  "finished": true,
+  "id": 30,
+  "kickoff_time": "2026-08-05T14:00:00Z",
+  "team_a": 14,
+  "team_a_score": 2,
+  "team_h": 13,
+  "team_h_score": 3
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 31,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 32,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 6,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 33,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 7,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 34,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": null,
+  "team_h": 8,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 35,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 9,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 36,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": null,
+  "team_h": 10,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 37,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 38,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 17,
+  "team_a_score": null,
+  "team_h": 12,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 39,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 16,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 4,
+  "finished": false,
+  "id": 40,
+  "kickoff_time": "2026-08-06T14:00:00Z",
+  "team_a": 15,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 41,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 42,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 7,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 43,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 8,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 44,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 9,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 45,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": null,
+  "team_h": 10,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 46,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 47,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": null,
+  "team_h": 12,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 48,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 49,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 17,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 5,
+  "finished": false,
+  "id": 50,
+  "kickoff_time": "2026-09-07T14:00:00Z",
+  "team_a": 16,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 51,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 7,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 52,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 8,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 53,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 9,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 54,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 10,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 55,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 56,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": null,
+  "team_h": 12,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 57,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 58,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 59,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 6,
+  "finished": false,
+  "id": 60,
+  "kickoff_time": "2026-09-08T14:00:00Z",
+  "team_a": 17,
+  "team_a_score": null,
+  "team_h": 16,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 61,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 8,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 62,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 7,
+  "team_a_score": null,
+  "team_h": 9,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 63,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 10,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 64,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 65,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 12,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 66,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 67,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 68,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 69,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": null,
+  "team_h": 16,
+  "team_h_score": null
+ },
+ {
+  "event": 7,
+  "finished": false,
+  "id": 70,
+  "kickoff_time": "2026-09-09T14:00:00Z",
+  "team_a": 18,
+  "team_a_score": null,
+  "team_h": 17,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 71,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 9,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 72,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 8,
+  "team_a_score": null,
+  "team_h": 10,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 73,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 7,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 74,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 12,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 75,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 76,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 77,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 78,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": null,
+  "team_h": 16,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 79,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 17,
+  "team_h_score": null
+ },
+ {
+  "event": 8,
+  "finished": false,
+  "id": 80,
+  "kickoff_time": "2026-09-10T14:00:00Z",
+  "team_a": 19,
+  "team_a_score": null,
+  "team_h": 18,
+  "team_h_score": null
+ },
+ {
+  "event": 9,
+  "finished": false,
+  "id": 81,
+  "kickoff_time": "2026-09-11T14:00:00Z",
+  "team_a": 9,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 9,
+  "finished": false,
+  "id": 82,
+  "kickoff_time": "2026-09-11T14:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 19,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 83,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 11,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 84,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 10,
+  "team_a_score": null,
+  "team_h": 12,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 85,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 9,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 86,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 8,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 87,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 7,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 88,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 16,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 89,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 17,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 90,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 18,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 91,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 19,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 92,
+  "kickoff_time": "2026-10-12T14:00:00Z",
+  "team_a": 2,
+  "team_a_score": null,
+  "team_h": 20,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 93,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 1,
+  "team_a_score": null,
+  "team_h": 11,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 94,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 14,
+  "team_a_score": null,
+  "team_h": 8,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 95,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 15,
+  "team_a_score": null,
+  "team_h": 7,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 96,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 16,
+  "team_a_score": null,
+  "team_h": 6,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 97,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 17,
+  "team_a_score": null,
+  "team_h": 5,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 98,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 18,
+  "team_a_score": null,
+  "team_h": 4,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 99,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 19,
+  "team_a_score": null,
+  "team_h": 3,
+  "team_h_score": null
+ },
+ {
+  "event": 10,
+  "finished": false,
+  "id": 100,
+  "kickoff_time": "2026-10-14T19:00:00Z",
+  "team_a": 20,
+  "team_a_score": null,
+  "team_h": 2,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 101,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 12,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 102,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 11,
+  "team_a_score": null,
+  "team_h": 13,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 103,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 10,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 104,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 9,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 105,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 8,
+  "team_a_score": null,
+  "team_h": 16,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 106,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 7,
+  "team_a_score": null,
+  "team_h": 17,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 107,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 18,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 108,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 19,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 109,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 20,
+  "team_h_score": null
+ },
+ {
+  "event": 11,
+  "finished": false,
+  "id": 110,
+  "kickoff_time": "2026-10-13T14:00:00Z",
+  "team_a": 3,
+  "team_a_score": null,
+  "team_h": 2,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 111,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 13,
+  "team_a_score": null,
+  "team_h": 1,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 112,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 12,
+  "team_a_score": null,
+  "team_h": 14,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 113,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 11,
+  "team_a_score": null,
+  "team_h": 15,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 114,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 10,
+  "team_a_score": null,
+  "team_h": 16,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 115,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 9,
+  "team_a_score": null,
+  "team_h": 17,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 116,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 8,
+  "team_a_score": null,
+  "team_h": 18,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 117,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 7,
+  "team_a_score": null,
+  "team_h": 19,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 118,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 6,
+  "team_a_score": null,
+  "team_h": 20,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 119,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 5,
+  "team_a_score": null,
+  "team_h": 2,
+  "team_h_score": null
+ },
+ {
+  "event": 12,
+  "finished": false,
+  "id": 120,
+  "kickoff_time": "2026-10-14T14:00:00Z",
+  "team_a": 4,
+  "team_a_score": null,
+  "team_h": 3,
+  "team_h_score": null
+ }
+]
