@@ -841,7 +841,7 @@ _SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
 _SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
 _SIGNAL_LABELS = {
     "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean sheet probabilities."),
-    "quant": ("FPL Quant Manager", "Multi-week algorithmic forecast incorporating projected minutes, xGI, DEFCON, and fixture strength."),
+    "quant": ("FPL Quant Manager", "Self-calibrating machine learning engine. Employs multi-week algorithmic projections (xGI, DEFCON, probabilistic minutes, and fixture swing dynamics) with continuous post-deadline backtesting that automatically improves calibration week by week to drive institutional-grade rank performance."),
     "form": ("Recent Form Tracker", "Rolling 30-day baseline performance tracking sustained underlying shot volume and key involvements."),
 }
 
@@ -1207,11 +1207,7 @@ def _gameweek_status_banner() -> str:
             return ""
 
     if current is not None:
-        txt = f"⚽ Gameweek {current['id']} Live / In Progress"
-        if upcoming is not None:
-            d = _deadline(upcoming)
-            txt += f" · Next Deadline: GW {upcoming['id']} on {d}" if d else ""
-        return txt
+        return f"⚽ Gameweek {current['id']} Live In Progress"
     if upcoming is not None:
         d = _deadline(upcoming)
         return f"Upcoming: Gameweek {upcoming['id']} · Deadline: {d}" if d else f"Upcoming: Gameweek {upcoming['id']}"
@@ -1342,10 +1338,13 @@ with tab_planner:
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
             _render_player_inspector(starters + bench)
 
-            baseline_signals = _render_positional_diagnostic(
-                starters, bench,
-                caption="Here is what the models and market consensus say about your squad across three core analytical engines:",
+            st.markdown(
+                '<div style="font-size:0.95rem;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#94a3b8;margin:12px 0 10px 0;">'
+                'Here is what the models and market consensus say about your squad across three core analytical engines:'
+                '</div>',
+                unsafe_allow_html=True,
             )
+            baseline_signals = _render_positional_diagnostic(starters, bench)
             if baseline_signals:
                 st.session_state["baseline_signals"] = baseline_signals
     
