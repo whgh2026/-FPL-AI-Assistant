@@ -129,7 +129,7 @@ when the held-out metric worsens**. It previously wrote unconditionally.
 
 | # | Defect | Consequence |
 |---|---|---|
-| C24 | `_CLUB_ALIASES` was a stale 2024/25 club list (Ipswich, Leicester, Southampton). | Any unmapped club **silently lost its odds** and fell back to static FDR with no signal. |
+| C24 | `_CLUB_ALIASES` was a stale 2024/25 club list (Ipswich, Leicester, Southampton). | Any unmapped club **silently lost its odds** and fell back to static FDR with no signal. See the correction in §7.7 — the hazard is fixed, but not the way an earlier draft of this report described. |
 | C25 | The `totals` market was never requested despite the spec claiming it. | The best available clean-sheet signal was left on the table. |
 | C26 | `get_live_event` ignored its `gw` argument. | Two different gameweeks within 60s returned the first one's data. |
 | C29 | **The AI critiqued a different plan than the screen showed.** With a Wildcard confirmed, the UI rendered `wildcard_transfers` while the prompt was fed the standard 1-transfer plan. | Confident review of something the user could not see. |
@@ -288,6 +288,31 @@ This section is the one to read before trusting any of the above.
    there is no FPL API in the build environment. The suite therefore exercises
    the *season* minutes path by default; the recency path is covered by
    populating the cache directly.
+
+7. **Correction — C24 was described wrongly in the first draft of this report.**
+   Attempting the pre-merge live checks surfaced that `_CLUB_ALIASES` still
+   contains Ipswich, Leicester and Southampton, relegated after 2024/25. The
+   earlier text said the list had been "refreshed to the current 20 clubs". It
+   had not been.
+
+   What Stage 4 actually did was better than a refresh, and it does fix the
+   danger: `_canonical_club` now resolves against the **live bootstrap first**
+   — exact match on club name or short name, then containment, longest name
+   first — so every club currently in the Premier League resolves from FPL's
+   own data and cannot go stale. The alias map is only consulted afterwards.
+
+   The stale entries were still a live hazard through the fallback's
+   containment loop, which would return `LEI` for an odds feed mentioning
+   Leicester: a code no current club holds, matching nothing downstream and
+   losing that fixture's odds silently. Every alias lookup is now **gated on
+   the live club list**, so a stale entry is inert by construction rather than
+   by anyone remembering to prune it, and the map is documented as a
+   name-variant supplement rather than a roster.
+
+   Deliberately **not** done: rewriting the list to the 2026/27 clubs. That
+   would mean asserting a league composition this build cannot verify, and
+   writing a guessed roster into the code as fact is worse than the stale list
+   it replaced. The bootstrap already knows, and now the code asks it.
 
 ---
 

@@ -24,6 +24,7 @@ but its output is unverified offline and must be checked against real data.
 """
 
 import math
+import os
 import random
 import unittest
 
@@ -231,3 +232,36 @@ class ModelVersionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClubAliasStalenessTest(unittest.TestCase):
+    """C24, revisited. The alias map still names Ipswich, Leicester and
+    Southampton -- relegated after 2024/25. Stage 4 fixed the DANGER by
+    resolving against the live bootstrap first, but the fallback list was never
+    pruned, and its containment loop would still return a code for a club that
+    no longer exists."""
+
+    def test_a_stale_alias_cannot_resolve(self):
+        with harness.synthetic_world():
+            bs, _ = harness.load_synthetic()
+            shorts = {t["short_name"] for t in bs["teams"]}
+            stale = [a for a, c in fpl_tools._CLUB_ALIASES.items() if c not in shorts]
+            self.assertTrue(stale, "fixture happens to contain every alias; "
+                                   "this test cannot detect the bug it exists for")
+            for alias in stale[:5]:
+                self.assertIsNone(
+                    fpl_tools._canonical_club(alias, bs),
+                    f"{alias!r} resolved to a club not in the live list")
+
+    def test_current_clubs_still_resolve(self):
+        with harness.synthetic_world():
+            bs, _ = harness.load_synthetic()
+            for t in bs["teams"]:
+                self.assertEqual(
+                    fpl_tools._canonical_club(t["name"], bs), t["short_name"])
+
+    def test_the_map_is_documented_as_variants_not_a_roster(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "fpl_tools.py"), encoding="utf-8").read()
+        head = src[max(0, src.index("_CLUB_ALIASES = {") - 700):src.index("_CLUB_ALIASES = {")]
+        self.assertIn("not a club roster", head)

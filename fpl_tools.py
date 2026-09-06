@@ -685,6 +685,12 @@ def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
 _ODDS_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 
 # Normalised Odds-API club name -> FPL short_name (used to map markets to squads).
+# Odds-provider name VARIANTS, not a club roster. The live bootstrap is the
+# source of truth for which clubs exist (see _canonical_club, which resolves
+# against it first and gates every lookup here on it), so entries for clubs that
+# have since been relegated are inert rather than wrong. Do not treat this list
+# as something that needs to track promotions -- it does not, and maintaining it
+# as though it did is what let it go stale in the first place.
 _CLUB_ALIASES = {
     "arsenal": "ARS",
     "aston villa": "AVL",
@@ -777,10 +783,22 @@ def _canonical_club(name: str, bootstrap: Optional[Dict[str, Any]] = None) -> Op
         if full and (full in n or n in full):
             return t.get("short_name")
 
-    if n in _CLUB_ALIASES:
+    # The alias map is a supplement for name FORMS the odds providers use that
+    # FPL's own naming does not produce ("Spurs", "Man Utd", "Wolverhampton
+    # Wanderers"). It is NOT a club roster, and it must never be read as one:
+    # it is hand-maintained, so it goes stale the moment a club is relegated,
+    # and it still names clubs that have since gone down.
+    #
+    # Gating every alias hit on the live club list makes a stale entry inert by
+    # construction rather than by anyone remembering to prune it. Without this
+    # gate the containment loop below would happily return "LEI" for an odds
+    # feed mentioning Leicester, handing the caller a code no current team
+    # holds -- which then silently matches nothing downstream.
+    valid = {t.get("short_name") for t in teams if t.get("short_name")}
+    if n in _CLUB_ALIASES and _CLUB_ALIASES[n] in valid:
         return _CLUB_ALIASES[n]
     for alias, code in _CLUB_ALIASES.items():
-        if alias in n:
+        if code in valid and alias in n:
             return code
     return None
 
