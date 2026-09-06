@@ -141,11 +141,25 @@ def build_players(teams, rng):
                     "tackles": int(minutes / 90.0 * (1.0 + 3.0 * ((j + etype) % 4) / 3.0)),
                     "recoveries": int(minutes / 90.0 * (2.0 + 7.0 * ((j + 1) % 5) / 4.0)),
                     "threat": round(180 * quality, 1),
-                    "bps": round(220 * quality, 1),
+                    # BPS and cards are ACCUMULATIONS, so they must scale with
+                    # minutes as well as quality. "220 * quality" did not: a
+                    # 100-minute fringe player carried the same season BPS as a
+                    # 900-minute regular, which reads as ~180 BPS per 90 -- about
+                    # five times anything real, and enough to make a per-90 rate
+                    # meaningless. Per-90 BPS realistically spans ~14 (a squad
+                    # filler) to ~38 (an elite defender or midfielder).
+                    "bps": round(minutes / 90.0 * (14.0 + 24.0 * quality), 1),
                     "selected_by_percent": str(round(1.0 + 28.0 * quality ** 3, 1)),
                     "transfers_in_event": int(40000 * quality),
                     "transfers_out_event": int(15000 * (1.4 - quality)),
-                    "yellow_cards": rng.randint(0, 3),
+                    # Same reasoning: booking rates run ~0.1-0.35 per 90 and
+                    # are highest for defenders and midfielders. randint(0, 3)
+                    # regardless of minutes let a 100-minute player show 2.7
+                    # yellows per 90, which is not a rate football produces.
+                    "yellow_cards": int(round(minutes / 90.0 * (
+                        (0.06 + 0.14 * ((j + etype) % 4) / 3.0)
+                        * (1.5 if etype in (2, 3) else 0.6)))),
+                    "red_cards": 1 if (pid % 47 == 0 and minutes > 300) else 0,
                     "goals_scored": 0,
                     "assists": 0,
                     "points_per_game": str(round(1.5 + 3.0 * quality, 1)),

@@ -103,6 +103,23 @@ DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-proje
 LAMBDA_MIN = 0.15
 LAMBDA_MAX = 5.0
 
+# Bonus (C7). Expected bonus scales as (player bps90 / positional bps90) raised
+# to BONUS_CONVEXITY, around the positional constant as prior. The exponent is
+# above 1 because bonus is a rank-order tournament -- the top three BPS in a
+# match take 3/2/1 and everyone else takes nothing -- so being 30% above
+# average is worth appreciably more than 30% more bonus. BONUS_CAP is the
+# maximum a single match can award, so no projection may exceed it.
+#
+# Both are uncalibrated constants standing in for a fit that needs real
+# per-match BPS history; they are tagged for the backtester, like
+# FT_OPTION_MARGINAL.
+BONUS_CONVEXITY = 1.6
+BONUS_CAP = 3.0
+
+# Cards (C11). FPL's own scoring, not an estimate: a yellow is -1 and a red -3.
+YELLOW_CARD_PTS = 1.0
+RED_CARD_PTS = 3.0
+
 # Stamp on every calibration row, so auto_tune only ever fits against a
 # homogeneous population of predictions. It must be bumped by ANY stage that
 # changes what _player_xp returns -- Stage 4 (Dixon-Coles centring and scale),
@@ -111,12 +128,13 @@ LAMBDA_MAX = 5.0
 # One stamp spanning several would mix materially different predictions under a
 # single label, which is exactly what versioning is for.
 #
-# The Stage 8 bump is small in effect -- max 0.005 points, 0.097% relative,
-# mean 0.0003 -- and the rule is deliberately applied without a size exemption:
-# the point of the stamp is that nobody has to adjudicate whether a given
-# change was "big enough". It costs nothing here, since the v4 archive has not
-# started accumulating yet.
-MODEL_VERSION = "v5-continuous-ratings"
+# v5 (continuous ratings) was small in effect -- max 0.005 points, 0.097%
+# relative -- and bumped anyway, because the point of the stamp is that nobody
+# has to adjudicate whether a change was "big enough". v6 is not small: bonus
+# and cards stop being positional constants, so two players at the same
+# position who previously carried identical values for both terms now differ by
+# up to ~0.33 points of bonus and ~0.4 of card charge.
+MODEL_VERSION = "v6-bonus-and-cards"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -376,21 +394,32 @@ def _league_averages() -> Dict[str, Dict[str, float]]:
         return _LEAGUE_AVG
 
     bootstrap = _get_bootstrap()
-    sums = {pos: {"xg": 0.0, "xa": 0.0, "xgc": 0.0, "saves": 0.0, "n": 0} for pos in POS_COUNTS}
+    # bps90 / yc90 / rc90 join the per-90 averages here so C7 (bonus) and C11
+    # (cards) can shrink a player toward their POSITION's rate, exactly as the
+    # attacking rates already do. Both were flat constants: every defender got
+    # the same 0.34 bonus and the same -0.12 card charge as every other
+    # defender, so neither term could ever distinguish two players.
+    keys = ("xg", "xa", "xgc", "saves", "bps90", "yc90", "rc90")
+    sums = {pos: {k: 0.0 for k in keys} | {"n": 0} for pos in POS_COUNTS}
     for e in bootstrap.get("elements", []):
         pos = POS_MAP.get(e["element_type"])
         if not pos:
             continue
-        if _to_float(e.get("minutes")) < 180:
+        mins = _to_float(e.get("minutes"))
+        if mins < 180:
             continue
+        per90 = 90.0 / mins
         sums[pos]["xg"] += min(_to_float(e.get("expected_goals_per_90")), 5.0)
         sums[pos]["xa"] += min(_to_float(e.get("expected_assists_per_90")), 5.0)
         sums[pos]["xgc"] += min(_to_float(e.get("expected_goals_conceded_per_90")), 5.0)
         sums[pos]["saves"] += min(_to_float(e.get("saves_per_90")), 12.0)
+        sums[pos]["bps90"] += min(_to_float(e.get("bps")) * per90, 120.0)
+        sums[pos]["yc90"] += min(_to_float(e.get("yellow_cards")) * per90, 1.0)
+        sums[pos]["rc90"] += min(_to_float(e.get("red_cards")) * per90, 0.5)
         sums[pos]["n"] += 1
 
     _LEAGUE_AVG = {
-        pos: {k: sums[pos][k] / (sums[pos]["n"] or 1) for k in ("xg", "xa", "xgc", "saves")}
+        pos: {k: sums[pos][k] / (sums[pos]["n"] or 1) for k in keys}
         for pos in sums
     }
     _LEAGUE_AVG_TS = time.time()
@@ -983,18 +1012,20 @@ def _fixture_traffic_lights(team_id: int, fixture_lookup: Dict[int, List[Dict[st
         lights.append("🔵" if double else light)
     return "[" + " ".join(lights) + "]"
 
-def _expected_minute_fraction(p: Dict[str, Any], status: str) -> float:
-    # Availability haircut using the official FPL API flag (chance_of_playing_*).
-    # None/100 -> retain 100%; 75 -> 0.75; 50 -> 0.50; 25 -> 0.25; 0 -> 0.0.
-    # (Injured/suspended/unavailable statuses are already zeroed upstream.)
-    chance = p.get("chance_of_playing_next_round")
-    if chance is None:
-        chance = p.get("chance_of_playing_this_round")
-    if chance is not None:
-        frac = _to_float(chance) / 100.0
-    else:
-        frac = 1.0
-    return max(0.0, min(1.0, frac))
+# NOTE (C28): _expected_minute_fraction was deleted here.
+#
+# The codebase carried TWO competing definitions of "how much of a match do we
+# expect from this player". This one read the availability flag alone -- a
+# doubtful player at 75% returned 0.75 and a fit rotation risk returned a
+# confident 1.0, because it knew nothing about whether he starts.
+# _expected_playing_fraction answers the same question from the tri-state
+# minutes distribution, so it prices rotation as well as fitness.
+#
+# The two disagreed, and which one you got depended on which call site you were
+# standing in: this one drove the deleted floor_weight tilt, the other drives
+# the MIP hurdle. Stage 2 removed _risk_adjust and with it the only caller of
+# this one, leaving it dead. _expected_playing_fraction is now the single
+# definition, used by the engine, the snapshot and the UI alike.
 
 
 _TEAM_PLAYED: Optional[Dict[int, int]] = None
@@ -1269,8 +1300,14 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     avg = _league_averages().get(POS_MAP.get(pos_id, "MID"), {"xg": 0.3, "xa": 0.2, "xgc": 1.3, "saves": 0.5})
     minutes = _to_float(p.get("minutes"))
 
-    def _reg(raw: Any, prior: float) -> float:
-        raw = min(_to_float(raw), 5.0)
+    def _reg(raw: Any, prior: float, cap: float = 5.0) -> float:
+        """Empirical-Bayes shrinkage toward a prior, weighted by minutes played.
+
+        The cap is per-quantity: 5.0 suits a per-90 goal rate and would silently
+        flatten every BPS rate in the league, which runs an order of magnitude
+        higher.
+        """
+        raw = min(_to_float(raw), cap)
         return (raw * minutes + prior * PRIOR_MINUTES) / (minutes + PRIOR_MINUTES)
 
     xg90 = _reg(p.get("expected_goals_per_90"), avg["xg"])
@@ -1334,19 +1371,47 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     minutes_pts = 2.0 if emin >= 60 else (1.0 if emin > 0 else 0.0)
 
-    # 2026/27 BPS recalibration:
-    #  - being tackled no longer costs BPS (helps attacking mids / wing-backs)
-    #  - CBI converted at 1 BPS per 3 actions (slightly lowers centre-back bonus)
-    #  - GK saves now carry a much higher BPS weight
+    # C7. Bonus was three flat constants -- DEF 0.34, MID/FWD 0.72, plus a GK
+    # saves term -- so Salah, Haaland and a £4.5m bench filler were credited
+    # with identical bonus points. bps was read elsewhere for the live tracker
+    # and never once used in the projection, despite bonus being ~8-10% of all
+    # FPL points and among the most persistent player-level signals there is.
+    #
+    # The positional constant is kept as the SHRINKAGE PRIOR rather than
+    # replaced, so a player with no minutes still projects exactly today's
+    # number and only accumulated evidence moves them off it. Bonus is a
+    # rank-order tournament -- top three BPS in the match take 3/2/1 -- so the
+    # response to being above average is convex, not proportional: clearing the
+    # bar at all is what pays.
     if pos_id == 1:
-        bonus_pts = min(2.0, (0.40 + 0.18 * saves90) * frac)
+        bonus_base = min(2.0, 0.40 + 0.18 * saves90)
     elif pos_id == 2:
-        bonus_pts = 0.34 * frac
+        bonus_base = 0.34
     else:
-        bonus_pts = 0.72 * frac
+        bonus_base = 0.72
+
+    avg_bps90 = avg.get("bps90") or 0.0
+    if avg_bps90 > 1.0 and minutes > 0:
+        bps90 = _reg(_to_float(p.get("bps")) * 90.0 / minutes, avg_bps90, cap=120.0)
+        ratio = max(0.0, bps90 / avg_bps90)
+        bonus_pts = min(BONUS_CAP, bonus_base * (ratio ** BONUS_CONVEXITY)) * frac
+    else:
+        bonus_pts = bonus_base * frac
 
     defcon_pts = _defcon_expected_pts(p, emin, pos_id)
-    card_pts = -0.12 if pos_id in (2, 3) else -0.05
+
+    # C11. Cards were -0.12 for DEF/MID and -0.05 otherwise, flat, with
+    # yellow_cards sitting unread two functions away. They are also EXPOSURE, so
+    # they scale with expected minutes -- a 30-minute cameo carries a third of a
+    # starter's booking risk, and the old constant charged both the same.
+    if minutes > 0 and (avg.get("yc90") or avg.get("rc90")):
+        yc90 = _reg(_to_float(p.get("yellow_cards")) * 90.0 / minutes,
+                    avg.get("yc90") or 0.0, cap=1.0)
+        rc90 = _reg(_to_float(p.get("red_cards")) * 90.0 / minutes,
+                    avg.get("rc90") or 0.0, cap=0.5)
+        card_pts = -(YELLOW_CARD_PTS * yc90 + RED_CARD_PTS * rc90) * frac
+    else:
+        card_pts = (-0.12 if pos_id in (2, 3) else -0.05) * frac
 
     return max(minutes_pts + attack_pts + cs_pts + conceded_pts + saves_pts + bonus_pts + defcon_pts + card_pts, 0.0)
 
@@ -1501,25 +1566,56 @@ def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]
     return round(max(raw, 0.0) * gmod, 2), note
 
 
+YELLOW_BAN_1 = 5      # 5 yellows within the club's first 19 matches -> 1 match
+YELLOW_BAN_2 = 10     # 10 through the club's match 32               -> 2 matches
+YELLOW_WINDOW_1 = 19
+YELLOW_WINDOW_2 = 32
+
+
 def _is_on_tightrope(p: Dict[str, Any], event: Optional[int] = None) -> bool:
     """True when a player is one yellow card away from a PL suspension.
 
     Premier League accumulation rules:
       * 5 yellows in a club's first 19 matches  -> 1-match ban.
-      * 10 yellows through match 32             -> 2-match ban.
-    The current gameweek (`event`) is used as a proxy for the club's matches
-    played, so the manager is flagged the week before the ban can trigger.
+      * 10 yellows through the club's match 32  -> 2-match ban.
+
+    Counted in the CLUB'S matches played, not the gameweek number. Those two
+    diverge the moment the calendar does: a club that has had a blank gameweek
+    is a match behind the number, one that has played a double is ahead, and by
+    midseason the gap can be two or more. Keying off the gameweek therefore
+    opened and closed the suspension windows on the wrong week for exactly the
+    clubs whose fixtures the rest of the engine is busy modelling.
+
+    `event` is retained as a fallback for callers with no bootstrap available.
+
+    The thresholds are equalities on purpose, not >=. FPL's yellow_cards runs
+    for the whole season and does not reset when a ban is served, so a player
+    sitting on 5-8 has already served the first ban and is not near the second;
+    only 4 and 9 are one booking from a suspension.
     """
-    if event is None:
-        return False
     try:
         yellows = int(p.get("yellow_cards") or 0)
     except (TypeError, ValueError):
         return False
-    if event < 19:
-        return yellows == 4
-    if event < 32:
-        return yellows == 9
+
+    played = None
+    team_id = p.get("team")
+    if team_id is not None:
+        try:
+            played = _team_played_map().get(team_id)
+        except Exception:
+            played = None
+    if not played:
+        played = event
+    if not played:
+        return False
+
+    if played < YELLOW_WINDOW_1:
+        return yellows == YELLOW_BAN_1 - 1
+    if played < YELLOW_WINDOW_2:
+        return yellows == YELLOW_BAN_2 - 1
+    # Past the club's 32nd match the accumulation rules stop applying, so
+    # nobody is on a tightrope. That is the rule, not a gap in the check.
     return False
 
 
@@ -2880,8 +2976,17 @@ def suggest_transfers_for_custom_squad(
         for p in pool:
             m = saa_mean.get(p["id"])
             if m:
-                p["xp"] = round(sum(HORIZON_WEIGHTS[t] * (m[t] if t < len(m) else 0.0)
-                                    for t in range(len(HORIZON_WEIGHTS))), 2)
+                horizon = sum(HORIZON_WEIGHTS[t] * (m[t] if t < len(m) else 0.0)
+                              for t in range(len(HORIZON_WEIGHTS)))
+                # C12. This overwrite REPLACES the horizon xP that
+                # _player_xp_horizon produced, and the SAA mean is rebuilt from
+                # single-gameweek projections that never saw the suspension
+                # haircut. So a player one booking from a ban had his 15%
+                # discount silently reverted for the entire solve -- the one
+                # place it was meant to change a decision.
+                if p.get("on_yellow_card_tightrope"):
+                    horizon *= TIGHTROPE_DISCOUNT
+                p["xp"] = round(horizon, 2)
             if p["id"] in sigmas:
                 p["sigma"] = sigmas[p["id"]]
         multi_gw_plan = _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids,

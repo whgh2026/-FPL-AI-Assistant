@@ -5,7 +5,7 @@
   "id": 1,
   "kickoff_time": "2026-08-03T14:00:00Z",
   "team_a": 2,
-  "team_a_score": 0,
+  "team_a_score": 3,
   "team_h": 1,
   "team_h_score": 2
  },
@@ -17,7 +17,7 @@
   "team_a": 20,
   "team_a_score": 1,
   "team_h": 3,
-  "team_h_score": 7
+  "team_h_score": 4
  },
  {
   "event": 1,
@@ -27,7 +27,7 @@
   "team_a": 19,
   "team_a_score": 0,
   "team_h": 4,
-  "team_h_score": 0
+  "team_h_score": 6
  },
  {
   "event": 1,
@@ -37,7 +37,7 @@
   "team_a": 18,
   "team_a_score": 0,
   "team_h": 5,
-  "team_h_score": 2
+  "team_h_score": 1
  },
  {
   "event": 1,
@@ -45,9 +45,9 @@
   "id": 5,
   "kickoff_time": "2026-08-03T14:00:00Z",
   "team_a": 17,
-  "team_a_score": 0,
+  "team_a_score": 1,
   "team_h": 6,
-  "team_h_score": 4
+  "team_h_score": 3
  },
  {
   "event": 1,
@@ -65,9 +65,9 @@
   "id": 7,
   "kickoff_time": "2026-08-03T14:00:00Z",
   "team_a": 15,
-  "team_a_score": 1,
+  "team_a_score": 4,
   "team_h": 8,
-  "team_h_score": 2
+  "team_h_score": 3
  },
  {
   "event": 1,
@@ -75,9 +75,9 @@
   "id": 8,
   "kickoff_time": "2026-08-03T14:00:00Z",
   "team_a": 14,
-  "team_a_score": 0,
+  "team_a_score": 1,
   "team_h": 9,
-  "team_h_score": 2
+  "team_h_score": 0
  },
  {
   "event": 1,
@@ -95,9 +95,9 @@
   "id": 10,
   "kickoff_time": "2026-08-03T14:00:00Z",
   "team_a": 12,
-  "team_a_score": 2,
+  "team_a_score": 3,
   "team_h": 11,
-  "team_h_score": 2
+  "team_h_score": 1
  },
  {
   "event": 2,
@@ -105,9 +105,9 @@
   "id": 11,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 3,
-  "team_a_score": 1,
+  "team_a_score": 0,
   "team_h": 1,
-  "team_h_score": 1
+  "team_h_score": 3
  },
  {
   "event": 2,
@@ -115,7 +115,7 @@
   "id": 12,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 2,
-  "team_a_score": 2,
+  "team_a_score": 3,
   "team_h": 4,
   "team_h_score": 2
  },
@@ -125,9 +125,9 @@
   "id": 13,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 20,
-  "team_a_score": 0,
+  "team_a_score": 1,
   "team_h": 5,
-  "team_h_score": 3
+  "team_h_score": 0
  },
  {
   "event": 2,
@@ -135,9 +135,9 @@
   "id": 14,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 19,
-  "team_a_score": 1,
+  "team_a_score": 0,
   "team_h": 6,
-  "team_h_score": 2
+  "team_h_score": 1
  },
  {
   "event": 2,
@@ -145,9 +145,9 @@
   "id": 15,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 18,
-  "team_a_score": 0,
+  "team_a_score": 1,
   "team_h": 7,
-  "team_h_score": 3
+  "team_h_score": 1
  },
  {
   "event": 2,
@@ -155,9 +155,9 @@
   "id": 16,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 17,
-  "team_a_score": 1,
+  "team_a_score": 2,
   "team_h": 8,
-  "team_h_score": 3
+  "team_h_score": 2
  },
  {
   "event": 2,
@@ -167,7 +167,7 @@
   "team_a": 16,
   "team_a_score": 1,
   "team_h": 9,
-  "team_h_score": 1
+  "team_h_score": 3
  },
  {
   "event": 2,
@@ -175,9 +175,9 @@
   "id": 18,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 15,
-  "team_a_score": 1,
+  "team_a_score": 0,
   "team_h": 10,
-  "team_h_score": 3
+  "team_h_score": 1
  },
  {
   "event": 2,
@@ -185,9 +185,9 @@
   "id": 19,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 14,
-  "team_a_score": 3,
+  "team_a_score": 1,
   "team_h": 11,
-  "team_h_score": 4
+  "team_h_score": 1
  },
  {
   "event": 2,
@@ -195,9 +195,9 @@
   "id": 20,
   "kickoff_time": "2026-08-04T14:00:00Z",
   "team_a": 13,
-  "team_a_score": 0,
+  "team_a_score": 1,
   "team_h": 12,
-  "team_h_score": 1
+  "team_h_score": 5
  },
  {
   "event": 3,
@@ -205,9 +205,9 @@
   "id": 21,
   "kickoff_time": "2026-08-05T14:00:00Z",
   "team_a": 4,
-  "team_a_score": 2,
+  "team_a_score": 1,
   "team_h": 1,
-  "team_h_score": 3
+  "team_h_score": 1
  },
  {
   "event": 3,
@@ -215,9 +215,9 @@
   "id": 22,
   "kickoff_time": "2026-08-05T14:00:00Z",
   "team_a": 3,
-  "team_a_score": 3,
+  "team_a_score": 0,
   "team_h": 5,
-  "team_h_score": 3
+  "team_h_score": 2
  },
  {
   "event": 3,
@@ -225,9 +225,9 @@
   "id": 23,
   "kickoff_time": "2026-08-05T14:00:00Z",
   "team_a": 2,
-  "team_a_score": 3,
+  "team_a_score": 0,
   "team_h": 6,
-  "team_h_score": 3
+  "team_h_score": 1
  },
  {
   "event": 3,
@@ -235,7 +235,7 @@
   "id": 24,
   "kickoff_time": "2026-08-05T14:00:00Z",
   "team_a": 20,
-  "team_a_score": 2,
+  "team_a_score": 0,
   "team_h": 7,
   "team_h_score": 1
  },
@@ -257,7 +257,7 @@
   "team_a": 18,
   "team_a_score": 1,
   "team_h": 9,
-  "team_h_score": 2
+  "team_h_score": 6
  },
  {
   "event": 3,
@@ -265,7 +265,7 @@
   "id": 27,
   "kickoff_time": "2026-08-05T14:00:00Z",
   "team_a": 17,
-  "team_a_score": 3,
+  "team_a_score": 2,
   "team_h": 10,
   "team_h_score": 3
  },
@@ -275,7 +275,7 @@
   "id": 28,
   "kickoff_time": "2026-08-05T14:00:00Z",
   "team_a": 16,
-  "team_a_score": 1,
+  "team_a_score": 0,
   "team_h": 11,
   "team_h_score": 1
  },
@@ -287,7 +287,7 @@
   "team_a": 15,
   "team_a_score": 1,
   "team_h": 12,
-  "team_h_score": 2
+  "team_h_score": 3
  },
  {
   "event": 3,
