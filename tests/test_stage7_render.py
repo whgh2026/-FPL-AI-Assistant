@@ -311,8 +311,7 @@ class RankExposureCopyTest(unittest.TestCase):
         src = _app_source()
         start = src.index('"📊 Where you\'re exposed"')
         nearby = src[start:start + 500]
-        self.assertIn("rival's big week could shift your rank", nearby)
-        self.assertIn("see each row for exactly how", nearby)
+        self.assertIn("unowned or non-captained players heavily backed", nearby)
         self.assertNotIn("**Inverted**", nearby,
                          "the per-term glossary is back in the intro")
         self.assertNotIn("**Short**", nearby,
@@ -326,7 +325,9 @@ class RankExposureCopyTest(unittest.TestCase):
         src = _app_source()
         start = src.index('"🔻 Short"')
         row = src[start:start + 300]
-        self.assertIn("widens your gap to the field", row)
+        self.assertIn("rival ownership", row)
+        self.assertIn("your rank drops by", row)
+        self.assertIn("pts per point scored", row)
 
     def test_short_sign_convention_matches_the_stated_example(self):
         """-0.89 pts/point at 89% EO, not +0.89 -- the explainer's own example
@@ -335,6 +336,105 @@ class RankExposureCopyTest(unittest.TestCase):
         import fpl_tools
         per_pt = fpl_tools._rank_exposure(0, 89.0, 1.0)
         self.assertAlmostEqual(per_pt, -0.89, places=6)
+
+
+class ImageFallbackTest(unittest.TestCase):
+    """Bare <img src=...> tags have no CSS-only fallback for a failed load --
+    Streamlit strips onerror under unsafe_allow_html, so a 404 painted the
+    browser's own broken-image [?] icon. Transfer Surges and Radar Shortlists
+    were the two sites still using one; Desktop Pitch and the Player Modal
+    already used the safe div-background pattern via _headshot_img."""
+
+    def test_no_bare_img_headshot_tags_remain(self):
+        src = _app_source()
+        self.assertNotIn('<img class="headshot"', src,
+                         "a bare <img> headshot survived -- it has no CSS "
+                         "fallback and paints the browser's broken-image icon")
+
+    def test_surges_and_radar_use_the_safe_tile_helper(self):
+        src = _app_source()
+        self.assertIn("def _headshot_tile(", src)
+        # Both former bare-<img> sites now route through the same helper.
+        self.assertEqual(src.count('{_headshot_tile(r["photo"])}'), 2,
+                         "expected both Transfer Surges and Radar Shortlists "
+                         "to use _headshot_tile")
+
+    def test_dead_network_url_helper_is_gone(self):
+        """_headshot_url only ever fed the two unsafe <img> sites -- once both
+        are gone, keeping it around invites a future call site to reintroduce
+        the same bug."""
+        src = _app_source()
+        self.assertNotIn("def _headshot_url(", src)
+
+    def test_mobile_pitch_hides_headshots_entirely(self):
+        """Confirms mobile pitch view stays compact with no headshots, rather
+        than trying (and failing) to cram photos into a narrow layout."""
+        css = open(os.path.join(ROOT, "static", "app.css"), encoding="utf-8").read()
+        m = re.search(r"@media \(max-width: 768px\) \{.*?\n\s*\}", css, re.DOTALL)
+        self.assertIsNotNone(m, "mobile media query not found")
+        self.assertIn(".pitch-player .photo-frame", m.group(0))
+        self.assertIn("display: none", m.group(0))
+
+
+class MobileStrategySelectorTest(unittest.TestCase):
+    """Mobile browsers collapse Streamlit's sidebar behind a hamburger icon,
+    hiding the one control (Strategy Mode) that governs the whole plan.
+    Step 3 needs its own copy of it, kept in sync with the sidebar."""
+
+    def test_inline_selector_renders_at_the_top_of_step_3(self):
+        src = _app_source()
+        step3 = src.index("Step 3: Transfer Planner")
+        container = src.index("with st.container(border=True):", step3)
+        inline_widget = src.index('key="risk_inline"', container)
+        override_analysis = src.index('ov = st.session_state["override_analysis"]', container)
+        self.assertLess(inline_widget, override_analysis,
+                        "the inline Strategy Mode selector must render before "
+                        "the rest of Step 3, not after")
+
+    def test_inline_selector_carries_the_required_copy(self):
+        # Two adjacent string literals in app.py -- checked separately since
+        # the raw source (unlike the evaluated string) still has the closing
+        # and opening quotes between them.
+        src = _app_source()
+        self.assertIn("Choose your risk profile. Switching dynamically recalibrates", src)
+        self.assertIn("transfer targets and projected upside across the multi-week planner.", src)
+
+    def test_inline_and_sidebar_selectors_share_one_options_list(self):
+        """Two separately-keyed widgets (Streamlit forbids sharing one key)
+        drifting to different option lists would silently break the sync."""
+        src = _app_source()
+        self.assertIn("RISK_OPTIONS", src)
+        self.assertEqual(src.count("RISK_OPTIONS,"), 2,
+                         "expected both the sidebar and inline radios to use "
+                         "the shared RISK_OPTIONS list")
+
+    def test_selectors_are_synced_both_ways(self):
+        src = _app_source()
+        self.assertIn("def _sync_risk_to_inline():", src)
+        self.assertIn("def _sync_risk_from_inline():", src)
+        self.assertIn('on_change=_sync_risk_to_inline', src)
+        self.assertIn('on_change=_sync_risk_from_inline', src)
+
+
+class ChipCopyTest(unittest.TestCase):
+    """The old copy ('Confirm Active Chip' / 'Select which chip you will
+    actively play this Gameweek (Only 1 allowed):') was administrative-sounding
+    and didn't say what confirming a chip actually does to the plan above it."""
+
+    def test_old_chip_copy_is_gone(self):
+        src = _app_source()
+        for dead in ("Confirm Active Chip",
+                     "Select which chip you will actively play this Gameweek"):
+            self.assertNotIn(dead, src, f"{dead!r} survived the chip copy pass")
+
+    def test_new_chip_header_and_caption_present(self):
+        # Adjacent string literals in app.py -- checked separately since the
+        # raw source still has quotes/indentation between them.
+        src = _app_source()
+        self.assertIn("Chip Scenario Lab (Set 1", src)
+        self.assertIn("Simulate playing a chip this week to see how your lineup and", src)
+        self.assertIn("projected points shift. Leave blank for standard rolling", src)
+        self.assertIn("transfer strategy.", src)
 
 
 class StylesheetTest(unittest.TestCase):

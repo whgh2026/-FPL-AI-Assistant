@@ -135,6 +135,23 @@ def main():
           f"{no_photo!r} -- with no code there is nothing to composite under, "
           "so the card surface (not a second image) must be the fallback")
 
+    # ---- headshot tile: the safe replacement for the bare <img> sites ------
+    # Transfer Surges and Radar Shortlists used to render <img src=...> with
+    # no fallback at all -- a 404 painted the browser's own broken-image [?]
+    # icon. _headshot_tile renders a div carrying the same style as
+    # _headshot_style, so a missing photo falls back to the .headshot class's
+    # own solid surface colour instead, exactly like every other photo site.
+    tile = app._headshot_tile("12345")
+    check("headshot_tile_is_not_an_img_tag",
+          "<img" not in tile,
+          f"{tile!r} -- a bare <img> has no CSS fallback for a failed load")
+    check("headshot_tile_carries_the_headshot_class",
+          'class="headshot"' in tile,
+          f"{tile!r} -- must use the .headshot class to get its fallback surface")
+    check("headshot_tile_no_photo_falls_back_cleanly",
+          "url(" not in app._headshot_tile(""),
+          "an empty photo code must not try to load a URL at all")
+
     # ---- public model label: display only, never the internal slug --------
     label = app._public_model_label("v7-minutes-recency")
     check("public_label_hides_the_descriptive_slug",

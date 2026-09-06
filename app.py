@@ -252,6 +252,32 @@ def clear_transfer_cache():
             st.session_state.pop(k, None)
 
 
+# Shared between the sidebar's Strategy Mode radio and the inline duplicate
+# rendered at the top of Step 3 (mobile collapses the sidebar, so Step 3 needs
+# its own copy of the control). One list means the two can never drift apart.
+RISK_OPTIONS = [
+    "Balanced", "Conservative", "Aggressive",
+    "Rank Protecting (Shield)", "Rank Chasing (Hunting)",
+]
+
+
+def _sync_risk_to_inline():
+    """Sidebar Strategy Mode changed -- mirror it onto the inline copy's key.
+
+    Streamlit forbids two widgets sharing one `key`, so the inline selector in
+    Step 3 has to be a second, separately-keyed widget. Setting its key here,
+    before the rerun, is what keeps it showing the same choice as the sidebar.
+    """
+    st.session_state["risk_inline"] = st.session_state["risk"]
+    clear_transfer_cache()
+
+
+def _sync_risk_from_inline():
+    """Inline Strategy Mode (Step 3) changed -- mirror it back onto the sidebar."""
+    st.session_state["risk"] = st.session_state["risk_inline"]
+    clear_transfer_cache()
+
+
 # ------------------------------------------------------------------
 # Styling
 # ------------------------------------------------------------------
@@ -288,8 +314,6 @@ _inject_css()
 # ------------------------------------------------------------------
 # Official Premier League asset helpers
 # ------------------------------------------------------------------
-PHOTO_FALLBACK = ("https://resources.premierleague.com/premierleague/photos/"
-                  "players/110x140/Photo-Missing.png")
 
 
 def _headshot_style(player_code: str) -> str:
@@ -317,14 +341,6 @@ def _headshot_style(player_code: str) -> str:
                f"players/250x250/p{player_code}.png")
     return (f"background-image:url('{primary}');"
             "background-size:cover;background-position:center;")
-
-
-def _headshot_url(player_code: str) -> str:
-    """Primary CDN URL. No network call: validation is the browser's job now."""
-    if not player_code:
-        return PHOTO_FALLBACK
-    return ("https://resources.premierleague.com/premierleague/photos/"
-            f"players/250x250/p{player_code}.png")
 
 
 def _photo_code(photo: str) -> str:
@@ -442,6 +458,20 @@ def _headshot_img(p) -> str:
         f'{overlay}'
         f'</div>'
     )
+
+
+def _headshot_tile(photo: str) -> str:
+    """A bare headshot with no badge overlay -- for call sites that already
+    render their own, differently-positioned badge alongside it.
+
+    Same fallback mechanism as _headshot_img: a styled div, not an <img>. A
+    bare <img src=...> has no CSS-only fallback for a failed load -- under
+    unsafe_allow_html Streamlit strips the onerror attribute, so a 404 paints
+    the browser's own broken-image [?] icon. This div's background-image
+    fails silently onto the .headshot class's own solid surface colour
+    instead, which is the same dark placeholder every other photo site uses.
+    """
+    return f'<div class="headshot" style="{_headshot_style(_photo_code(photo))}"></div>'
 
 
 def _badge_img(team_id, large: bool = False) -> str:
@@ -576,7 +606,7 @@ def _momentum_row_html(r, up: bool = True) -> str:
     arrow = "📈" if up else "📉"
     return (
         f'<div class="momentum-row">'
-        f'<img class="headshot" src="{_headshot_url(_photo_code(r["photo"]))}" alt="" loading="lazy">'
+        f'{_headshot_tile(r["photo"])}'
         f'{_badge_img(r["team"])}'
         f'<div style="flex:1;">'
         f'<div style="font-weight:700;color:var(--text);">{r["name"]}</div>'
@@ -1173,8 +1203,7 @@ with st.sidebar:
     st.markdown("#### 🎯 How should we play it?")
     risk_label = st.radio(
         "Strategy",
-        ["Balanced", "Conservative", "Aggressive",
-         "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
+        RISK_OPTIONS,
         index=0,
         key="risk",
         label_visibility="collapsed",
@@ -1186,7 +1215,7 @@ with st.sidebar:
             "Protect a lead. Mirror the players your rivals own so their good weeks can't hurt you.",
             "Close a gap. Target players almost nobody else has.",
         ],
-        on_change=clear_transfer_cache,
+        on_change=_sync_risk_to_inline,
     )
 
     if risk_label in ("Conservative", "Rank Protecting (Shield)"):
@@ -1677,7 +1706,30 @@ with tab_planner:
             unsafe_allow_html=True,
         )
         with st.container(border=True):
-            
+
+            # Inline duplicate of the sidebar's Strategy Mode control. Mobile
+            # browsers collapse Streamlit's sidebar behind a hamburger icon, so
+            # without this, a mobile manager can't reach the one setting that
+            # governs the whole plan without an extra tap to find it. Bound to
+            # the same "risk" strategy via _sync_risk_from_inline/_to_inline
+            # (Streamlit disallows two widgets sharing one key outright).
+            st.markdown("##### 🎯 Strategy Mode")
+            st.caption(
+                "Choose your risk profile. Switching dynamically recalibrates "
+                "transfer targets and projected upside across the multi-week planner."
+            )
+            _current_risk = st.session_state.get("risk", "Balanced")
+            _risk_idx = RISK_OPTIONS.index(_current_risk) if _current_risk in RISK_OPTIONS else 0
+            st.radio(
+                "Strategy Mode",
+                RISK_OPTIONS,
+                index=_risk_idx,
+                key="risk_inline",
+                label_visibility="collapsed",
+                horizontal=True,
+                on_change=_sync_risk_from_inline,
+            )
+
             ov = st.session_state["override_analysis"]
             tr = ov["transfers"]
 
@@ -1739,25 +1791,36 @@ with tab_planner:
     
             chip_options = ["None (Hold Chips)"] + ALL_CHIPS
 
-            st.markdown("#### Confirm Active Chip")
+            set1_remaining = []
             try:
                 inv = fpl_tools._chip_inventory(GW_ID)
                 played = fpl_tools.get_played_chips(manager_id.strip())
                 set1_remaining = [c for c in inv["set1"] if c not in played]
                 if inv["set1"]:
-                    st.caption(f"Set 1 chips (expire GW{inv['expiry_gw']}): {', '.join(set1_remaining) or 'all played'}.")
+                    st.markdown(f"**🎟️ Chip Scenario Lab (Set 1 · Expire GW{inv['expiry_gw']})**")
                 else:
-                    st.caption(f"Set 2 chips active (GW{inv['expiry_gw'] + 1}–38): {', '.join(inv['set2'])}.")
+                    st.markdown(f"**🎟️ Chip Scenario Lab (Set 2 · GW{inv['expiry_gw'] + 1}–38)**")
+                st.caption(
+                    "Simulate playing a chip this week to see how your lineup and "
+                    "projected points shift. Leave blank for standard rolling "
+                    "transfer strategy."
+                )
                 if GW_ID >= 17 and set1_remaining:
                     st.warning(f"⚠️ Set 1 chips ({', '.join(set1_remaining)}) expire at the GW{inv['expiry_gw']} deadline — play or lose them.")
             except Exception:
-                pass
+                st.markdown("**🎟️ Chip Scenario Lab**")
+                st.caption(
+                    "Simulate playing a chip this week to see how your lineup and "
+                    "projected points shift. Leave blank for standard rolling "
+                    "transfer strategy."
+                )
             confirmed_chip = st.radio(
-                "Select which chip you will actively play this Gameweek (Only 1 allowed):",
+                "Play a chip this Gameweek (only one allowed)",
                 chip_options,
                 index=0,
                 horizontal=True,
-                key="confirmed_chip_radio"
+                key="confirmed_chip_radio",
+                label_visibility="collapsed",
             )
             st.session_state["active_confirmed_chip"] = confirmed_chip
     
@@ -1877,8 +1940,8 @@ with tab_planner:
 
             with st.expander("📊 Where you're exposed", expanded=False):
                 st.caption(
-                    "Flags where a rival's big week could shift your rank, for "
-                    "better or worse — see each row for exactly how."
+                    "Tracks unowned or non-captained players heavily backed by "
+                    "your rivals."
                 )
                 try:
                     eo_map = fpl_tools._eo_map()
@@ -1897,7 +1960,7 @@ with tab_planner:
                     for pid, eo_d in eo_map.items():
                         if eo_d.get("eo", 0.0) > 80.0 and pid not in squad_ids:
                             per_pt = fpl_tools._rank_exposure(0, eo_d.get("eo", 0.0), 1.0)
-                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (unowned — a haul widens your gap to the field)"))
+                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"Unowned · {eo_d.get('eo', 0.0):.0f}% rival ownership — If he scores, your rank drops by ~{abs(per_pt):.2f} pts per point scored."))
                     if rows:
                         html = "".join(
                             f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
@@ -2544,7 +2607,7 @@ with tab_players:
             grid += (
                 f'<div class="radar-card">'
                 f'<div style="display:flex;gap:8px;align-items:flex-start;">'
-                f'<img class="headshot" src="{_headshot_url(_photo_code(r["photo"]))}" alt="" loading="lazy">'
+                f'{_headshot_tile(r["photo"])}'
                 f'<div style="flex:1;min-width:0;">'
                 f'<div class="nm">{r["name"]}</div>'
                 f'<div class="meta">{r["pos"]} · {_badge_img(r["team"])} · £{r["price"]:.1f}m</div>'
