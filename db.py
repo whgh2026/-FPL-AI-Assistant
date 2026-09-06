@@ -39,23 +39,128 @@ def calculate_decaying_tax(current_gw, purchase_gw, status="a"):
     return round(2.0 * math.exp(-0.7 * held), 2)
 
 
+CONNECT_TIMEOUT_SECONDS = 10
+POOL_MIN, POOL_MAX = 1, 8
+
+_POOL = None
+_LAST_DB_ERROR = None      # (kind, message) or None
+
+
+def last_db_error():
+    """Why the most recent connection attempt failed, or None.
+
+    get_db_connection returns None on every failure, which is the right shape
+    for callers that must degrade -- but it threw away the REASON, so a page
+    could only ever say "unavailable". "No DATABASE_URL configured" and "the
+    database refused the connection" need different responses from whoever is
+    reading, and one of them is a five-second fix.
+    """
+    return _LAST_DB_ERROR
+
+
+def _database_url():
+    if st is not None:
+        try:
+            url = st.secrets.get("DATABASE_URL")
+            if url:
+                return url
+        except Exception:
+            pass
+    return os.getenv("DATABASE_URL")
+
+
+class _PooledConnection:
+    """A pooled connection that behaves like a plain one at the call site.
+
+    All thirteen callers do `conn.close()` in a finally block, which against a
+    pool would destroy the connection rather than return it. This intercepts
+    close() to hand it back instead.
+
+    It also ROLLS BACK first, which matters more than the pooling: several
+    callers catch an exception and return a default inside a try/finally that
+    closes the connection, leaving the transaction aborted. Handed to the next
+    caller unchanged, that connection fails every subsequent statement with
+    "current transaction is aborted" -- one bad query would poison the pool for
+    the life of the process.
+    """
+
+    def __init__(self, conn, pool):
+        self._conn = conn
+        self._pool = pool
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        broken = False
+        try:
+            self._conn.rollback()
+        except Exception:
+            broken = True          # unusable; do not return it to the pool
+        try:
+            self._pool.putconn(self._conn, close=broken)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+
+def _get_pool():
+    global _POOL
+    if _POOL is not None:
+        return _POOL
+    url = _database_url()
+    if not url:
+        return None
+    from psycopg2 import pool as _pgpool
+    _POOL = _pgpool.ThreadedConnectionPool(
+        POOL_MIN, POOL_MAX, url, connect_timeout=CONNECT_TIMEOUT_SECONDS)
+    return _POOL
+
+
 def get_db_connection():
-    """Return a psycopg2 connection from DATABASE_URL, or None on failure."""
+    """A pooled psycopg2 connection, or None on failure.
+
+    Pooled because thirteen call sites each opened a fresh TCP connection and
+    ran authentication, and Streamlit re-executes the whole script on every
+    interaction -- so a single page could pay for several full connection
+    handshakes before rendering anything.
+
+    connect_timeout is the more important half. There was none, so an
+    unreachable database did not fail: it HUNG, and took the page render with
+    it for as long as the OS was willing to wait on the socket.
+    """
+    global _LAST_DB_ERROR, _POOL
     if not _PSYCOPG2:
+        _LAST_DB_ERROR = ("driver", "psycopg2 is not installed")
+        return None
+    if not _database_url():
+        _LAST_DB_ERROR = ("config", "DATABASE_URL is not set")
         return None
     try:
-        url = None
-        if st is not None:
-            try:
-                url = st.secrets.get("DATABASE_URL")
-            except Exception:
-                url = None
-        if not url:
-            url = os.getenv("DATABASE_URL")
-        if not url:
+        pool = _get_pool()
+        if pool is None:
+            _LAST_DB_ERROR = ("config", "DATABASE_URL is not set")
             return None
-        return psycopg2.connect(url)
-    except Exception:
+        conn = _PooledConnection(pool.getconn(), pool)
+        _LAST_DB_ERROR = None
+        return conn
+    except Exception as exc:
+        _LAST_DB_ERROR = ("connect", str(exc) or exc.__class__.__name__)
+        # A pool that cannot hand out connections is not worth keeping: drop it
+        # so the next attempt rebuilds rather than reusing a broken one.
+        _POOL = None
         return None
 
 

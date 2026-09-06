@@ -2623,9 +2623,24 @@ with tab_health:
         _mh_banked, _mh_rows = None, []
 
     if _mh_banked is None:
+        # Say WHICH failure it was. "Unavailable" is the same message for a
+        # missing environment variable and a database that is refusing
+        # connections, and only one of those is a five-second fix.
+        try:
+            import db as _db_err
+            _kind, _detail = _db_err.last_db_error() or ("unknown", "")
+        except Exception:
+            _kind, _detail = "unknown", ""
+        _why = {
+            "config": "No results database is configured for this deployment "
+                      "(`DATABASE_URL` isn't set).",
+            "driver": "The database driver isn't installed in this deployment.",
+            "connect": "The results database refused the connection or timed out.",
+        }.get(_kind, "The results database couldn't be reached.")
         st.warning(
-            "Can't reach the results database, so there's no scorecard to show. "
+            f"**No scorecard to show.** {_why}\n\n"
             "The projections on the other tabs are unaffected — they don't need it."
+            + (f"\n\n`{_detail[:200]}`" if _detail else "")
         )
     else:
         pct = min(100, int(100 * _mh_banked / _mh_target))
