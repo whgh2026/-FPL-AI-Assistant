@@ -376,44 +376,99 @@ class ImageFallbackTest(unittest.TestCase):
         self.assertIn("display: none", m.group(0))
 
 
-class MobileStrategySelectorTest(unittest.TestCase):
-    """Mobile browsers collapse Streamlit's sidebar behind a hamburger icon,
-    hiding the one control (Strategy Mode) that governs the whole plan.
-    Step 3 needs its own copy of it, kept in sync with the sidebar."""
+class StrategyChipScenarioCardsTest(unittest.TestCase):
+    """Strategy Mode used to live in the sidebar, then gained a synced mobile
+    duplicate inside Step 3 (Streamlit forbids two widgets sharing one key, so
+    that took a pair of on_change callbacks to keep them consistent). Both
+    were replaced by a single design: one canonical control, living in Step
+    3's own "Strategy & Risk Mode" card, side by side with "Chip Scenario
+    Lab" -- nothing left to duplicate or drift out of sync with itself."""
 
-    def test_inline_selector_renders_at_the_top_of_step_3(self):
+    def test_sidebar_no_longer_offers_a_strategy_selector(self):
+        src = _app_source()
+        sidebar = src.index("with st.sidebar:")
+        how_it_thinks = src.index('"🧠 How it thinks"', sidebar)
+        sidebar_body = src[sidebar:how_it_thinks]
+        self.assertNotIn("How should we play it", sidebar_body)
+        self.assertNotIn('key="risk"', sidebar_body)
+        self.assertNotIn('key="rival_id_input"', sidebar_body,
+                         "the rival-shadow input is strategy-dependent -- it "
+                         "should have moved to Step 3 with the strategy radio, "
+                         "not been left behind orphaned in the sidebar")
+
+    def test_rival_shadow_input_moved_with_the_strategy_radio(self):
+        """Deleting the sidebar's strategy radio without relocating its
+        dependent rival-ID input would silently disable rival-shadowing for
+        Conservative/Shield forever -- rival_id_input would never be set."""
         src = _app_source()
         step3 = src.index("Step 3: Transfer Planner")
         container = src.index("with st.container(border=True):", step3)
-        inline_widget = src.index('key="risk_inline"', container)
-        override_analysis = src.index('ov = st.session_state["override_analysis"]', container)
-        self.assertLess(inline_widget, override_analysis,
-                        "the inline Strategy Mode selector must render before "
-                        "the rest of Step 3, not after")
+        risk_widget = src.index('key="risk"', container)
+        rival_input = src.index('key="rival_id_input"', container)
+        self.assertGreater(rival_input, risk_widget,
+                           "rival_id_input should render just after the "
+                           "strategy radio in Step 3's left column")
 
-    def test_inline_selector_carries_the_required_copy(self):
-        # Two adjacent string literals in app.py -- checked separately since
-        # the raw source (unlike the evaluated string) still has the closing
-        # and opening quotes between them.
+    def test_only_one_widget_owns_the_risk_key(self):
+        """Streamlit raises at runtime if two widgets share a key -- this is
+        the regression test for that, and the whole point of 'one canonical
+        control' rather than a synced pair."""
         src = _app_source()
-        self.assertIn("Choose your risk profile. Switching dynamically recalibrates", src)
-        self.assertIn("transfer targets and projected upside across the multi-week planner.", src)
+        self.assertEqual(src.count('key="risk"'), 1,
+                         "more than one widget claims key=\"risk\" -- Streamlit "
+                         "will crash with a duplicate-key error at runtime")
+        for dead in ("risk_inline", "_sync_risk_to_inline", "_sync_risk_from_inline"):
+            self.assertNotIn(dead, src, f"{dead!r} survived the consolidation to one control")
 
-    def test_inline_and_sidebar_selectors_share_one_options_list(self):
-        """Two separately-keyed widgets (Streamlit forbids sharing one key)
-        drifting to different option lists would silently break the sync."""
+    def test_strategy_and_chip_are_twin_columns_in_step_3(self):
         src = _app_source()
-        self.assertIn("RISK_OPTIONS", src)
-        self.assertEqual(src.count("RISK_OPTIONS,"), 2,
-                         "expected both the sidebar and inline radios to use "
-                         "the shared RISK_OPTIONS list")
+        step3 = src.index("Step 3: Transfer Planner")
+        container = src.index("with st.container(border=True):", step3)
+        columns_call = src.index("st.columns([1, 1])", container)
+        # The literal header markdown, not just the substring -- a comment
+        # naming "Strategy & Risk Mode" sits above the columns() call itself.
+        strategy_header = src.index('"##### 🎯 Strategy & Risk Mode"', container)
+        risk_widget = src.index('key="risk"', container)
+        chip_widget = src.index('key="confirmed_chip_radio"', container)
+        # The columns container has to exist before either card's content,
+        # and the strategy card's own widget before the chip card's.
+        self.assertLess(columns_call, strategy_header)
+        self.assertLess(columns_call, risk_widget)
+        self.assertLess(risk_widget, chip_widget)
 
-    def test_selectors_are_synced_both_ways(self):
+    def test_strategy_card_shows_every_mode_description_plus_the_selected_one(self):
+        """Two distinct requirements: the full glossary (one description per
+        option, via Streamlit's own per-option captions) AND a restatement of
+        specifically the selected mode directly under the picker."""
         src = _app_source()
-        self.assertIn("def _sync_risk_to_inline():", src)
-        self.assertIn("def _sync_risk_from_inline():", src)
-        self.assertIn('on_change=_sync_risk_to_inline', src)
-        self.assertIn('on_change=_sync_risk_from_inline', src)
+        self.assertIn("RISK_DESCRIPTIONS", src)
+        self.assertIn("captions=RISK_DESCRIPTIONS", src)
+        expected_descriptions = [
+            "Chase the most points. No thumb on the scale.",
+            "Play it safe. Own what your rivals own, and only move for a clear upgrade.",
+            "Go hunting. Back differentials and take a hit for a big enough gain.",
+            "Protect a lead. Mirror the players your rivals own so their good weeks can't hurt you.",
+            "Close a gap. Target players almost nobody else has.",
+        ]
+        for desc in expected_descriptions:
+            self.assertIn(desc, src, f"mode description {desc!r} missing")
+        start = src.index('key="risk"')
+        nearby = src[start:start + 400]
+        self.assertIn("st.info(f\"**{risk_label}:**", nearby,
+                      "no restatement of the selected mode's own description "
+                      "directly under the picker")
+
+    def test_both_widgets_invalidate_the_transfer_cache_on_change(self):
+        """Changing Strategy Mode or the Chip Scenario must never leave the
+        cards, pitch or projected xP showing a plan computed for the old
+        setting."""
+        src = _app_source()
+        risk_start = src.index('key="risk"')
+        risk_block = src[risk_start:risk_start + 300]
+        self.assertIn("on_change=clear_transfer_cache", risk_block)
+        chip_start = src.index('key="confirmed_chip_radio"')
+        chip_block = src[chip_start:chip_start + 200]
+        self.assertIn("on_change=clear_transfer_cache", chip_block)
 
 
 class ChipCopyTest(unittest.TestCase):
