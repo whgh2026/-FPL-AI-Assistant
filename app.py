@@ -238,8 +238,12 @@ def _surname(p: dict) -> str:
 def clear_transfer_cache():
     """Bust the solver cache and mark stored transfers as stale.
 
-    Bound to the Strategy Mode widget's on_change callback so a strategy switch
-    invalidates the cached 4-GW optimization and forces Step 3 to recalculate.
+    Bound to the on_change of every widget in Step 3's twin scenario cards --
+    the Strategy & Risk Mode radio and the Chip Scenario Lab radio -- so a
+    change to either one immediately invalidates the cached 4-GW optimisation
+    and forces a fresh solve. Nothing downstream (the transfer cards, the
+    baseline pitch, projected xP) can end up showing a plan that predates the
+    setting it's supposed to reflect.
     """
     try:
         fpl_tools.suggest_transfers_for_custom_squad.clear()
@@ -252,30 +256,22 @@ def clear_transfer_cache():
             st.session_state.pop(k, None)
 
 
-# Shared between the sidebar's Strategy Mode radio and the inline duplicate
-# rendered at the top of Step 3 (mobile collapses the sidebar, so Step 3 needs
-# its own copy of the control). One list means the two can never drift apart.
+# The one canonical Strategy Mode control lives in Step 3's "Strategy & Risk
+# Mode" card. It used to be duplicated (sidebar + a mobile-only inline copy
+# kept in sync via a pair of on_change callbacks, because Streamlit forbids
+# two widgets sharing one key) -- collapsing back to a single widget removes
+# that sync machinery entirely, since there's nothing left to keep in sync.
 RISK_OPTIONS = [
     "Balanced", "Conservative", "Aggressive",
     "Rank Protecting (Shield)", "Rank Chasing (Hunting)",
 ]
-
-
-def _sync_risk_to_inline():
-    """Sidebar Strategy Mode changed -- mirror it onto the inline copy's key.
-
-    Streamlit forbids two widgets sharing one `key`, so the inline selector in
-    Step 3 has to be a second, separately-keyed widget. Setting its key here,
-    before the rerun, is what keeps it showing the same choice as the sidebar.
-    """
-    st.session_state["risk_inline"] = st.session_state["risk"]
-    clear_transfer_cache()
-
-
-def _sync_risk_from_inline():
-    """Inline Strategy Mode (Step 3) changed -- mirror it back onto the sidebar."""
-    st.session_state["risk"] = st.session_state["risk_inline"]
-    clear_transfer_cache()
+RISK_DESCRIPTIONS = [
+    "Chase the most points. No thumb on the scale.",
+    "Play it safe. Own what your rivals own, and only move for a clear upgrade.",
+    "Go hunting. Back differentials and take a hit for a big enough gain.",
+    "Protect a lead. Mirror the players your rivals own so their good weeks can't hurt you.",
+    "Close a gap. Target players almost nobody else has.",
+]
 
 
 # ------------------------------------------------------------------
@@ -1194,38 +1190,11 @@ with st.sidebar:
     st.markdown("## ⚽ FPL Quant Manager")
     st.caption("Work out your best move before the deadline")
 
-    # Strategy lives here, not buried in step 3.
-    #
-    # It used to render inside `if "override_analysis" in st.session_state`,
-    # i.e. only AFTER the user had already run the numbers -- so the setting
-    # that governs the entire objective was invisible until the work it governs
-    # had been done. In the sidebar it is always visible and always applies.
-    st.markdown("#### 🎯 How should we play it?")
-    risk_label = st.radio(
-        "Strategy",
-        RISK_OPTIONS,
-        index=0,
-        key="risk",
-        label_visibility="collapsed",
-        help="How big a gain we demand before pulling the trigger.",
-        captions=[
-            "Chase the most points. No thumb on the scale.",
-            "Play it safe. Own what your rivals own, and only move for a clear upgrade.",
-            "Go hunting. Back differentials and take a hit for a big enough gain.",
-            "Protect a lead. Mirror the players your rivals own so their good weeks can't hurt you.",
-            "Close a gap. Target players almost nobody else has.",
-        ],
-        on_change=_sync_risk_to_inline,
-    )
-
-    if risk_label in ("Conservative", "Rank Protecting (Shield)"):
-        st.text_input(
-            "Rival's team ID (optional)",
-            key="rival_id_input",
-            help="We'll shadow this rival's squad so their good weeks can't hurt you.",
-        )
-
-    st.markdown("---")
+    # Strategy Mode (and the rival-shadow ID it can unlock) now lives entirely
+    # in Step 3's "Strategy & Risk Mode" card -- see the Transfer Planner
+    # section below. It used to render here as well, kept in sync with a
+    # mobile-only duplicate via a pair of on_change callbacks; one canonical
+    # control is simpler and cannot drift out of sync with itself.
 
     with st.expander("🧠 How it thinks", expanded=False):
         st.markdown(
@@ -1707,34 +1676,48 @@ with tab_planner:
         )
         with st.container(border=True):
 
-            # Inline duplicate of the sidebar's Strategy Mode control. Mobile
-            # browsers collapse Streamlit's sidebar behind a hamburger icon, so
-            # without this, a mobile manager can't reach the one setting that
-            # governs the whole plan without an extra tap to find it. Bound to
-            # the same "risk" strategy via _sync_risk_from_inline/_to_inline
-            # (Streamlit disallows two widgets sharing one key outright).
-            st.markdown("##### 🎯 Strategy Mode")
-            st.caption(
-                "Choose your risk profile. Switching dynamically recalibrates "
-                "transfer targets and projected upside across the multi-week planner."
-            )
-            _current_risk = st.session_state.get("risk", "Balanced")
-            _risk_idx = RISK_OPTIONS.index(_current_risk) if _current_risk in RISK_OPTIONS else 0
-            st.radio(
-                "Strategy Mode",
-                RISK_OPTIONS,
-                index=_risk_idx,
-                key="risk_inline",
-                label_visibility="collapsed",
-                horizontal=True,
-                on_change=_sync_risk_from_inline,
-            )
-
             ov = st.session_state["override_analysis"]
             tr = ov["transfers"]
 
-            # Strategy and rival now live in the sidebar; resolve the rival here.
-            risk_label = st.session_state.get("risk", "Balanced")
+            # Twin scenario cards: Strategy & Risk Mode on the left, Chip
+            # Scenario Lab on the right. st.columns stacks vertically on a
+            # narrow viewport by itself (Streamlit's default since 1.32), so
+            # this is the one control surface for both -- no sidebar
+            # duplicate, no separately-keyed widget to keep in sync.
+            col_strategy, col_chip = st.columns([1, 1])
+
+            with col_strategy:
+                st.markdown("##### 🎯 Strategy & Risk Mode")
+                st.caption(
+                    "Choose your risk profile. Switching dynamically recalibrates "
+                    "transfer targets and projected upside across the multi-week planner."
+                )
+                risk_label = st.radio(
+                    "Strategy",
+                    RISK_OPTIONS,
+                    index=0,
+                    key="risk",
+                    label_visibility="collapsed",
+                    help="How big a gain we demand before pulling the trigger.",
+                    captions=RISK_DESCRIPTIONS,
+                    on_change=clear_transfer_cache,
+                )
+                _risk_desc = RISK_DESCRIPTIONS[RISK_OPTIONS.index(risk_label)]
+                st.info(f"**{risk_label}:** {_risk_desc}")
+
+                if risk_label in ("Conservative", "Rank Protecting (Shield)"):
+                    st.text_input(
+                        "Rival's team ID (optional)",
+                        key="rival_id_input",
+                        help="We'll shadow this rival's squad so their good weeks can't hurt you.",
+                    )
+
+            # Resolving the rival and (re)solving the plan is common to both
+            # cards -- it has to run before the right column, since that
+            # column reads `tr`, but after the left column, since it needs
+            # `risk_label`. Streamlit reruns the whole script on any widget
+            # change, so by the time execution reaches here `risk_label`
+            # already reflects whichever widget the user just touched.
             if risk_label in ("Conservative", "Rank Protecting (Shield)"):
                 rival_manager_id = st.session_state.get("rival_id_input", "")
                 _rk = rival_manager_id.strip() if rival_manager_id else ""
@@ -1753,8 +1736,11 @@ with tab_planner:
                 st.session_state["rival_ids"] = None
                 st.session_state["_rival_resolved"] = ""
 
-            # Recalculate transfers if the strategy mode changed (cache-busted via the
-            # on_change callback), so Step 3 never shows stale recommendations.
+            # Recalculate transfers if the strategy mode (or the chip
+            # scenario, or the rival) changed -- cache-busted via each
+            # widget's own on_change callback, so nothing below this point
+            # can ever show a plan that predates the setting it's supposed
+            # to reflect.
             if st.session_state.get("_transfers_stale"):
                 with st.spinner("Recalculating optimal transfers for new strategy..."):
                     try:
@@ -1783,47 +1769,50 @@ with tab_planner:
                     except Exception as e:
                         st.warning(f"Could not recalculate transfers: {e}")
                 st.session_state["_transfers_stale"] = False
-            
-            evals = tr.get("chip_evaluations", [])
-            if evals:
-                eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
-                st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
-    
-            chip_options = ["None (Hold Chips)"] + ALL_CHIPS
 
-            set1_remaining = []
-            try:
-                inv = fpl_tools._chip_inventory(GW_ID)
-                played = fpl_tools.get_played_chips(manager_id.strip())
-                set1_remaining = [c for c in inv["set1"] if c not in played]
-                if inv["set1"]:
-                    st.markdown(f"**🎟️ Chip Scenario Lab (Set 1 · Expire GW{inv['expiry_gw']})**")
-                else:
-                    st.markdown(f"**🎟️ Chip Scenario Lab (Set 2 · GW{inv['expiry_gw'] + 1}–38)**")
-                st.caption(
-                    "Simulate playing a chip this week to see how your lineup and "
-                    "projected points shift. Leave blank for standard rolling "
-                    "transfer strategy."
+            evals = tr.get("chip_evaluations", [])
+
+            with col_chip:
+                if evals:
+                    eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
+                    st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
+
+                chip_options = ["None (Hold Chips)"] + ALL_CHIPS
+
+                set1_remaining = []
+                try:
+                    inv = fpl_tools._chip_inventory(GW_ID)
+                    played = fpl_tools.get_played_chips(manager_id.strip())
+                    set1_remaining = [c for c in inv["set1"] if c not in played]
+                    if inv["set1"]:
+                        st.markdown(f"**🎟️ Chip Scenario Lab (Set 1 · Expire GW{inv['expiry_gw']})**")
+                    else:
+                        st.markdown(f"**🎟️ Chip Scenario Lab (Set 2 · GW{inv['expiry_gw'] + 1}–38)**")
+                    st.caption(
+                        "Simulate playing a chip this week to see how your lineup and "
+                        "projected points shift. Leave blank for standard rolling "
+                        "transfer strategy."
+                    )
+                    if GW_ID >= 17 and set1_remaining:
+                        st.warning(f"⚠️ Set 1 chips ({', '.join(set1_remaining)}) expire at the GW{inv['expiry_gw']} deadline — play or lose them.")
+                except Exception:
+                    st.markdown("**🎟️ Chip Scenario Lab**")
+                    st.caption(
+                        "Simulate playing a chip this week to see how your lineup and "
+                        "projected points shift. Leave blank for standard rolling "
+                        "transfer strategy."
+                    )
+                confirmed_chip = st.radio(
+                    "Play a chip this Gameweek (only one allowed)",
+                    chip_options,
+                    index=0,
+                    horizontal=True,
+                    key="confirmed_chip_radio",
+                    label_visibility="collapsed",
+                    on_change=clear_transfer_cache,
                 )
-                if GW_ID >= 17 and set1_remaining:
-                    st.warning(f"⚠️ Set 1 chips ({', '.join(set1_remaining)}) expire at the GW{inv['expiry_gw']} deadline — play or lose them.")
-            except Exception:
-                st.markdown("**🎟️ Chip Scenario Lab**")
-                st.caption(
-                    "Simulate playing a chip this week to see how your lineup and "
-                    "projected points shift. Leave blank for standard rolling "
-                    "transfer strategy."
-                )
-            confirmed_chip = st.radio(
-                "Play a chip this Gameweek (only one allowed)",
-                chip_options,
-                index=0,
-                horizontal=True,
-                key="confirmed_chip_radio",
-                label_visibility="collapsed",
-            )
-            st.session_state["active_confirmed_chip"] = confirmed_chip
-    
+                st.session_state["active_confirmed_chip"] = confirmed_chip
+
             st.markdown("---")
             
             if confirmed_chip in ("Wildcard", "Free Hit"):
