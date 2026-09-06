@@ -201,6 +201,55 @@ def main():
     check("gantt_figure_handles_an_empty_schedule_without_raising",
           isinstance(empty_fig, app.go.Figure))
 
+    # ---- fixture-run track: circular FDR badge + opponent/venue + xP ------
+    fixture_run = [
+        {"gw": 5, "fdr": 2, "opponent": "EVE", "venue": "H", "xp": 3.9,
+         "is_double": False, "is_blank": False},
+        {"gw": 6, "fdr": 3, "opponent": "AVL", "venue": "H", "xp": 2.1,
+         "is_double": False, "is_blank": False},
+        {"gw": 7, "fdr": 5, "opponent": "MUN", "venue": "A", "xp": 1.4,
+         "is_double": True, "is_blank": False},
+        {"gw": 8, "fdr": None, "opponent": None, "venue": None, "xp": 0.0,
+         "is_double": False, "is_blank": True},
+    ]
+    fx_html = app._fixture_run_html(fixture_run)
+    check("fixture_run_html_four_cells",
+          fx_html.count('class="fx-run-cell"') == 4, fx_html)
+    check("fixture_run_html_favourable_fixture_is_green",
+          'background:var(--pos);">2<' in fx_html, fx_html)
+    check("fixture_run_html_moderate_fixture_is_amber",
+          'background:var(--warn);">3<' in fx_html, fx_html)
+    check("fixture_run_html_difficult_fixture_is_red",
+          'background:var(--neg);">5<' in fx_html, fx_html)
+    check("fixture_run_html_shows_opponent_and_venue",
+          "EVE (H)" in fx_html and "MUN (A)" in fx_html, fx_html)
+    check("fixture_run_html_shows_per_fixture_xp",
+          "3.9 xP" in fx_html, fx_html)
+    check("fixture_run_html_blank_gameweek_has_no_fdr_or_opponent",
+          "Blank" in fx_html, fx_html)
+
+    # ---- fixture-run wired end-to-end through _transfer_pair_html ---------
+    # Real team ids from the synthetic fixture, not fabricated ones, so
+    # _player_fixture_run actually finds fixtures to draw a track from.
+    ctx = app._bootstrap_ctx()
+    any_team_id = next(iter(ctx["teams_by_id"]))
+    move_out = {"id": 901, "team_id": any_team_id, "team": "T1",
+               "position": "MID", "price": 6.0}
+    move_in = {"id": 902, "team_id": any_team_id, "team": "T1",
+              "position": "MID", "price": 6.5}
+    ctx["players_by_id"].setdefault(901, {"id": 901, "team": any_team_id,
+                                          "element_type": 3, "minutes": 900,
+                                          "starts": 10, "status": "a"})
+    ctx["players_by_id"].setdefault(902, {"id": 902, "team": any_team_id,
+                                          "element_type": 3, "minutes": 900,
+                                          "starts": 10, "status": "a"})
+    pair_html = app._transfer_pair_html(
+        [{"out": move_out, "in": move_in, "xp_gain": 1.2, "cost": 0.5}])
+    fx_run_count = pair_html.count('class="fx-run"')
+    check("transfer_pair_html_renders_a_fixture_track_for_each_side",
+          fx_run_count == 2,
+          f"expected 2 fixture tracks (out + in), found {fx_run_count}")
+
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) failed:")
         for f in FAILURES:

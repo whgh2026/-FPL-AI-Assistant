@@ -1060,6 +1060,12 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
             "opp_strength_def": ra.get("def_away", 3.0),
             "opp_strength_att": ra.get("att_away", 3.0),
             "win_prob": win_probs.get(h, {}).get(a),
+            # FPL's own published 1-5 rating, kept alongside (not instead of)
+            # the continuous Dixon-Coles ease score above: the solver and the
+            # rest of the projection pipeline deliberately use the latter, but
+            # a UI showing "FDR" to a reader means this one -- the number they
+            # already know from the official app.
+            "official_fdr": f.get("team_h_difficulty"),
         }
         away_fx = {
             "event": event,
@@ -1071,6 +1077,7 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
             "opp_strength_def": rh.get("def_home", 3.0),
             "opp_strength_att": rh.get("att_home", 3.0),
             "win_prob": win_probs.get(a, {}).get(h),
+            "official_fdr": f.get("team_a_difficulty"),
         }
         lookup.setdefault(h, []).append(home_fx)
         lookup.setdefault(a, []).append(away_fx)
@@ -2125,6 +2132,49 @@ def _player_fdr_list(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str,
         # two average games are worth more than one, which a mean alone loses.
         ease = sum(6.0 - _to_float(f.get("opp_strength_def", 3.0)) for f in fs) / len(fs)
         out.append(round(min(5.0, ease * (1.0 + 0.5 * (len(fs) - 1))), 2))
+    return out
+
+
+def _player_fixture_run(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]],
+                        teams_by_id: Dict[int, Dict[str, Any]], start_event: int, n: int = 4) -> List[Dict[str, Any]]:
+    """Per-gameweek fixture breakdown for the transfer-recommendation UI:
+    FPL's own official 1-5 FDR, opponent short name, venue, and single-
+    gameweek projected xP, one entry per gameweek in the window.
+
+    Deliberately reads official_fdr rather than _player_fdr_list's continuous
+    Dixon-Coles ease score -- that score is what the solver and the rest of
+    the projection pipeline actually use, and stays that way, but a UI field
+    labelled "FDR" means the number a reader already knows from the official
+    app, not this app's own internal one wearing the same name.
+
+    Always exactly n entries, so a UI can lay out a fixed-width track without
+    checking length first -- a blank gameweek still gets one, with
+    fdr/opponent/venue all None and xp 0.0.
+    """
+    team_id = p.get("team")
+    fixtures = fixture_lookup.get(team_id, [])
+    out = []
+    for i in range(n):
+        gw = start_event + i
+        fxs = _gw_fixtures(fixtures, gw)
+        xp_gw, _note = _player_xp(p, fixture_lookup, event=gw)
+        if not fxs:
+            out.append({"gw": gw, "fdr": None, "opponent": None, "venue": None,
+                       "xp": 0.0, "is_double": False, "is_blank": True})
+            continue
+        # A double gameweek shows its first fixture's opponent/FDR/venue --
+        # xp is still the full gameweek total across both matches, via
+        # _player_xp above, which already sums (and fatigue-discounts) both.
+        f = fxs[0]
+        out.append({
+            "gw": gw,
+            "fdr": f.get("official_fdr"),
+            "opponent": teams_by_id.get(f.get("opponent"), {}).get("short_name", "?"),
+            "venue": "H" if f.get("is_home") else "A",
+            "xp": round(xp_gw, 1),
+            "is_double": len(fxs) > 1,
+            "is_blank": False,
+        })
     return out
 
 

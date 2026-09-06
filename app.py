@@ -1054,6 +1054,61 @@ def _waterfall_html(breakdown: dict) -> str:
     return f'<div class="wf">{"".join(rows)}{warn}</div>'
 
 
+# Official 1-5 FDR -> traffic-light colour, per the exact bands requested:
+# green 1-2 (favourable), amber 3 (moderate), red 4-5 (difficult).
+_FX_RUN_FDR_COLOR = {1: "var(--pos)", 2: "var(--pos)", 3: "var(--warn)",
+                     4: "var(--neg)", 5: "var(--neg)"}
+
+
+def _fixture_run_html(fixture_run) -> str:
+    """Render one player's next-N-fixture horizontal track for the transfer
+    card: a circular FDR badge, opponent + venue, and that gameweek's
+    projected xP underneath, one cell per fpl_tools._player_fixture_run()
+    entry. That helper is always fixed-length (a blank gameweek still gets an
+    entry with fdr/opponent/venue all None), so this never has to special-case
+    a short list -- it only special-cases what to draw inside one cell."""
+    cells = []
+    for fx in fixture_run:
+        if fx.get("is_blank"):
+            cells.append(
+                '<div class="fx-run-cell">'
+                '<div class="fx-run-badge fx-run-blank">–</div>'
+                '<div class="fx-run-opp">Blank</div>'
+                '<div class="fx-run-xp">–</div>'
+                '</div>'
+            )
+            continue
+        fdr = fx.get("fdr")
+        color = _FX_RUN_FDR_COLOR.get(fdr, "var(--muted)")
+        opp = fx.get("opponent") or "?"
+        venue = fx.get("venue") or "?"
+        dgw = " ×2" if fx.get("is_double") else ""
+        cells.append(
+            f'<div class="fx-run-cell">'
+            f'<div class="fx-run-badge" style="background:{color};">{fdr if fdr is not None else "?"}</div>'
+            f'<div class="fx-run-opp">{opp} ({venue}){dgw}</div>'
+            f'<div class="fx-run-xp">{fx.get("xp", 0):.1f} xP</div>'
+            f'</div>'
+        )
+    return f'<div class="fx-run">{"".join(cells)}</div>'
+
+
+def _player_fixture_run_html(p) -> str:
+    """Resolve a transfer-card player dict (an fpl_tools pool entry, keyed by
+    id, not the raw bootstrap element _player_fixture_run needs) back to its
+    bootstrap element via the same cached context every other lookup in this
+    file uses, then render its fixture track. Empty string if the data isn't
+    available -- the card still renders fine without the track."""
+    ctx = _bootstrap_ctx()
+    if not ctx or not ctx.get("start"):
+        return ""
+    element = ctx.get("players_by_id", {}).get(_pid(p))
+    if not element:
+        return ""
+    run = fpl_tools._player_fixture_run(element, ctx["lookup"], ctx["teams_by_id"], ctx["start"])
+    return _fixture_run_html(run)
+
+
 def _transfer_pair_html(moves) -> str:
     html = ""
     for m in moves:
@@ -1069,6 +1124,7 @@ def _transfer_pair_html(moves) -> str:
             f'<div class="tc-meta">Transfer Out</div>'
             f'<div class="tc-head">{_headshot_img(out)}<div><div class="tc-name">⬇️ {_web_name(out)}</div>'
             f'<div class="tc-meta">{out.get("position", "")} · {out.get("team", "")} · £{out.get("price", 0):.1f}m</div></div></div>'
+            f'{_player_fixture_run_html(out)}'
             f'</div>'
             f'<div class="transfer-arrow">➔</div>'
             f'<div class="transfer-card tc-in">'
@@ -1076,6 +1132,7 @@ def _transfer_pair_html(moves) -> str:
             f'<div class="tc-head">{_headshot_img(inn)}<div><div class="tc-name">⬆️ {_web_name(inn)}</div>'
             f'<div class="tc-meta">{inn.get("position", "")} · {inn.get("team", "")} · £{inn.get("price", 0):.1f}m</div>'
             f'{in_tightrope}</div></div>'
+            f'{_player_fixture_run_html(inn)}'
             f'</div>'
             f'<div style="min-width:110px;text-align:right;">'
             f'<div class="rot-score">+{m.get("xp_gain", 0)}</div>'
@@ -1990,6 +2047,12 @@ with tab_planner:
                     "this week — bank it and you'll have two next week."
                     "</div>")
             st.markdown(_card(transfer_html, "⚙️ The move"), unsafe_allow_html=True)
+            if moves:
+                st.caption(
+                    "Fixtures colored by FDR (Fixture Difficulty Rating): 🟢 Favourable, "
+                    "🟡 Moderate, 🔴 Difficult. Values indicate projected points for that "
+                    "specific fixture."
+                )
 
             # ---- Scenario Distribution (SAA floor vs ceiling) ----
             try:

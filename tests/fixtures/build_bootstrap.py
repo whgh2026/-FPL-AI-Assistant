@@ -191,6 +191,11 @@ def build_fixtures(teams, rng):
     fid = 0
     ids = [t["id"] for t in teams]
     latent = {t["id"]: t for t in teams}
+    # Official 1-5 difficulty, deterministically derived from the opponent's
+    # own `strength` ordinal (already on the real API's 1-5 scale) -- facing
+    # the strongest teams is difficulty 5, the weakest is whatever `strength`
+    # bottoms out at for this synthetic pool.
+    strength_by_id = {t["id"]: t["strength"] for t in teams}
 
     for gw in range(1, GWS + 1):
         rot = ids[1:]
@@ -216,6 +221,8 @@ def build_fixtures(teams, rng):
                 "team_h_score": hs, "team_a_score": as_,
                 "finished": finished,
                 "kickoff_time": f"2026-{8 + (gw // 5):02d}-{2 + (gw % 26):02d}T14:00:00Z",
+                "team_h_difficulty": strength_by_id[a],
+                "team_a_difficulty": strength_by_id[h],
             })
 
         # planted double gameweek: replay the blanked pairings in GW10
@@ -228,6 +235,8 @@ def build_fixtures(teams, rng):
                         "team_h_score": None, "team_a_score": None,
                         "finished": False,
                         "kickoff_time": "2026-10-14T19:00:00Z",
+                        "team_h_difficulty": strength_by_id[h],
+                        "team_a_difficulty": strength_by_id[a],
                     })
     return fixtures
 

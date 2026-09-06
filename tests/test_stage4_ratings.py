@@ -64,6 +64,102 @@ def _synthetic_league(seed=3, mu=math.log(1.42), gamma=0.25, n=20, rounds=1):
     return att, dfn, fixtures
 
 
+class OfficialFDRTest(unittest.TestCase):
+    """official_fdr is FPL's own published 1-5 rating, threaded through
+    alongside (never replacing) the continuous Dixon-Coles ease score the
+    solver actually uses -- a UI field labelled "FDR" means the number a
+    reader already knows from the official app."""
+
+    def test_every_fixture_carries_an_official_fdr(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            for team_id, fixtures in lookup.items():
+                for f in fixtures:
+                    self.assertIn("official_fdr", f)
+                    self.assertIsNotNone(f["official_fdr"], f"team {team_id}, gw {f['event']}")
+                    self.assertGreaterEqual(f["official_fdr"], 1)
+                    self.assertLessEqual(f["official_fdr"], 5)
+
+    def test_official_fdr_is_symmetric_between_the_two_sides(self):
+        """Team A's home difficulty facing B and B's away difficulty facing A
+        both come from the same raw fixture -- they need not be EQUAL (real
+        FPL rates home/away difficulty independently), but each side's rating
+        must trace back to that fixture's own team_h_difficulty/
+        team_a_difficulty, not get shuffled onto the wrong opponent."""
+        with harness.synthetic_world() as (bs, fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            sample = next(f for f in fx if f.get("event") == 1)
+            home_side = next(x for x in lookup[sample["team_h"]] if x["event"] == 1)
+            away_side = next(x for x in lookup[sample["team_a"]] if x["event"] == 1)
+            self.assertEqual(home_side["official_fdr"], sample["team_h_difficulty"])
+            self.assertEqual(away_side["official_fdr"], sample["team_a_difficulty"])
+
+    def test_does_not_replace_the_continuous_ease_score(self):
+        """Both numbers must coexist -- official_fdr is additive, not a
+        replacement for opp_strength_def, which the projection pipeline
+        still reads."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            f = lookup[1][0]
+            self.assertIn("opp_strength_def", f)
+            self.assertIn("official_fdr", f)
+
+
+class PlayerFixtureRunTest(unittest.TestCase):
+    """_player_fixture_run: the per-gameweek breakdown Step 3's transfer
+    recommendation card renders under each player."""
+
+    def test_returns_exactly_n_entries_including_across_a_blank(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            teams_by_id = {t["id"]: t for t in bs["teams"]}
+            # Team 1 has a planted blank at GW9 -- start the window there so
+            # the fixed-length contract is exercised, not just the easy case.
+            player = next(e for e in bs["elements"] if e["team"] == 1 and e["element_type"] == 3)
+            run = fpl_tools._player_fixture_run(player, lookup, teams_by_id, start_event=8, n=4)
+            self.assertEqual(len(run), 4)
+            blank = next(r for r in run if r["gw"] == 9)
+            self.assertTrue(blank["is_blank"])
+            self.assertIsNone(blank["fdr"])
+            self.assertIsNone(blank["opponent"])
+            self.assertEqual(blank["xp"], 0.0)
+
+    def test_normal_gameweek_carries_fdr_opponent_venue_and_xp(self):
+        with harness.synthetic_world() as (bs, fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            teams_by_id = {t["id"]: t for t in bs["teams"]}
+            player = next(e for e in bs["elements"] if e["team"] == 1 and e["element_type"] == 3)
+            run = fpl_tools._player_fixture_run(player, lookup, teams_by_id, start_event=1, n=1)
+            entry = run[0]
+            self.assertFalse(entry["is_blank"])
+            expected = next(f for f in fx if f.get("event") == 1
+                            and 1 in (f["team_h"], f["team_a"]))
+            is_home = expected["team_h"] == 1
+            self.assertEqual(entry["venue"], "H" if is_home else "A")
+            opp_id = expected["team_a"] if is_home else expected["team_h"]
+            self.assertEqual(entry["opponent"], teams_by_id[opp_id]["short_name"])
+            self.assertEqual(entry["fdr"],
+                            expected["team_h_difficulty"] if is_home else expected["team_a_difficulty"])
+            self.assertIsInstance(entry["xp"], float)
+
+    def test_double_gameweek_is_flagged(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            teams_by_id = {t["id"]: t for t in bs["teams"]}
+            player = next(e for e in bs["elements"] if e["team"] == 1 and e["element_type"] == 3)
+            run = fpl_tools._player_fixture_run(player, lookup, teams_by_id, start_event=10, n=1)
+            self.assertTrue(run[0]["is_double"], "team 1's planted GW10 double was not detected")
+
+    def test_fixed_length_holds_even_when_every_week_is_blank(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            teams_by_id = {t["id"]: t for t in bs["teams"]}
+            player = next(e for e in bs["elements"] if e["element_type"] == 3)
+            run = fpl_tools._player_fixture_run(player, {}, teams_by_id, start_event=1, n=4)
+            self.assertEqual(len(run), 4)
+            self.assertTrue(all(r["is_blank"] for r in run))
+
+
 class IdentificationTest(unittest.TestCase):
     """mu owns the scoring level; att and def are both centred."""
 

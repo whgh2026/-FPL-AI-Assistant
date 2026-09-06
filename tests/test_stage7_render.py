@@ -589,6 +589,60 @@ class TransferRoadmapTabTest(unittest.TestCase):
         block = src[start:start + 2000]
         self.assertIn('"override_analysis" not in st.session_state', block)
 
+class FixtureRunTest(unittest.TestCase):
+    """'The move' card's side-by-side fixture-horizon traffic lights: each of
+    the Transfer Out / Transfer In player badges gets its own 4-fixture track
+    (official FDR badge, opponent + venue, that gameweek's xP) underneath."""
+
+    def test_fixture_run_wired_into_both_transfer_cards(self):
+        src = _app_source()
+        start = src.index("def _transfer_pair_html(")
+        end = src.index("\ndef ", start + 1)
+        block = src[start:end]
+        self.assertEqual(
+            block.count("_player_fixture_run_html("), 2,
+            "expected one fixture-run call for the Transfer Out card and one "
+            "for the Transfer In card")
+
+    def test_fixture_run_html_reads_the_official_fdr_not_the_internal_ease_score(self):
+        src = _app_source()
+        start = src.index("def _player_fixture_run_html(")
+        end = src.index("\ndef ", start + 1)
+        block = src[start:end]
+        self.assertIn("fpl_tools._player_fixture_run(", block,
+                      "must reuse fpl_tools' own per-gameweek breakdown rather "
+                      "than reinventing it against the internal ease score")
+
+    def test_fdr_badge_bands_match_the_specified_colours(self):
+        """Green 1-2 (favourable), amber 3 (moderate), red 4-5 (difficult) --
+        the exact bands given, not this app's own inverted internal scale."""
+        src = _app_source()
+        start = src.index("_FX_RUN_FDR_COLOR = {")
+        end = src.index("}", start)
+        table = src[start:end]
+        self.assertIn("1: \"var(--pos)\"", table.replace("'", '"'))
+        self.assertIn("2: \"var(--pos)\"", table.replace("'", '"'))
+        self.assertIn("3: \"var(--warn)\"", table.replace("'", '"'))
+        self.assertIn("4: \"var(--neg)\"", table.replace("'", '"'))
+        self.assertIn("5: \"var(--neg)\"", table.replace("'", '"'))
+
+    def test_move_card_caption_is_present_and_exact(self):
+        # Checked as separate literal fragments rather than one concatenated
+        # string: the source wraps the caption across adjacent string
+        # literals, so the raw file text never contains it as one substring.
+        src = _app_source()
+        start = src.index('_card(transfer_html, "⚙️ The move")')
+        block = src[start:start + 500]
+        self.assertIn("st.caption(", block)
+        self.assertIn(
+            "Fixtures colored by FDR (Fixture Difficulty Rating): 🟢 Favourable,",
+            block)
+        self.assertIn(
+            "🟡 Moderate, 🔴 Difficult. Values indicate projected points for that",
+            block)
+        self.assertIn("specific fixture.", block)
+
+
 class StylesheetTest(unittest.TestCase):
     def test_no_hardcoded_hex_outside_root(self):
         """The Stage 7 gate. One #fff had survived on .pc .pos."""
@@ -689,6 +743,53 @@ class StylesheetTest(unittest.TestCase):
         mobile = re.search(r"@media \(max-width: 768px\) \{.*?\n\s*\}", css, re.DOTALL)
         self.assertIsNotNone(mobile)
         self.assertNotIn("stSidebarCollapseButton", mobile.group(0))
+
+    def test_no_card_grows_its_own_vertical_scrollbar(self):
+        """Streamlit gives some of its own container primitives (a bordered
+        container, an expander body, a metric row) a default max-height once
+        content is tall enough -- a second, nested scroll region inside a
+        page that already scrolls, e.g. under 'How your squad stacks up' in
+        Step 4. The page scrolls; no card should."""
+        css = self._css()
+        for selector in ('div[data-testid="stExpander"]',
+                         'div[data-testid="stVerticalBlockBorderWrapper"]'):
+            self.assertIn(selector, css, f"{selector} rule not found")
+        m = re.search(
+            r'\[data-testid="stVerticalBlock"\][^{]*?,\s*'
+            r'\.stCard,\s*'
+            r'div\[data-testid="stExpander"\],\s*'
+            r'div\[data-testid="stVerticalBlockBorderWrapper"\]\s*\{([^}]*)\}',
+            css, re.DOTALL)
+        self.assertIsNotNone(m, "combined nested-scrollbar override rule not found")
+        rule = m.group(1)
+        self.assertIn("overflow-y: visible !important", rule)
+        self.assertIn("max-height: none !important", rule)
+
+    def test_no_container_is_given_a_fixed_pixel_height(self):
+        """st.container(height=...) is exactly the API that creates a
+        scrollable sub-region -- none of this app's cards should opt into
+        one."""
+        src = _app_source()
+        self.assertNotIn("st.container(height=", src)
+
+    def test_fixture_run_badges_are_circular_not_square(self):
+        """.fdr-cell (the pre-existing rotation-matrix badge) is a rounded
+        square -- this feature asked for circular badges specifically, so it
+        needs its own class rather than reusing that one."""
+        css = self._css()
+        m = re.search(r"\.fx-run-badge\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, ".fx-run-badge rule not found")
+        self.assertIn("border-radius: 50%", m.group(0))
+
+    def test_fixture_run_track_sits_under_the_card_and_can_shrink(self):
+        css = self._css()
+        for cls in (".fx-run", ".fx-run-cell", ".fx-run-opp"):
+            m = re.search(re.escape(cls) + r"\s*\{[^}]*\}", css)
+            self.assertIsNotNone(m, f"{cls} rule not found")
+        cell = re.search(r"\.fx-run-cell\s*\{[^}]*\}", css).group(0)
+        self.assertIn("min-width: 0", cell,
+                      "without min-width:0 four cells plus a headshot header "
+                      "cannot shrink to fit a phone-width transfer card")
 
 
 class ModelHealthDataTest(unittest.TestCase):
