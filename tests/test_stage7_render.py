@@ -107,7 +107,8 @@ class InformationArchitectureTest(unittest.TestCase):
 
     def test_tabs_are_named_for_the_reader(self):
         src = _app_source()
-        for label in ("🏟️ My Plan", "🗓️ Fixtures", "📡 Players", "🩺 Model Health"):
+        for label in ("🏟️ My Plan", "🗺️ Transfer Roadmap", "🗓️ Fixtures",
+                      "📡 Players", "🩺 Model Health"):
             self.assertIn(label, src, f"tab {label!r} is missing")
 
     def test_old_module_shaped_tab_names_are_gone(self):
@@ -530,6 +531,63 @@ class SectionCaptionTest(unittest.TestCase):
         self.assertIn("bank free transfers", block)
         self.assertIn("carries forward", block)
 
+    def test_bookies_signal_description_is_plain_english(self):
+        """Step 1's Gaffer's Positional Diagnostic legend, 'Bookies' column --
+        must explain de-vigging in plain terms rather than assume the reader
+        already knows what an overround or a devigged price is."""
+        src = _app_source()
+        start = src.index('"Bookies", "')
+        block = src[start:start + 400]
+        self.assertIn("built-in profit margin", block)
+        self.assertIn("true, unbiased probabilities", block)
+        self.assertNotIn("expected goals, assists, and clean sheet probabilities.\"", block,
+                         "the old, jargon-light-but-imprecise copy survived alongside it")
+
+
+class TransferRoadmapTabTest(unittest.TestCase):
+    """The Gantt timeline moved out of Step 3 into its own top-level tab --
+    elevated, not duplicated: it must exist exactly once, not survive in both
+    places."""
+
+    def test_roadmap_tab_exists_right_after_my_plan(self):
+        src = _app_source()
+        tabs_call = src.index("st.tabs(")
+        my_plan = src.index('"🏟️ My Plan"', tabs_call)
+        roadmap = src.index('"🗺️ Transfer Roadmap"', tabs_call)
+        fixtures = src.index('"🗓️ Fixtures"', tabs_call)
+        self.assertLess(my_plan, roadmap, "Transfer Roadmap must come after My Plan")
+        self.assertLess(roadmap, fixtures, "Transfer Roadmap must come before Fixtures")
+
+    def test_gantt_chart_no_longer_renders_inside_step_3(self):
+        """It used to render nested inside Step 3's 'next few weeks' card --
+        that was the whole complaint this tab exists to fix."""
+        src = _app_source()
+        step3 = src.index("Step 3: Transfer Planner")
+        tab_roadmap_start = src.index("with tab_roadmap:")
+        step3_block = src[step3:tab_roadmap_start]
+        self.assertNotIn("_transfer_gantt_figure(", step3_block,
+                         "the Gantt chart still renders inside Step 3 as well as its own tab")
+
+    def test_gantt_chart_renders_exactly_once(self):
+        src = _app_source()
+        self.assertEqual(src.count("_transfer_gantt_figure(gantt)"), 1)
+
+    def test_roadmap_tab_carries_the_required_caveat_banner(self):
+        src = _app_source()
+        start = src.index("with tab_roadmap:")
+        block = src[start:start + 2000]
+        self.assertIn("🗺️ The Rolling Transfer Roadmap", block)
+        self.assertIn("A roadmap, not a contract", block)
+        self.assertIn("Dynamic recalculation", block)
+        self.assertIn("re-solves before every deadline", block)
+
+    def test_roadmap_tab_degrades_gracefully_with_no_plan_yet(self):
+        """Before Step 2 has ever run, override_analysis doesn't exist --
+        the tab must say so rather than crash reaching into session_state."""
+        src = _app_source()
+        start = src.index("with tab_roadmap:")
+        block = src[start:start + 2000]
+        self.assertIn('"override_analysis" not in st.session_state', block)
 
 class StylesheetTest(unittest.TestCase):
     def test_no_hardcoded_hex_outside_root(self):

@@ -754,7 +754,7 @@ def _friendly_status(status) -> str:
 _SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
 _SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
 _SIGNAL_LABELS = {
-    "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean sheet probabilities."),
+    "market": ("Bookies", "Live betting market odds stripped of the bookmaker's built-in profit margin ('vig'). This converts betting lines into true, unbiased probabilities for clean sheets, goals, and match outcomes."),
     "quant": ("FPL Quant Manager", "Our own projection model, built for this tool. It forecasts points several weeks out — weighing fixture difficulty, each player's likelihood of featuring, and recent output — then checks itself against real results and refines week by week."),
     "form": ("Recent Form Tracker", "Rolling 30-day baseline performance tracking sustained underlying shot volume and key involvements."),
 }
@@ -1458,7 +1458,7 @@ def _gameweek_status_banner() -> str:
 
 # Main navigation
 # ------------------------------------------------------------------
-# Four tabs, named for what the reader wants rather than what the module does.
+# Named for what the reader wants rather than what the module does.
 # "Insights Lab" and "Player Radar & Market" told you nothing about which one
 # holds the fixture ticker. Model Health is new: the hero copy promises "you
 # can watch the scorecard rather than take our word for it", and until now
@@ -1468,8 +1468,15 @@ def _gameweek_status_banner() -> str:
 # They are produced by the planner wizard -- a Squad tab would sit empty until
 # you had run a plan, then duplicate what the plan already shows, which is more
 # disjointed, not less.
-tab_planner, tab_fixtures, tab_players, tab_health = st.tabs(
-    ["🏟️ My Plan", "🗓️ Fixtures", "📡 Players", "🩺 Model Health"])
+#
+# Transfer Roadmap is the exception to that rule: the Gantt timeline used to
+# render nested inside Step 3 (My Plan > Step 3 > a sub-section two levels
+# deep), which is exactly the "tucked away" problem the rest of this comment
+# argues against for a Squad tab. The difference is that a rolling multi-week
+# view genuinely is a distinct question from "what do I do THIS gameweek" --
+# worth its own tab rather than a widget buried in the answer to that one.
+tab_planner, tab_roadmap, tab_fixtures, tab_players, tab_health = st.tabs(
+    ["🏟️ My Plan", "🗺️ Transfer Roadmap", "🗓️ Fixtures", "📡 Players", "🩺 Model Health"])
 
 with tab_planner:
 
@@ -2031,25 +2038,9 @@ with tab_planner:
                         "them, and how your squad carries forward."
                     )
                     st.markdown(_card("".join(rows), "🗓️ The next few weeks"), unsafe_allow_html=True)
-
-                    st.markdown("##### 📊 Rolling transfer horizon")
-                    st.caption(
-                        "Who you're holding, buying and selling across the same "
-                        "gameweeks above, laid out as a timeline. Chip weeks are "
-                        "shaded; C/V mark that week's captain and vice-captain pick."
-                    )
-                    try:
-                        xp_lookup = {p["name"]: p.get("xp", 0.0) for p in ov["analysed_squad"]}
-                        gantt = fpl_tools.build_transfer_gantt_data(
-                            ov["analysed_squad"], plan, xp_lookup=xp_lookup)
-                        if gantt["bars"]:
-                            st.plotly_chart(
-                                _transfer_gantt_figure(gantt),
-                                width="stretch",
-                                config={"displayModeBar": False},
-                            )
-                    except Exception as e:
-                        st.caption(f"Timeline unavailable: {e}")
+                    # The same schedule, laid out as a Gantt-style timeline, now
+                    # lives in its own "Transfer Roadmap" tab rather than tucked
+                    # away here -- see tab_roadmap below.
             except Exception:
                 pass
 
@@ -2630,6 +2621,40 @@ with tab_planner:
                 st.markdown(st.session_state.ai_response)
             else:
                 st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
+
+with tab_roadmap:
+    st.markdown(
+        """
+### 🗺️ The Rolling Transfer Roadmap
+*A gameweek-by-gameweek forecast of how the solver plans to shape your 15-man squad over the upcoming horizon. Chip weeks are shaded, and **C** / **V** mark projected captaincy picks.*
+
+> ⚠️ **Key caveats to keep in mind:**
+> - **A roadmap, not a contract:** Projections assume current player health, availability, and prices. Midweek European injuries, press-conference updates, sudden benchings, and price swings will alter upcoming moves.
+> - **Dynamic recalculation:** The optimizer re-solves before every deadline with fresh data. Treat later gameweeks as an indicator of team structure rather than locked-in transfers.
+        """
+    )
+    if "override_analysis" not in st.session_state:
+        st.info("Run Step 2 in **My Plan** first — the roadmap builds on the "
+                "same optimiser output your transfer plan does.")
+    else:
+        try:
+            ov = st.session_state["override_analysis"]
+            tr = ov["transfers"]
+            plan = tr.get("multi_gw_plan") or []
+            xp_lookup = {p["name"]: p.get("xp", 0.0) for p in ov["analysed_squad"]}
+            gantt = fpl_tools.build_transfer_gantt_data(
+                ov["analysed_squad"], plan, xp_lookup=xp_lookup)
+            if gantt["bars"]:
+                st.plotly_chart(
+                    _transfer_gantt_figure(gantt),
+                    width="stretch",
+                    config={"displayModeBar": False},
+                )
+            else:
+                st.caption("No schedule to show yet — the optimiser found nothing "
+                          "worth changing across the horizon.")
+        except Exception as e:
+            st.caption(f"Timeline unavailable: {e}")
 
 with tab_fixtures:
     st.markdown("### 🗓️ Fixtures & form")
