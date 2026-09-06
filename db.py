@@ -337,6 +337,15 @@ def ensure_calibration_columns():
         ("dc_sensitivity", "DOUBLE PRECISION"),
         ("base_pts", "DOUBLE PRECISION"),
         ("model_version", "TEXT DEFAULT 'v1'"),
+        # Stage 8: the surrogate needs the cameo-penalty CLAMP input and the
+        # ep_next blend weight to reproduce _player_xp_raw. Without them it
+        # modelled the penalty unclamped and unblended, over-attributing a unit
+        # change by up to 2x. Nullable on purpose -- rows written before this
+        # fall back to the old arithmetic in reproject() rather than being lost.
+        ("raw_total", "DOUBLE PRECISION"),
+        ("xp_cameo", "DOUBLE PRECISION"),
+        ("ep_w", "DOUBLE PRECISION"),
+        ("ep_term", "DOUBLE PRECISION"),
     ]
     try:
         conn = get_db_connection()
@@ -372,12 +381,14 @@ def get_prediction_history(model_version=None):
             if model_version is None:
                 cur.execute(
                     "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
-                    "rotation_variance, dc_sensitivity "
+                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
+                    "ep_w, ep_term "
                     "FROM fpl_predictions WHERE actual_points IS NOT NULL")
             else:
                 cur.execute(
                     "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
-                    "rotation_variance, dc_sensitivity "
+                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
+                    "ep_w, ep_term "
                     "FROM fpl_predictions WHERE actual_points IS NOT NULL "
                     "AND model_version = %s", (model_version,))
             rows = []
@@ -389,6 +400,14 @@ def get_prediction_history(model_version=None):
                     "cameo_mass": r[3] or 0.0,
                     "rotation_variance": r[4] or 0.0,
                     "dc_sensitivity": r[5] or 0.0,
+                    # None, not 0.0: reproject() distinguishes "no clamp input
+                    # recorded" (fall back to the old unclamped arithmetic) from
+                    # "the cameo projection really was zero", and 0.0 would make
+                    # the clamp bind on every legacy row.
+                    "raw_total": r[6],
+                    "xp_cameo": r[7],
+                    "ep_w": r[8],
+                    "ep_term": r[9] or 0.0,
                 })
             return rows
         finally:

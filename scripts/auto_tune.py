@@ -27,16 +27,36 @@ WEIGHTS_PATH = os.path.join(ROOT, "weights.json")
 # rather than hardcoding a gameweek, because this figure moves whenever the
 # filter or the version boundary does.
 MIN_ROWS = 5000
-DAMPING = 0.05
+DAMPING = fpl_tools.CALIBRATION_DAMPING
 
-# Stage 8 repairs the calibration loop itself: the damping caps movement at
-# +/-0.5% per run (~53 runs to move a weight 30%, against a 38-gameweek season),
-# dc_sensitivity is written as a literal 0.0 so dixon_coles_decay's gradient is
-# identically zero, the surrogate does not match production, and a negative
-# prediction blows up the Poisson deviance term. Running coordinate descent
-# before those are fixed drifts the weights on noise, so the job refuses to
-# write unless explicitly enabled.
-ENABLED = os.environ.get("FPL_AUTOTUNE_ENABLED", "0") == "1"
+# The four repairs this gate was waiting on have landed (damping raised to 0.25
+# and the production value now under test, dc_sensitivity measured by forward
+# difference instead of written as a literal 0.0, the surrogate matched to
+# _player_xp_raw including the cameo clamp and the ep_next blend, and the
+# deviance term floored at PRED_FLOOR). The job is therefore live by default;
+# set FPL_AUTOTUNE_ENABLED=0 to hold it.
+ENABLED = os.environ.get("FPL_AUTOTUNE_ENABLED", "1") == "1"
+
+HOLDOUT_FRACTION = 0.25
+
+
+def _split(rows):
+    """Deterministic train/holdout split.
+
+    Strided rather than random so a rerun on the same archive reaches the same
+    verdict -- a tuner that writes different weights each time it is run is not
+    measuring anything. Striding by player order also avoids splitting on
+    gameweek, which would put a whole week's shared fixture conditions entirely
+    on one side.
+    """
+    step = int(1 / HOLDOUT_FRACTION)
+    holdout = rows[::step]
+    train = [r for i, r in enumerate(rows) if i % step != 0]
+    return train, holdout
+
+
+def _blended(metrics):
+    return metrics["rmse"] + 0.3 * metrics["deviance"]
 
 
 def main() -> None:
@@ -47,9 +67,7 @@ def main() -> None:
     print(f"Calibration rows for {fpl_tools.MODEL_VERSION}: {n} (threshold {MIN_ROWS})")
 
     if not ENABLED:
-        print("Auto-tune is disabled pending the Stage 8 calibration repairs "
-              "(damping, dc_sensitivity gradient, surrogate mismatch, loss floor). "
-              "Set FPL_AUTOTUNE_ENABLED=1 to override.")
+        print("Auto-tune is disabled (FPL_AUTOTUNE_ENABLED=0). No weights written.")
         return
 
     if n < MIN_ROWS:
@@ -57,20 +75,42 @@ def main() -> None:
         return
 
     weights = fpl_tools._load_weights()
-    before = fpl_tools.evaluate_calibration(rows, weights)
-    new_weights = fpl_tools.calibrate_weights(rows, weights, damping=DAMPING)
-    after = fpl_tools.evaluate_calibration(rows, new_weights)
+    train, holdout = _split(rows)
+
+    # Fit on train only. Fitting on everything and reporting the improvement on
+    # the same rows measures how well coordinate descent can memorise an
+    # archive, which it can always do, and says nothing about next Saturday.
+    new_weights = fpl_tools.calibrate_weights(train, weights, damping=DAMPING)
+
+    before_h = fpl_tools.evaluate_calibration(holdout, weights)
+    after_h = fpl_tools.evaluate_calibration(holdout, new_weights)
+    before_t = fpl_tools.evaluate_calibration(train, weights)
+    after_t = fpl_tools.evaluate_calibration(train, new_weights)
+
+    changed = {k: f"{weights.get(k)} -> {new_weights.get(k)}" for k in new_weights
+               if round(weights.get(k, 0.0), 6) != round(new_weights.get(k, 0.0), 6)}
+
+    print(f"Train    (n={after_t['n']}): RMSE {before_t['rmse']:.4f} -> {after_t['rmse']:.4f}, "
+          f"deviance {before_t['deviance']:.4f} -> {after_t['deviance']:.4f}")
+    print(f"Held out (n={after_h['n']}): RMSE {before_h['rmse']:.4f} -> {after_h['rmse']:.4f}, "
+          f"deviance {before_h['deviance']:.4f} -> {after_h['deviance']:.4f}")
+
+    if _blended(after_h) > _blended(before_h):
+        # The old job wrote unconditionally. Damped coordinate descent picks each
+        # coordinate's step against the metric as it stood at that coordinate, so
+        # the combined damped move is not guaranteed to be an improvement even on
+        # the training rows -- and the point of the holdout is to catch the case
+        # where it is an improvement on train and a regression everywhere else.
+        print(f"REJECTED: held-out metric worsened "
+              f"({_blended(before_h):.4f} -> {_blended(after_h):.4f}). "
+              f"weights.json unchanged. Proposed: {changed or 'none'}.")
+        return
 
     with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
         json.dump(new_weights, f, indent=2)
 
-    changed = {k: f"{weights.get(k)} -> {new_weights.get(k)}" for k in new_weights
-               if round(weights.get(k, 0.0), 6) != round(new_weights.get(k, 0.0), 6)}
-    print(
-        f"Calibration: n={n}, RMSE {before['rmse']:.4f} -> {after['rmse']:.4f}, "
-        f"deviance {before['deviance']:.4f} -> {after['deviance']:.4f}. "
-        f"Tuned: {changed or 'none'}."
-    )
+    print(f"Accepted: held-out metric {_blended(before_h):.4f} -> {_blended(after_h):.4f}. "
+          f"Tuned: {changed or 'none'}.")
 
 
 if __name__ == "__main__":

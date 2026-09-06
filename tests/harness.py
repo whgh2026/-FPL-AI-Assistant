@@ -29,6 +29,8 @@ _CACHE_RESET = {
     "_TEAM_PLAYED": lambda: None,
     "_TEAM_PLAYED_TS": float,
     "_WEIGHTS_CACHE": lambda: None,
+    "_WEIGHTS_STAMP": lambda: (0.0, 0.0),
+    "_DC_RAW": dict,
     "_EO_CACHE": dict,
     "_EO_CACHE_TS": float,
     "_LIVE_CACHE": dict,

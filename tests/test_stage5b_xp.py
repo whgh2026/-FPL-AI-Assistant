@@ -227,11 +227,20 @@ class DefconTest(unittest.TestCase):
 
 
 class ModelVersionTest(unittest.TestCase):
-    def test_third_and_final_bump(self):
-        """Stage 4 -> v2, Stage 2 -> v3, Stage 5b -> v4. Each stage that changes
-        what _player_xp returns must bump, or auto_tune fits across a
-        heterogeneous population under one label."""
-        self.assertEqual(fpl_tools.MODEL_VERSION, "v4-xp-overhaul")
+    def test_version_is_past_the_stage_5b_boundary(self):
+        """Stage 4 -> v2, Stage 2 -> v3, Stage 5b -> v4, Stage 8 -> v5. Each
+        stage that changes what _player_xp returns must bump, or auto_tune fits
+        across a heterogeneous population under one label.
+
+        Asserts the ordering rather than the literal: this test's concern is
+        that Stage 5b's EP_BLEND taper, clean sheets and DefCon put a boundary
+        in the archive, not what the current stamp happens to say.
+        """
+        import re
+        m = re.match(r"^v(\d+)-", fpl_tools.MODEL_VERSION)
+        self.assertIsNotNone(m, f"unversioned stamp {fpl_tools.MODEL_VERSION!r}")
+        self.assertGreaterEqual(int(m.group(1)), 4,
+                                "pre-Stage-5b rows would be fitted alongside post-fix ones")
 
 
 if __name__ == "__main__":

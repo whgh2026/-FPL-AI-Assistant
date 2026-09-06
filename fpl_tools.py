@@ -105,11 +105,18 @@ LAMBDA_MAX = 5.0
 
 # Stamp on every calibration row, so auto_tune only ever fits against a
 # homogeneous population of predictions. It must be bumped by ANY stage that
-# changes what _player_xp returns -- Stage 4 (this one), Stage 2 (strategy
-# terms leaving the forecast) and Stage 5b (EP_BLEND taper, clean sheets,
-# DefCon). One stamp spanning all three would mix materially different
-# predictions under a single label, which is exactly what versioning is for.
-MODEL_VERSION = "v4-xp-overhaul"
+# changes what _player_xp returns -- Stage 4 (Dixon-Coles centring and scale),
+# Stage 2 (strategy terms leaving the forecast), Stage 5b (EP_BLEND taper,
+# clean sheets, DefCon) and Stage 8 (team ratings no longer rounded to 2dp).
+# One stamp spanning several would mix materially different predictions under a
+# single label, which is exactly what versioning is for.
+#
+# The Stage 8 bump is small in effect -- max 0.005 points, 0.097% relative,
+# mean 0.0003 -- and the rule is deliberately applied without a size exemption:
+# the point of the stamp is that nobody has to adjudicate whether a given
+# change was "big enough". It costs nothing here, since the v4 archive has not
+# started accumulating yet.
+MODEL_VERSION = "v5-continuous-ratings"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -522,6 +529,21 @@ _TEAM_RATINGS_TS: float = 0.0
 _DC_RAW: Dict[str, Any] = {}
 
 
+def _clear_rating_caches() -> None:
+    """Drop the fitted Dixon-Coles ratings so the next call refits.
+
+    Needed by anything that changes dixon_coles_decay and wants the effect: the
+    fit is time-weighted by that parameter but cached for 300s, so a caller who
+    swaps the weight without clearing gets the OLD ratings back and measures a
+    derivative of exactly zero -- indistinguishable from "this parameter does
+    not matter".
+    """
+    global _TEAM_RATINGS_CACHE, _TEAM_RATINGS_TS, _DC_RAW
+    _TEAM_RATINGS_CACHE = None
+    _TEAM_RATINGS_TS = 0.0
+    _DC_RAW = {}
+
+
 def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
     """Continuous Dixon-Coles attack/defence ratings per team on a [1,5]-ish scale.
 
@@ -590,13 +612,25 @@ def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
         att = dc_blend * dc_att + (1.0 - dc_blend) * fpl_overall
         dfn = dc_blend * dc_def + (1.0 - dc_blend) * fpl_overall
         half = (gamma / 2.0) * scale
+        # Not rounded. These were round(_, 2), which is a DISPLAY concern that
+        # had leaked into the model: attacker xP runs through
+        # def_adj = 3.0 / opp_def, so quantising opp_def at 0.01 quantises every
+        # attacking projection with it, and two clubs of genuinely different
+        # strength collapse to an identical multiplier.
+        #
+        # Found via the dixon_coles_decay derivative: perturbing the decay moved
+        # the raw fit for all 20 clubs but the ROUNDED band for only 2, so every
+        # forward -- who has no clean-sheet or conceded term to carry the signal
+        # -- measured a sensitivity of exactly zero. The rounding was eating the
+        # gradient. Callers that want two decimals should round at the point of
+        # display; the UI already does.
         out[tid] = {
-            "att": round(att, 2),
-            "def": round(dfn, 2),
-            "att_home": round(min(5.0, max(1.0, att + half)), 2),
-            "att_away": round(min(5.0, max(1.0, att - half)), 2),
-            "def_home": round(min(5.0, max(1.0, dfn + half)), 2),
-            "def_away": round(min(5.0, max(1.0, dfn - half)), 2),
+            "att": att,
+            "def": dfn,
+            "att_home": min(5.0, max(1.0, att + half)),
+            "att_away": min(5.0, max(1.0, att - half)),
+            "def_home": min(5.0, max(1.0, dfn + half)),
+            "def_away": min(5.0, max(1.0, dfn - half)),
         }
     global _DC_RAW
     _DC_RAW = {"ratings": dc, "gamma": gamma, "mu": _mu, "rho": _rho}
@@ -1123,13 +1157,41 @@ def _defcon_expected_pts(p: Dict[str, Any], emin: float, pos_id: int) -> float:
 
 
 _WEIGHTS_CACHE: Optional[Dict[str, float]] = None
+_WEIGHTS_STAMP: Tuple[float, float] = (0.0, 0.0)   # (file mtime, load time)
+WEIGHTS_TTL_SECONDS = 300.0
+
+
+def _weights_path() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.json")
+
+
+def _weights_mtime() -> float:
+    try:
+        return os.path.getmtime(_weights_path())
+    except OSError:
+        return 0.0
 
 
 def _load_weights() -> Dict[str, float]:
-    """Load tunable weights from weights.json (defaulting to 1.0 on any miss)."""
-    global _WEIGHTS_CACHE
+    """Load tunable weights from weights.json (defaulting to 1.0 on any miss).
+
+    Cached, but not forever. The cache had no TTL and no mtime check, so a
+    long-running Railway process pinned the weights it read at boot: the weekly
+    auto-tune committed a new weights.json, the deploy picked it up, and the
+    already-running dyno carried on with the old numbers until something
+    happened to restart it. The calibration loop's output never reached the
+    live app.
+
+    Both checks are here on purpose. The mtime catches a redeploy that rewrites
+    the file in place; the TTL bounds how long a stale read can survive a clock
+    or filesystem that does not report mtime usefully.
+    """
+    global _WEIGHTS_CACHE, _WEIGHTS_STAMP
     if _WEIGHTS_CACHE is not None:
-        return _WEIGHTS_CACHE
+        mtime, loaded_at = _WEIGHTS_STAMP
+        if (_weights_mtime() == mtime
+                and (time.time() - loaded_at) < WEIGHTS_TTL_SECONDS):
+            return _WEIGHTS_CACHE
     defaults = {
         "global_xP_modifier": 1.0,
         "home_advantage": 1.0,
@@ -1157,8 +1219,7 @@ def _load_weights() -> Dict[str, float]:
     }
     weights = dict(defaults)
     try:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.json")
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(_weights_path(), "r", encoding="utf-8") as fh:
             data = json.load(fh)
         if isinstance(data, dict):
             for k in defaults:
@@ -1169,6 +1230,7 @@ def _load_weights() -> Dict[str, float]:
     except Exception:
         pass
     _WEIGHTS_CACHE = weights
+    _WEIGHTS_STAMP = (_weights_mtime(), time.time())
     return weights
 
 
@@ -1337,6 +1399,64 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
         xp = our_total
 
     return max(xp, 0.0), note
+
+
+def calibration_features(p: Dict[str, Any],
+                         fixture_lookup: Dict[int, List[Dict[str, Any]]],
+                         event: Optional[int] = None) -> Dict[str, float]:
+    """The inputs `reproject` needs to rebuild this player's projection.
+
+    Lives here rather than in the snapshot script deliberately. The surrogate's
+    whole job is to agree with production, so anything it needs is read out of
+    the production path, not reimplemented alongside it -- a copy in scripts/
+    would go quietly stale the next time _player_xp_raw changed, and the failure
+    would look like a calibration result rather than a bug.
+
+    `raw_total` is the projection BEFORE the tunable penalties and before the
+    ep_next blend. That distinction is the whole point: `base_pts` (what the
+    snapshot used to store) is _player_xp's output at neutral weights, which has
+    already been through the blend -- so anything reconstructing from it and
+    then applying the blend itself counts ep_next twice.
+
+    `ep_term` is the whole ep_next contribution (ep_w * ep_next * blend_frac),
+    stored pre-multiplied because none of its three factors is tunable: only the
+    (1 - ep_w) scaling on the tunable half matters to the descent.
+    """
+    zero = {"raw_total": 0.0, "xp_cameo": 0.0, "ep_w": 0.0, "ep_term": 0.0,
+            "cameo_mass": 0.0, "rotation_variance": 0.0}
+    status = p.get("status", "a")
+    if status in ("i", "s", "u", "n"):
+        return zero
+    pos_id = p.get("element_type")
+    if _to_float(p.get("minutes", 0)) <= 0 and (event is None or event > 1):
+        return zero
+
+    fixtures = fixture_lookup.get(p.get("team"), [])
+    target = _gw_fixtures(fixtures, event) if event is not None else fixtures[:1]
+    if not target:
+        return zero
+
+    p0, p_cameo, p_full = _minute_distribution(p, status)
+    xp_full = sum(_xp_for_fixture(p, f, 90.0, pos_id) for f in target)
+    xp_cameo = sum(_xp_for_fixture(p, f, 30.0, pos_id) for f in target)
+    raw_total = p_full * xp_full + p_cameo * xp_cameo
+
+    ep_next = _to_float(p.get("ep_next"))
+    if ep_next > 0:
+        minutes_played = _to_float(p.get("minutes"))
+        ep_w = max(0.0, min(EP_BLEND, EP_BLEND * (1.0 - minutes_played / EP_BLEND_FADE_MINUTES)))
+        blend_frac = p_full + (30.0 / 90.0) * p_cameo
+        ep_term = ep_w * ep_next * blend_frac
+    else:
+        ep_w, ep_term = 0.0, 0.0
+    return {
+        "raw_total": float(raw_total),
+        "xp_cameo": float(xp_cameo),
+        "ep_w": float(ep_w),
+        "ep_term": float(ep_term),
+        "cameo_mass": float(p_cameo),
+        "rotation_variance": float(p0 * (1.0 - p0) + p_cameo * (1.0 - p_cameo)),
+    }
 
 
 def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None) -> Tuple[float, str]:
@@ -3365,38 +3485,109 @@ def _squad_structural_health(squad, bank):
     return checks
 
 
-def evaluate_calibration(rows, weights):
-    """RMSE + count-data Poisson deviance of re-projected predictions vs actuals.
+PRED_FLOOR = 0.05      # a projection below this is not a real forecast
+CALIBRATION_DAMPING = 0.25
 
-    Re-projection: pred = gmod * (base_pts - autosub_ref*cameo_mass
-    - rotation_convexity*rotation_variance + (decay - default_decay)*dc_sensitivity).
+
+def reproject(row, weights):
+    """Re-run one stored prediction under a candidate set of weights.
+
+    This has to be _player_xp_raw's arithmetic exactly, or coordinate descent
+    optimises something the app does not compute. The previous surrogate was
+    wrong in two ways that pulled in the same direction:
+
+      * The cameo penalty is CLAMPED in production --
+        `p_cameo * max(0, autosub_ref - xp_cameo)` -- so once a player's cameo
+        projection exceeds autosub_ref the penalty is zero and its gradient with
+        it. The surrogate modelled it unclamped as `autosub_ref * cameo_mass`,
+        which is non-zero for every player with any cameo mass at all, so the
+        descent saw a gradient where production has none.
+      * Penalties are applied BEFORE the ep_next blend, so a unit change in a
+        penalty moves the final projection by only (1 - ep_w). The surrogate
+        assumed 1.0, over-attributing by up to 2x when ep_w was at its old flat
+        0.5. Stage 5b made ep_w per-player, so it now has to be stored per row.
+
+    Rows written before those columns existed fall back to the old behaviour
+    (unclamped, unblended, off base_pts) rather than being dropped -- with a
+    NULL xp_cameo the clamp cannot bind, which is exactly what the old surrogate
+    assumed.
     """
-    if not rows:
-        return {"rmse": 0.0, "deviance": 0.0, "n": 0}
     gmod = weights.get("global_xP_modifier", 1.0)
     autosub_ref = weights.get("autosub_ref", 1.8)
     rot = weights.get("rotation_convexity", 0.4)
     decay = weights.get("dixon_coles_decay", 0.03)
+
+    cameo = _to_float(row.get("cameo_mass", 0.0))
+    var = _to_float(row.get("rotation_variance", 0.0))
+    dc = _to_float(row.get("dc_sensitivity", 0.0))
+
+    # raw_total is pre-penalty AND pre-blend. base_pts is _player_xp at neutral
+    # weights, so it has already been through the blend -- reconstructing from
+    # it and then blending again applies ep_next twice. Legacy rows have only
+    # base_pts, and get the old unblended arithmetic to match.
+    raw = row.get("raw_total")
+    legacy = raw is None
+    base = _to_float(row.get("base_pts", row.get("predicted_xp", 0.0))) if legacy else _to_float(raw)
+
+    xp_cameo = row.get("xp_cameo")
+    if xp_cameo is None:
+        cameo_penalty = autosub_ref * cameo
+    else:
+        cameo_penalty = cameo * max(0.0, autosub_ref - _to_float(xp_cameo))
+
+    our_total = (base
+                 - cameo_penalty
+                 - rot * var
+                 + (decay - DIXON_COLES_DECAY_DEFAULT) * dc)
+
+    ep_w = row.get("ep_w")
+    if legacy or ep_w is None:
+        pred = gmod * our_total
+    else:
+        ep_w = max(0.0, min(1.0, _to_float(ep_w)))
+        pred = gmod * ((1.0 - ep_w) * our_total + _to_float(row.get("ep_term", 0.0)))
+    # Production clamps at zero (_player_xp_raw returns max(xp, 0.0)).
+    return max(pred, 0.0)
+
+
+def evaluate_calibration(rows, weights):
+    """RMSE + count-data Poisson deviance of re-projected predictions vs actuals."""
+    if not rows:
+        return {"rmse": 0.0, "deviance": 0.0, "n": 0}
     sq = 0.0
     dev = 0.0
     n = 0
     for r in rows:
-        base = _to_float(r.get("base_pts", r.get("predicted_xp", 0.0)))
-        cameo = _to_float(r.get("cameo_mass", 0.0))
-        var = _to_float(r.get("rotation_variance", 0.0))
-        dc = _to_float(r.get("dc_sensitivity", 0.0))
-        pred = gmod * (base - autosub_ref * cameo - rot * var + (decay - DIXON_COLES_DECAY_DEFAULT) * dc)
+        pred = reproject(r, weights)
         actual = _to_float(r.get("actual_points", 0.0))
         sq += (pred - actual) ** 2
-        dev += 2.0 * (pred - actual * math.log(max(pred, 1e-6)))
+        # The deviance term needs a MEANINGFUL floor, not an epsilon. At the old
+        # max(pred, 1e-6) a single zero-or-negative prediction against a 12-point
+        # haul contributed 2*(0 + 12*13.8) = +331 to a metric whose typical row
+        # is order 1 -- so one such row outweighed several hundred good ones and
+        # the descent chased it. FPL points are not Poisson anyway (bonus, cards,
+        # -1 per two conceded), so this term is a shape prior on count-like
+        # error, not a likelihood; flooring it costs nothing it was entitled to.
+        safe = max(pred, PRED_FLOOR)
+        dev += 2.0 * (safe - actual * math.log(safe))
         n += 1
     return {"rmse": round(math.sqrt(sq / n), 4), "deviance": round(dev / n, 4), "n": n}
 
 
-def calibrate_weights(rows, weights, damping=0.05):
+def calibrate_weights(rows, weights, damping=CALIBRATION_DAMPING):
     """Damped coordinate descent over the 4 targeted parameters.
 
     Minimises a blended RMSE + Poisson-deviance metric. Returns an updated dict.
+
+    On damping: the probe is +/-10%, so a run moves a weight by at most
+    `damping * 0.10` of its value. At the shipped 0.05 that was 0.5% per run --
+    about 53 weekly runs to move a weight 30%, against a 38-gameweek season, so
+    weights.json could not meaningfully change within a season no matter what
+    the data said. Worse, the convergence test passed damping=1.0, twenty times
+    the shipped value, so the production setting was never exercised. At 0.25 a
+    weight moves 2.5% per run and reaches 30% in about fourteen weeks, which is
+    responsive within a season while still needing a persistent signal rather
+    than one freak gameweek.
     """
     if not rows:
         return dict(weights)

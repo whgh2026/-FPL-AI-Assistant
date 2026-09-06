@@ -10,16 +10,43 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import psycopg2
 import fpl_tools
 import db
 
 
+# Forward-difference step for the dixon_coles_decay derivative. Large enough
+# that the perturbed fit is distinguishable from the base one, small enough to
+# stay in the linear regime the surrogate assumes.
+DC_PROBE_H = 0.01
+
+
 def _connect():
+    # Imported here, not at module scope: the projection logic in this file is
+    # worth testing without a database driver present, and a top-level import
+    # made the whole module unimportable in any environment without psycopg2.
+    import psycopg2
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
     return psycopg2.connect(url, connect_timeout=10)
+
+
+def _lookup_at_weights(weights, bootstrap):
+    """Rebuild the fixture lookup with a different set of weights in force.
+
+    The Dixon-Coles fit is time-weighted by dixon_coles_decay and cached, so a
+    perturbed decay needs both the weight swap and a cache clear -- otherwise
+    this silently returns the base ratings and the derivative comes out as
+    exactly 0.0, which is the very bug it exists to fix.
+    """
+    orig_cache = fpl_tools._WEIGHTS_CACHE
+    fpl_tools._WEIGHTS_CACHE = weights
+    try:
+        fpl_tools._clear_rating_caches()
+        return fpl_tools._build_fixture_lookup(bootstrap)
+    finally:
+        fpl_tools._WEIGHTS_CACHE = orig_cache
+        fpl_tools._clear_rating_caches()
 
 
 def main() -> None:
@@ -42,25 +69,47 @@ def main() -> None:
                     "rotation_convexity": 0.0, "dixon_coles_decay": fpl_tools.DIXON_COLES_DECAY_DEFAULT})
     _orig_cache = fpl_tools._WEIGHTS_CACHE
 
+    # dc_sensitivity used to be written as a literal 0.0 for every row. The
+    # calibration surrogate multiplies it by (decay - default_decay), so the
+    # gradient of dixon_coles_decay was identically zero and that parameter --
+    # one of the four the tuner is supposed to fit -- could never move, in
+    # either direction, no matter what the results said.
+    #
+    # It is a derivative, so measure it: re-project at a perturbed decay and
+    # take the forward difference. The decay changes the time-weighting of the
+    # Dixon-Coles fit, which is shared across all players, so the perturbed
+    # ratings are computed ONCE here rather than per player.
+    dc_probe = dict(neutral)
+    dc_probe["dixon_coles_decay"] = fpl_tools.DIXON_COLES_DECAY_DEFAULT + DC_PROBE_H
+    perturbed_lookup = _lookup_at_weights(dc_probe, bootstrap)
+
     rows = []
     for e in bootstrap.get("elements", []):
         pos = fpl_tools.POS_MAP.get(e.get("element_type"))
         if not pos:
             continue
         xp, _note = fpl_tools._player_xp(e, fixture_lookup, event=gw)
-        p0, pc, pf = fpl_tools._minute_distribution(e, e.get("status", "a"))
-        cameo_mass = pc
-        rotation_variance = p0 * (1.0 - p0) + pc * (1.0 - pc)
         minutes_floor = fpl_tools._expected_playing_fraction(e, e.get("status", "a"))
-        # Base projection at neutral parameters (independent of the tunable weights).
+
+        # Every feature the surrogate needs, read out of the production path so
+        # it cannot drift from it. raw_total is pre-penalty and pre-blend, which
+        # base_pts is not -- base_pts is _player_xp at neutral weights, already
+        # blended, so rebuilding from it and blending again double-counts
+        # ep_next. base_pts is still written for continuity with older rows.
         fpl_tools._WEIGHTS_CACHE = neutral
         try:
             base_xp, _ = fpl_tools._player_xp(e, fixture_lookup, event=gw)
+            feats = fpl_tools.calibration_features(e, fixture_lookup, event=gw)
+            probe = fpl_tools.calibration_features(e, perturbed_lookup, event=gw)
         finally:
             fpl_tools._WEIGHTS_CACHE = _orig_cache
+        dc_sensitivity = (probe["raw_total"] - feats["raw_total"]) / DC_PROBE_H
+
         rows.append((e["id"], gw, e.get("web_name", "?"), pos, teams_by_id.get(e["team"], "?"),
-                     float(xp), float(base_xp), cameo_mass, rotation_variance, 0.0, minutes_floor,
-                     fpl_tools.MODEL_VERSION))
+                     float(xp), float(base_xp), feats["cameo_mass"],
+                     feats["rotation_variance"], dc_sensitivity, minutes_floor,
+                     fpl_tools.MODEL_VERSION, feats["raw_total"],
+                     feats["xp_cameo"], feats["ep_w"], feats["ep_term"]))
 
     conn = _connect()
     try:
@@ -72,8 +121,8 @@ def main() -> None:
                 "INSERT INTO fpl_predictions "
                 "(player_id, gameweek, player_name, position, team, predicted_xp, "
                 "base_pts, cameo_mass, rotation_variance, dc_sensitivity, minutes_floor, "
-                "model_version) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "model_version, raw_total, xp_cameo, ep_w, ep_term) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 rows,
             )
         conn.commit()

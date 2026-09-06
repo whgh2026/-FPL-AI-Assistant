@@ -199,11 +199,21 @@ class ClubResolutionTest(unittest.TestCase):
 
 
 class ModelVersionTest(unittest.TestCase):
-    def test_version_is_stamped_and_current(self):
-        # Bumped by Stage 2 (strategy terms leaving the forecast). Stage 5b will
-        # bump it again; each stage that changes what _player_xp returns must,
-        # or auto_tune fits across a heterogeneous population under one label.
-        self.assertEqual(fpl_tools.MODEL_VERSION, "v4-xp-overhaul")
+    def test_version_is_stamped_and_past_the_stage_4_boundary(self):
+        """Asserts the ORDERING, not a literal.
+
+        Pinning the exact string here meant every later bump broke a Stage 4
+        test that has nothing to do with the change -- which trains people to
+        edit the assertion rather than think about it. What Stage 4 actually
+        needs is that rows fitted before its Dixon-Coles centring can never be
+        mixed with rows after it, and that is a "the version moved past v1"
+        claim.
+        """
+        import re
+        m = re.match(r"^v(\d+)-", fpl_tools.MODEL_VERSION)
+        self.assertIsNotNone(m, f"unversioned stamp {fpl_tools.MODEL_VERSION!r}")
+        self.assertGreaterEqual(int(m.group(1)), 2,
+                                "pre-Stage-4 rows would be fitted alongside post-fix ones")
 
     def test_weights_are_reset_to_neutral(self):
         """A global_xP_modifier fitted against the old biased scale would undo

@@ -35,11 +35,27 @@ class CalibrationTest(unittest.TestCase):
         self.assertAlmostEqual(r["rmse"], abs(pred - 5.0), places=3)
 
     def test_calibrate_converges(self):
+        """At the PRODUCTION damping, not damping=1.0.
+
+        This test used to pass damping=1.0 -- twenty times the shipped 0.05 --
+        so the setting that actually ran was never exercised, and the fact that
+        it moved a weight by only 0.5% per run went unnoticed for a season.
+        """
         base = 4.0
         rows = [{"base_pts": base, "cameo_mass": 0.0, "rotation_variance": 0.0,
                  "dc_sensitivity": 0.0, "actual_points": 1.4 * base} for _ in range(50)]
-        new = fpl_tools.calibrate_weights(rows, _weights(), damping=1.0)
+        new = fpl_tools.calibrate_weights(rows, _weights())
         self.assertGreater(new["global_xP_modifier"], 1.0)
+
+    def test_default_damping_reaches_a_target_within_a_season(self):
+        """The C14 defect, as a number. The probe is +/-10%, so one run moves a
+        weight by damping*10%. At 0.05 that is 0.5% per run and 1.005^n = 1.30
+        needs n = 53 weekly runs against a 38-gameweek season -- weights.json
+        could not meaningfully move within a season whatever the data said."""
+        per_run = fpl_tools.CALIBRATION_DAMPING * 0.10
+        runs = math.log(1.30) / math.log(1.0 + per_run)
+        self.assertLess(runs, 20,
+                        f"{runs:.0f} runs to move a weight 30%, against a 38-week season")
 
 
 class CvarTest(unittest.TestCase):
