@@ -183,3 +183,21 @@
 .wf-warn{margin-top:8px;font-size:0.78rem;color:var(--warn-fg);
          background:var(--warn-bg);border:1px solid var(--warn-line);
          border-radius:8px;padding:8px 10px;}
+
+/* Squad scorecard: how the squad is built, not what it scored. */
+.scorecard{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+           gap:10px;margin:4px 0 2px 0;}
+.sc-tile{background:var(--surface-2);border:1px solid var(--line);
+         border-radius:var(--r);padding:12px 14px;}
+.sc-label{font-size:0.74rem;color:var(--muted);font-weight:600;
+          letter-spacing:0.02em;margin-bottom:4px;}
+.sc-value{font-size:1.5rem;font-weight:800;color:var(--text);line-height:1.15;}
+.sc-of{font-size:0.95rem;font-weight:600;color:var(--muted-2);}
+.sc-sub{font-size:0.74rem;color:var(--muted-2);margin-top:3px;}
+.sc-takers{font-size:0.72rem;color:var(--muted);margin-top:3px;line-height:1.4;}
+
+/* Model Health: the scorecard the hero copy promises. */
+.mh-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;}
+.mh-bar{height:8px;border-radius:4px;background:var(--surface-2);
+        border:1px solid var(--line);overflow:hidden;margin-top:8px;}
+.mh-bar > div{height:100%;background:var(--pos-2);}

@@ -487,6 +487,52 @@ def count_checked_predictions(model_version=None):
         conn.close()
 
 
+def prediction_accuracy_by_gw(model_version=None, limit=12):
+    """Per-gameweek forecast accuracy, newest last. [] when unavailable.
+
+    The app claims a self-checking model, so the check has to be visible: this
+    is what the Model Health tab reads. RMSE says how far off the projections
+    were, bias says which way (positive = we over-projected), and corr() is the
+    Pearson correlation between projected and actual -- the number that says
+    whether the RANKING was right, which matters more for transfer advice than
+    the absolute level does.
+
+    Rows with no result yet are excluded, as are gameweeks with too few paired
+    rows for the statistics to mean anything.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    try:
+        where = "actual_points IS NOT NULL"
+        params = []
+        if model_version is not None:
+            where += " AND model_version = %s"
+            params.append(model_version)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT gameweek, count(*), "
+                "  sqrt(avg(power(predicted_xp - actual_points, 2))), "
+                "  avg(predicted_xp - actual_points), "
+                "  corr(predicted_xp, actual_points) "
+                f"FROM fpl_predictions WHERE {where} "
+                "GROUP BY gameweek HAVING count(*) >= 20 "
+                "ORDER BY gameweek DESC LIMIT %s", (*params, limit))
+            rows = [
+                {"gameweek": int(r[0]), "n": int(r[1]),
+                 "rmse": float(r[2]) if r[2] is not None else None,
+                 "bias": float(r[3]) if r[3] is not None else None,
+                 "corr": float(r[4]) if r[4] is not None else None}
+                for r in cur.fetchall()
+            ]
+        rows.reverse()
+        return rows
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
 def save_plan(manager_id, gameweek, plan):
     """Persist the multi-GW transfer schedule to the fpl_plans ledger."""
     try:

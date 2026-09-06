@@ -472,7 +472,7 @@ def _fdr_cell(ease) -> str:
 
 
 # ------------------------------------------------------------------
-# Insights Lab — Fixture Rotation Solver & Team Strength Index
+# Fixtures tab — rotation solver, team strength, fixture swings
 # ------------------------------------------------------------------
 def _team_ease_series(team_id, lookup, start, n: int = 6):
     """Continuous fixture-ease series (higher = easier) from Dixon-Coles ratings."""
@@ -1054,23 +1054,155 @@ def _transfer_pair_html(moves) -> str:
     return html
 
 
+NAILED_ON_FRACTION = 0.8      # 72+ expected minutes reads as a starter
+
+
+def _set_piece_note(element) -> str:
+    """Which dead balls a player is first choice for, from the bootstrap orders."""
+    if not element:
+        return ""
+    duties = []
+    if element.get("penalties_order") == 1:
+        duties.append("pens")
+    if element.get("direct_freekicks_order") == 1:
+        duties.append("free-kicks")
+    if element.get("corners_and_indirect_freekicks_order") == 1:
+        duties.append("corners")
+    return ", ".join(duties)
+
+
+def _squad_scorecard(starters, bench, players_by_id) -> dict:
+    """The four numbers that describe a squad's shape, not its scoreline.
+
+    Points tell you how good the XI is. These tell you whether the squad is
+    BUILT right -- whether the bench is dead money, whether the XI actually
+    starts, and who takes the dead balls. A 60-point XI resting on four
+    rotation risks and £22m of bench is a different proposition from the same
+    60 points on eleven nailed starters, and the old three-metric row
+    ("Final Starting XI xP / Final Bench xP / Final Squad xP") could not
+    distinguish them.
+    """
+    nailed, takers = 0, []
+    for p in starters:
+        el = players_by_id.get(p.get("player_id"))
+        if el:
+            try:
+                frac = fpl_tools._expected_playing_fraction(el, el.get("status", "a"))
+            except Exception:
+                frac = 0.0
+            if frac >= NAILED_ON_FRACTION:
+                nailed += 1
+            duty = _set_piece_note(el)
+            if duty:
+                takers.append((_web_name(p), duty))
+    return {
+        "xi_points": round(sum(p.get("xp", 0) for p in starters), 1),
+        "bench_cost": round(sum(p.get("price", 0) for p in bench), 1),
+        "nailed": nailed,
+        "of": len(starters),
+        "takers": takers,
+    }
+
+
+def _scorecard_html(card: dict, delta_xi=None) -> str:
+    """Four tiles, in the words a manager already uses (Part E)."""
+    bench = card["bench_cost"]
+    # £16m is the standard-gameweek bench budget the construction solves target.
+    bench_tone, bench_note = (
+        ("var(--pos-2)", "sensible") if bench <= 16.0 else
+        ("var(--warn-2)", "a bit rich") if bench <= 19.0 else
+        ("var(--neg-2)", "dead money")
+    )
+    nailed_tone = (
+        "var(--pos-2)" if card["nailed"] >= 9 else
+        "var(--warn-2)" if card["nailed"] >= 7 else "var(--neg-2)"
+    )
+    if card["takers"]:
+        takers = " · ".join(f"{n} ({d})" for n, d in card["takers"][:4])
+        takers_extra = f" +{len(card['takers']) - 4} more" if len(card["takers"]) > 4 else ""
+        takers_html = f'<div class="sc-takers">{takers}{takers_extra}</div>'
+        takers_val = str(len(card["takers"]))
+        takers_tone = "var(--pos-2)"
+    else:
+        takers_html = '<div class="sc-takers">Nobody in your XI is on dead balls.</div>'
+        takers_val = "0"
+        takers_tone = "var(--neg-2)"
+
+    delta = ""
+    if delta_xi:
+        tone = "var(--pos-2)" if delta_xi > 0 else "var(--neg-2)"
+        delta = f'<div class="sc-sub" style="color:{tone};">{delta_xi:+.1f} vs your original XI</div>'
+
+    return (
+        '<div class="scorecard">'
+        f'<div class="sc-tile"><div class="sc-label">Starting XI points</div>'
+        f'<div class="sc-value">{card["xi_points"]:.1f}</div>'
+        f'<div class="sc-sub">projected, this gameweek</div>{delta}</div>'
+        f'<div class="sc-tile"><div class="sc-label">Money on the bench</div>'
+        f'<div class="sc-value" style="color:{bench_tone};">£{bench:.1f}m</div>'
+        f'<div class="sc-sub">{bench_note}</div></div>'
+        f'<div class="sc-tile"><div class="sc-label">Who\'s nailed on</div>'
+        f'<div class="sc-value" style="color:{nailed_tone};">{card["nailed"]}<span class="sc-of">/{card["of"]}</span></div>'
+        f'<div class="sc-sub">expected to play the full 90</div></div>'
+        f'<div class="sc-tile"><div class="sc-label">Set-piece takers</div>'
+        f'<div class="sc-value" style="color:{takers_tone};">{takers_val}</div>'
+        f'{takers_html}</div>'
+        '</div>'
+    )
+
+
 # ------------------------------------------------------------------
 # Sidebar
 # ------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## ⚽ FPL Quant Manager")
-    st.caption("Your data-driven pre-deadline quant engine")
+    st.caption("Work out your best move before the deadline")
 
-    with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
+    # Strategy lives here, not buried in step 3.
+    #
+    # It used to render inside `if "override_analysis" in st.session_state`,
+    # i.e. only AFTER the user had already run the numbers -- so the setting
+    # that governs the entire objective was invisible until the work it governs
+    # had been done. In the sidebar it is always visible and always applies.
+    st.markdown("#### 🎯 How should we play it?")
+    risk_label = st.radio(
+        "Strategy",
+        ["Balanced", "Conservative", "Aggressive",
+         "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
+        index=0,
+        key="risk",
+        label_visibility="collapsed",
+        help="How big a gain we demand before pulling the trigger.",
+        captions=[
+            "Chase the most points. No thumb on the scale.",
+            "Play it safe. Own what your rivals own, and only move for a clear upgrade.",
+            "Go hunting. Back differentials and take a hit for a big enough gain.",
+            "Protect a lead. Mirror the players your rivals own so their good weeks can't hurt you.",
+            "Close a gap. Target players almost nobody else has.",
+        ],
+        on_change=clear_transfer_cache,
+    )
+
+    if risk_label in ("Conservative", "Rank Protecting (Shield)"):
+        st.text_input(
+            "Rival's team ID (optional)",
+            key="rival_id_input",
+            help="We'll shadow this rival's squad so their good weeks can't hurt you.",
+        )
+
+    st.markdown("---")
+
+    with st.expander("🧠 How it thinks", expanded=False):
         st.markdown(
-            "**Why 4 Gameweeks?**  \n"
-            "Proprietary dark arts. Planning 10 weeks ahead sounds great until Pep roulette, hamstring tweaks, and "
-            "pure vibes derail your season. The engine models a protected 4-week tactical horizon—just far enough to "
-            "target form and fixtures without walking into a trap.\n\n"
-            "**Transfer Friction:**  \n"
-            "Step away from the knee-jerk. Banked transfers win mini-leagues. The model slaps a strict mathematical "
-            "penalty on itchy trigger fingers; unless an incoming player is a decisive, undeniable upgrade, the "
-            "engine banks the transfer and lets your rivals burn their rank."
+            "**Why only four gameweeks?**  \n"
+            "Planning ten weeks ahead sounds clever right up until Pep roulette, a "
+            "hamstring, and pure vibes derail the lot. Four weeks is far enough to "
+            "catch a fixture swing and near enough to still be true.\n\n"
+            "**Why it so often says do nothing**  \n"
+            "Because a banked transfer is worth something and a marginal one isn't. "
+            "Every move has to clear a bar: the four points if you're taking a hit, "
+            "plus a margin for how uncertain the gain is. Under that bar, sitting on "
+            "your hands genuinely is the better play."
         )
 
     st.markdown("---")
@@ -1163,8 +1295,9 @@ st.markdown(
     '<b>🔁 It marks its own homework</b><br>'
     'Every Friday it saves what it predicted. Every Tuesday it checks that '
     'against what actually happened. Once enough checked predictions are banked, '
-    'it starts correcting itself — and you can watch the scorecard rather than '
-    'take our word for it.'
+    'it starts correcting itself — and the week-by-week record is on the '
+    '<b>Model Health</b> tab, so you can check our homework rather than take '
+    'our word for it.'
     f'{_calibration_status_html()}'
     '</div>',
     unsafe_allow_html=True,
@@ -1206,7 +1339,18 @@ def _gameweek_status_banner() -> str:
 
 # Main navigation
 # ------------------------------------------------------------------
-tab_planner, tab_insights, tab_radar = st.tabs(["🏟️ Quant Auto Transfer Planner", "🔬 Insights Lab", "📡 Player Radar & Market"])
+# Four tabs, named for what the reader wants rather than what the module does.
+# "Insights Lab" and "Player Radar & Market" told you nothing about which one
+# holds the fixture ticker. Model Health is new: the hero copy promises "you
+# can watch the scorecard rather than take our word for it", and until now
+# there was nowhere to watch it.
+#
+# The squad views stay inside My Plan rather than getting a tab of their own.
+# They are produced by the planner wizard -- a Squad tab would sit empty until
+# you had run a plan, then duplicate what the plan already shows, which is more
+# disjointed, not less.
+tab_planner, tab_fixtures, tab_players, tab_health = st.tabs(
+    ["🏟️ My Plan", "🗓️ Fixtures", "📡 Players", "🩺 Model Health"])
 
 with tab_planner:
 
@@ -1531,32 +1675,10 @@ with tab_planner:
             ov = st.session_state["override_analysis"]
             tr = ov["transfers"]
 
-            # Risk strategy selector — moved here so toggling the strategy
-            # immediately recalculates and refreshes the transfer recommendations.
-            st.markdown("#### 🎯 Select Your Strategy")
-            risk_label = st.radio(
-                "Strategy mode",
-                ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
-                index=0,
-                key="risk",
-                help="Tunes the transfer hurdle rate and competitive posture.",
-                captions=[
-                    "Standard transfer hurdle rate; risk-neutral EV maximisation.",
-                    "Phase 2 (GW26+): Blocker — shadows the template/rival to protect a lead (locks the consensus captain, penalises low-EO differentials).",
-                    "Phase 2 (GW26+): Divergence — hunts ceiling variance to close a deficit (low-EO differentials + club stacks).",
-                    "Alias for Conservative/Blocker: mirror template picks and protect rank.",
-                    "Alias for Aggressive/Divergence: target low-ownership differentials with high underlying metrics.",
-                ],
-                on_change=clear_transfer_cache,
-            )
-
-            # Mini-league rival team (Blocker mode only) — rendered conditionally.
-            if risk_label == "Conservative":
-                rival_manager_id = st.text_input(
-                    "Mini-League Rival Team ID (Optional)",
-                    key="rival_id_input",
-                    help="Blocker mode shadows this rival's squad to protect a lead.",
-                )
+            # Strategy and rival now live in the sidebar; resolve the rival here.
+            risk_label = st.session_state.get("risk", "Balanced")
+            if risk_label in ("Conservative", "Rank Protecting (Shield)"):
+                rival_manager_id = st.session_state.get("rival_id_input", "")
                 _rk = rival_manager_id.strip() if rival_manager_id else ""
                 if _rk != st.session_state.get("_rival_resolved", ""):
                     st.session_state["_rival_resolved"] = _rk
@@ -1722,59 +1844,6 @@ with tab_planner:
             except Exception:
                 pass
 
-            c_fast1, c_fast2 = st.columns(2)
-            with c_fast1:
-                accept_all = st.button("✅ Accept All Quant Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
-            with c_fast2:
-                fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
-            
-            if fast_hold:
-                with st.spinner("Generating Final Lineup with current squad…"):
-                    analysed_current = ov["analysed_squad"]
-                    lineup = fpl_tools.select_starting_xi(analysed_current)
-                    lineup["confirmed_chip"] = confirmed_chip
-                    try:
-                        log_decision(manager_id.strip(), GW_ID, "hold", 0.0,
-                                     hits=0, chip=confirmed_chip, transfers="HOLD")
-                    except Exception:
-                        pass
-                    st.session_state["manual_final"] = lineup
-                    st.rerun()
-    
-            if accept_all:
-                with st.spinner("Applying Quant transfers and generating final lineup…"):
-                    sold_ids = {m["out"]["id"] for m in moves}
-                    final_squad = [p for p in ov["analysed_squad"] if p["player_id"] not in sold_ids]
-                    for m in moves:
-                        final_squad.append({
-                            "player_id": m["in"]["id"],
-                            "name": m["in"]["name"],
-                            "team": m["in"]["team"],
-                            "team_id": m["in"]["team_id"],
-                            "position": m["in"]["position"],
-                            "price": m["in"]["price"],
-                            "xp": m["in"].get("xp_gw", m["in"]["xp"]),
-                            "status": m["in"]["status"],
-                            "is_captain": False,
-                            "on_yellow_card_tightrope": m["in"].get("on_yellow_card_tightrope", False),
-                        })
-                    lineup = fpl_tools.select_starting_xi(final_squad)
-                    lineup["confirmed_chip"] = confirmed_chip
-                    try:
-                        log_decision(
-                            manager_id.strip(), GW_ID, "accept",
-                            float(tr.get("net_gain", 0.0)),
-                            hits=int(tr.get("hits", 0)),
-                            chip=confirmed_chip,
-                            transfers="; ".join(f"{m['out']['name']}->{m['in']['name']}" for m in moves) or "HOLD",
-                        )
-                        if confirmed_chip and confirmed_chip != "None (Hold Chips)":
-                            save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
-                        save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
-                    except Exception:
-                        pass
-                    st.session_state["manual_final"] = lineup
-                    st.rerun()
 
 
 
@@ -1833,34 +1902,113 @@ with tab_planner:
                 except Exception:
                     st.caption("EO diagnostic unavailable.")
 
-            with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
+            with st.expander("💡 Why we're telling you to do this", expanded=False):
                 explainer_bullets = []
-    
+
                 # 1. Base logic (always true).
-                explainer_bullets.append("* **Expected Value Maximisation** — the solver identified these specific moves to maximise your net Expected Points (xP) over the horizon, adjusting for positional baseline metrics.")
-    
+                explainer_bullets.append(
+                    "* **We checked every legal 15 you could build this week.** "
+                    "This one scores highest over the next four gameweeks, once "
+                    "your budget, your free transfers and the three-per-club rule "
+                    "are all accounted for.")
+
                 hits_taken = int(tr.get("hits", 0))
-    
-                # 2. Hit amortisation (only if hits > 0).
+
+                # 2. Hits (only if hits > 0).
                 if hits_taken > 0:
-                    explainer_bullets.append(f"* **Hit amortisation** — the {-4 * hits_taken} point hit is mathematically justified. The engine calculates that these upgrades will recover the penalty points and clear the transfer-friction hurdle.")
-    
+                    explainer_bullets.append(
+                        f"* **The {-4 * hits_taken} points is worth paying.** These "
+                        "moves are projected to win that back and then some — "
+                        "otherwise we'd have told you to sit tight.")
+
                 # 3. Goalkeeper swaps (only if a GK is transferred in or out).
                 gk_involved_in_transfer = any(m["out"]["position"] == "GK" or m["in"]["position"] == "GK" for m in moves)
                 if gk_involved_in_transfer:
-                    explainer_bullets.append("* **Goalkeeper structuring** — the solver navigated the strict 2-GK squad rule, ensuring your premium/budget balance in goal remains optimal.")
-    
+                    explainer_bullets.append(
+                        "* **There's a keeper in this.** You must carry exactly two, "
+                        "so the swap keeps your money in the right places between "
+                        "the sticks.")
+
                 # 4. Late fitness gating (only if an outgoing player has a doubtful status).
                 flagged_player_transferred_out = any(m["out"].get("status", "Available") != "Available" for m in moves)
                 if flagged_player_transferred_out:
-                    explainer_bullets.append("* **Late fitness gating** — doubtful assets were ruthlessly penalised in the projections, prompting the solver to eject injury risks before the deadline.")
-    
+                    explainer_bullets.append(
+                        "* **You're shifting a fitness doubt.** Anyone carrying a flag "
+                        "gets marked down hard, because a player who doesn't start "
+                        "scores nothing at all.")
+
                 # 5. Banked transfer (only if 0 transfers were made).
                 if len(moves) == 0:
-                    explainer_bullets.append("* **Transfer Conservation** — the mathematically optimal move is no move. Rolling the transfer preserves structural flexibility and option value for next week.")
-    
+                    explainer_bullets.append(
+                        "* **Sit on your hands.** Nothing on the market is worth your "
+                        "transfer this week — bank it and you'll have two next week, "
+                        "which is worth more than a marginal move now.")
+
                 if explainer_bullets:
                     st.markdown("\n".join(explainer_bullets))
+
+            # Decide, having read the case. These buttons used to sit ABOVE the
+            # three reasoning panels, which asked the reader to commit their
+            # gameweek before showing them why -- the explanation only became
+            # visible once you had scrolled past the decision.
+            st.markdown("---")
+            c_fast1, c_fast2 = st.columns(2)
+            with c_fast1:
+                accept_all = st.button(
+                    "✅ Do it — make these moves", type="primary",
+                    use_container_width=True, key="btn_accept_all")
+            with c_fast2:
+                fast_hold = st.button(
+                    "⏭️ Leave it — keep this squad", type="secondary",
+                    use_container_width=True, key="btn_fast_hold")
+
+            if fast_hold:
+                with st.spinner("Generating Final Lineup with current squad…"):
+                    analysed_current = ov["analysed_squad"]
+                    lineup = fpl_tools.select_starting_xi(analysed_current)
+                    lineup["confirmed_chip"] = confirmed_chip
+                    try:
+                        log_decision(manager_id.strip(), GW_ID, "hold", 0.0,
+                                     hits=0, chip=confirmed_chip, transfers="HOLD")
+                    except Exception:
+                        pass
+                    st.session_state["manual_final"] = lineup
+                    st.rerun()
+    
+            if accept_all:
+                with st.spinner("Applying Quant transfers and generating final lineup…"):
+                    sold_ids = {m["out"]["id"] for m in moves}
+                    final_squad = [p for p in ov["analysed_squad"] if p["player_id"] not in sold_ids]
+                    for m in moves:
+                        final_squad.append({
+                            "player_id": m["in"]["id"],
+                            "name": m["in"]["name"],
+                            "team": m["in"]["team"],
+                            "team_id": m["in"]["team_id"],
+                            "position": m["in"]["position"],
+                            "price": m["in"]["price"],
+                            "xp": m["in"].get("xp_gw", m["in"]["xp"]),
+                            "status": m["in"]["status"],
+                            "is_captain": False,
+                            "on_yellow_card_tightrope": m["in"].get("on_yellow_card_tightrope", False),
+                        })
+                    lineup = fpl_tools.select_starting_xi(final_squad)
+                    lineup["confirmed_chip"] = confirmed_chip
+                    try:
+                        log_decision(
+                            manager_id.strip(), GW_ID, "accept",
+                            float(tr.get("net_gain", 0.0)),
+                            hits=int(tr.get("hits", 0)),
+                            chip=confirmed_chip,
+                            transfers="; ".join(f"{m['out']['name']}->{m['in']['name']}" for m in moves) or "HOLD",
+                        )
+                        if confirmed_chip and confirmed_chip != "None (Hold Chips)":
+                            save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
+                        save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
+                    except Exception:
+                        pass
+                    st.session_state["manual_final"] = lineup
+                    st.rerun()
     
             target_default_moves = len(moves)
             last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
@@ -2094,11 +2242,25 @@ with tab_planner:
             delta_be = be_xp - base_be
             delta_tot = tot_xp - base_tot
             
+            # Scorecard first: it says whether the squad is BUILT right. The
+            # points row underneath says what it is expected to score. The old
+            # layout showed only the second, so a squad could look healthy on
+            # points while resting on four rotation risks and £22m of bench.
+            _sc_ctx = _bootstrap_ctx() or {}
+            _sc = _squad_scorecard(xi["xi"], xi["bench"], _sc_ctx.get("players_by_id", {}))
+            _sc["xi_points"] = round(st_xp, 1)
+            st.markdown(
+                _card(_scorecard_html(_sc, delta_st if delta_st else None),
+                      "📋 How your squad stacks up"),
+                unsafe_allow_html=True,
+            )
+
             y1, y2, y3 = st.columns(3)
-            y1.metric("🛡️ Final Starting XI xP", f"{st_xp:.2f} xP", f"{delta_st:+.2f} xP" if delta_st != 0 else None)
-            y2.metric("🪑 Final Bench xP", f"{be_xp:.2f} xP", f"{delta_be:+.2f} xP" if delta_be != 0 else None)
-            y3.metric("📊 Final Squad xP", f"{tot_xp:.2f} xP", f"{delta_tot:+.2f} xP" if delta_tot != 0 else None)
-    
+            y1.metric("🛡️ Starting XI", f"{st_xp:.2f} pts", f"{delta_st:+.2f}" if delta_st != 0 else None)
+            y2.metric("🪑 Bench", f"{be_xp:.2f} pts", f"{delta_be:+.2f}" if delta_be != 0 else None)
+            y3.metric("📊 Whole squad", f"{tot_xp:.2f} pts", f"{delta_tot:+.2f}" if delta_tot != 0 else None)
+            st.caption("Projected points for this gameweek, against the squad you started with.")
+
             with st.expander("🛡️ How Your Starting XI, Captain & Bench Are Picked", expanded=False):
                 st.markdown(
                     "The line-up maximises projected points while **always respecting legal FPL formations** "
@@ -2256,8 +2418,8 @@ with tab_planner:
             else:
                 st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
 
-with tab_insights:
-    st.markdown("### 🔬 Insights Lab")
+with tab_fixtures:
+    st.markdown("### 🗓️ Fixtures & form")
     ctx = _bootstrap_ctx()
     if not ctx:
         st.info("Live FPL data could not be loaded. Check your connection and refresh.")
@@ -2339,8 +2501,8 @@ with tab_insights:
                 )
                 st.markdown(_card(html or '<div style="color:var(--muted-2);">No deteriorating fixtures.</div>', "🔴 Exit windows (attackers)"), unsafe_allow_html=True)
 
-with tab_radar:
-    st.markdown("### 📡 Player Radar & Market")
+with tab_players:
+    st.markdown("### 📡 Players & the market")
     risk = risk_label.lower()
 
     st.markdown("#### 📈 This week's ins and outs")
@@ -2439,7 +2601,114 @@ with tab_radar:
             html += "</div>"
             st.markdown(_card(html, "📈 Ranked by xP"), unsafe_allow_html=True)
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
-    
+
+
+# ------------------------------------------------------------------
+# Model Health -- marking our own homework, in public
+# ------------------------------------------------------------------
+with tab_health:
+    st.markdown("### 🩺 How well is the model actually doing?")
+    st.caption(
+        "Every Friday we save what we predicted. Every Tuesday we check it "
+        "against what happened. This page is that record — including the weeks "
+        "we got it wrong."
+    )
+
+    _mh_target = 5000
+    try:
+        import db as _mh_db
+        _mh_banked = _mh_db.count_checked_predictions(fpl_tools.MODEL_VERSION)
+        _mh_rows = _mh_db.prediction_accuracy_by_gw(fpl_tools.MODEL_VERSION)
+    except Exception:
+        _mh_banked, _mh_rows = None, []
+
+    if _mh_banked is None:
+        st.warning(
+            "Can't reach the results database, so there's no scorecard to show. "
+            "The projections on the other tabs are unaffected — they don't need it."
+        )
+    else:
+        pct = min(100, int(100 * _mh_banked / _mh_target))
+        st.markdown(
+            _card(
+                '<div class="mh-grid">'
+                f'<div class="sc-tile"><div class="sc-label">Predictions checked</div>'
+                f'<div class="sc-value">{_mh_banked:,}</div>'
+                f'<div class="sc-sub">against real results</div></div>'
+                f'<div class="sc-tile"><div class="sc-label">Self-correction starts at</div>'
+                f'<div class="sc-value">{_mh_target:,}</div>'
+                f'<div class="mh-bar"><div style="width:{pct}%;"></div></div>'
+                f'<div class="sc-sub">{pct}% of the way there</div></div>'
+                f'<div class="sc-tile"><div class="sc-label">Model in use</div>'
+                f'<div class="sc-value" style="font-size:1.05rem;">{fpl_tools.MODEL_VERSION}</div>'
+                f'<div class="sc-sub">the count restarts whenever this changes</div></div>'
+                '</div>',
+                "📦 Where we're up to",
+            ),
+            unsafe_allow_html=True,
+        )
+        if _mh_banked < _mh_target:
+            st.info(
+                "**Not self-correcting yet — and we're not going to pretend "
+                "otherwise.** The model tunes itself only once there's enough "
+                "checked history to tune against; fitting to a few hundred rows "
+                "would chase noise, not signal. Until then the projections run "
+                "on the model as built."
+            )
+
+    if _mh_rows:
+        _hdr = (
+            '<div class="wf-row" style="font-weight:700;color:var(--text);">'
+            '<span>Gameweek</span><span style="min-width:70px;text-align:right;">How far off</span>'
+            '<span style="min-width:80px;text-align:right;">Over/under</span>'
+            '<span style="min-width:80px;text-align:right;">Right order</span></div>'
+        )
+        _body = ""
+        for r in _mh_rows:
+            rmse = f'{r["rmse"]:.2f}' if r["rmse"] is not None else "—"
+            if r["bias"] is None:
+                bias, bias_tone = "—", "var(--muted-2)"
+            else:
+                # Positive bias means we projected more than they scored.
+                bias = f'{r["bias"]:+.2f}'
+                bias_tone = "var(--neg-2)" if abs(r["bias"]) > 0.5 else "var(--muted)"
+            if r["corr"] is None:
+                corr, corr_tone = "—", "var(--muted-2)"
+            else:
+                corr = f'{r["corr"]:.2f}'
+                corr_tone = "var(--pos-2)" if r["corr"] >= 0.4 else "var(--warn-2)"
+            _body += (
+                f'<div class="wf-row"><span>GW{r["gameweek"]} '
+                f'<span class="tc-meta">({r["n"]:,} players)</span></span>'
+                f'<span style="min-width:70px;text-align:right;">{rmse}</span>'
+                f'<span style="min-width:80px;text-align:right;color:{bias_tone};">{bias}</span>'
+                f'<span style="min-width:80px;text-align:right;color:{corr_tone};">{corr}</span></div>'
+            )
+        st.markdown(_card(_hdr + _body, "📈 Week by week"), unsafe_allow_html=True)
+        st.markdown(
+            '<div class="note"><b>How far off</b> — average miss, in points. Lower is better. '
+            '<b>Over/under</b> — which way we lean; positive means we projected more than '
+            'they scored. <b>Right order</b> — did the players we rated highest actually '
+            'score highest? That one matters most: transfers are a ranking decision, not '
+            'a forecast of the exact score.</div>',
+            unsafe_allow_html=True,
+        )
+    elif _mh_banked:
+        st.caption(
+            "No gameweek has enough checked rows yet to report on. Needs at "
+            "least 20 paired predictions in a week before the numbers mean anything."
+        )
+
+    with st.expander("🔧 What actually changes when it self-corrects", expanded=False):
+        st.markdown(
+            "It doesn't rewrite the model. It nudges a handful of dials — how much "
+            "weight to put on a player's recent form, how harshly to treat rotation "
+            "risk, how far ahead fixture difficulty should count — and only in small "
+            "steps, so one freak gameweek can't drag it around.\n\n"
+            "Everything the model does is visible on the other tabs before any of "
+            "this kicks in. The self-correction makes it sharper; it isn't what "
+            "makes it work."
+        )
 
 
 # ------------------------------------------------------------------
