@@ -2,6 +2,7 @@ import gzip
 import math
 import os
 import json
+import sys
 
 try:
     import streamlit as st
@@ -54,8 +55,31 @@ def last_db_error():
     could only ever say "unavailable". "No DATABASE_URL configured" and "the
     database refused the connection" need different responses from whoever is
     reading, and one of them is a five-second fix.
+
+    Also records a QUERY failure, not just a connection one. get_db_connection
+    itself was fine -- it already distinguished driver/config/connect -- but
+    every caller that connects successfully and then has its query fail was
+    swallowing that exception in a bare `except Exception: return None`,
+    overwriting nothing here because the connection HAD succeeded. So a missing
+    table (migrations never ran on a fresh deploy) or a dead pooled connection
+    (Supabase's free tier pauses an idle project; the first query after that
+    gets a closed socket) looked identical to "never configured" -- the UI's
+    generic fallback message is exactly that gap.
     """
     return _LAST_DB_ERROR
+
+
+def _log_db_error(kind, exc):
+    """Record AND print a failure, so it survives past this process's memory.
+
+    Railway captures stdout/stderr, so a plain print is the whole fix for "we
+    can't see why it's failing in the logs" -- no logging config, no handler
+    setup, nothing that can itself be silently misconfigured.
+    """
+    global _LAST_DB_ERROR
+    detail = str(exc) or exc.__class__.__name__
+    _LAST_DB_ERROR = (kind, detail)
+    print(f"[db] {kind} failed: {detail}", file=sys.stderr, flush=True)
 
 
 def _database_url():
@@ -143,21 +167,21 @@ def get_db_connection():
     """
     global _LAST_DB_ERROR, _POOL
     if not _PSYCOPG2:
-        _LAST_DB_ERROR = ("driver", "psycopg2 is not installed")
+        _log_db_error("driver", "psycopg2 is not installed")
         return None
     if not _database_url():
-        _LAST_DB_ERROR = ("config", "DATABASE_URL is not set")
+        _log_db_error("config", "DATABASE_URL is not set")
         return None
     try:
         pool = _get_pool()
         if pool is None:
-            _LAST_DB_ERROR = ("config", "DATABASE_URL is not set")
+            _log_db_error("config", "DATABASE_URL is not set")
             return None
         conn = _PooledConnection(pool.getconn(), pool)
         _LAST_DB_ERROR = None
         return conn
     except Exception as exc:
-        _LAST_DB_ERROR = ("connect", str(exc) or exc.__class__.__name__)
+        _log_db_error("connect", exc)
         # A pool that cannot hand out connections is not worth keeping: drop it
         # so the next attempt rebuilds rather than reusing a broken one.
         _POOL = None
@@ -604,8 +628,17 @@ def count_checked_predictions(model_version=None):
                             "WHERE actual_points IS NOT NULL AND model_version = %s",
                             (model_version,))
             row = cur.fetchone()
+        global _LAST_DB_ERROR
+        _LAST_DB_ERROR = None      # a prior failure is now stale; don't haunt the UI
         return int(row[0]) if row else 0
-    except Exception:
+    except Exception as exc:
+        # This is the swallow that produced the Model Health tab's generic
+        # "couldn't be reached" message: get_db_connection had ALREADY
+        # succeeded (it clears _LAST_DB_ERROR on success), so a query failure
+        # here -- missing table because migrations never ran, a dead pooled
+        # connection from a Supabase idle-pause, a permissions error -- looked
+        # identical to "never configured" until this was logged.
+        _log_db_error("query", exc)
         return None
     finally:
         conn.close()
@@ -650,8 +683,11 @@ def prediction_accuracy_by_gw(model_version=None, limit=12):
                 for r in cur.fetchall()
             ]
         rows.reverse()
+        global _LAST_DB_ERROR
+        _LAST_DB_ERROR = None      # a prior failure is now stale; don't haunt the UI
         return rows
-    except Exception:
+    except Exception as exc:
+        _log_db_error("query", exc)
         return []
     finally:
         conn.close()

@@ -231,8 +231,113 @@ class DatabaseResilienceTest(unittest.TestCase):
         src = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
         self.assertIn("last_db_error", src,
                       "the UI still reports an unexplained 'unavailable'")
-        for kind in ("config", "driver", "connect"):
+        for kind in ("config", "driver", "connect", "query"):
             self.assertIn(f'"{kind}"', src)
+
+    def test_a_query_failure_after_a_successful_connect_is_not_swallowed(self):
+        """The actual bug report this class exists for: get_db_connection was
+        already well-instrumented (config/driver/connect), so it was never the
+        problem. count_checked_predictions and prediction_accuracy_by_gw
+        connected successfully -- which clears _LAST_DB_ERROR -- and then had
+        their OWN query fail in a bare `except Exception: return None`,
+        discarding the real reason (missing table because migrations never ran,
+        a dead pooled connection from a Supabase idle-pause) and leaving
+        last_db_error() reporting the stale 'None' from the successful connect.
+        The Model Health tab then fell through to its generic fallback message
+        with nothing in the logs to explain why."""
+        class FakeCursor:
+            def execute(self, *a, **k):
+                raise Exception('relation "fpl_predictions" does not exist')
+            def fetchone(self):
+                return None
+            def fetchall(self):
+                return []
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class FakeConn:
+            def cursor(self):
+                return FakeCursor()
+            def close(self):
+                pass
+
+        saved_get_conn = db.get_db_connection
+        db.get_db_connection = lambda: FakeConn()
+        db._LAST_DB_ERROR = None       # a prior connection succeeded
+        try:
+            self.assertIsNone(db.count_checked_predictions("v7"))
+            kind, detail = db.last_db_error()
+            self.assertEqual(kind, "query",
+                             "the query failure was not recorded -- it fell "
+                             "back to the same 'unknown' bucket as no attempt "
+                             "having been made at all")
+            self.assertIn("fpl_predictions", detail)
+        finally:
+            db.get_db_connection = saved_get_conn
+            db._LAST_DB_ERROR = None
+
+    def test_a_query_failure_is_printed_for_the_railway_logs(self):
+        """Recording it in _LAST_DB_ERROR fixes the UI; printing it is what
+        makes it visible without redeploying with a debugger attached."""
+        import io
+        class FakeCursor:
+            def execute(self, *a, **k):
+                raise Exception("permission denied for table fpl_predictions")
+            def fetchall(self):
+                return []
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class FakeConn:
+            def cursor(self):
+                return FakeCursor()
+            def close(self):
+                pass
+
+        saved_get_conn = db.get_db_connection
+        db.get_db_connection = lambda: FakeConn()
+        captured = io.StringIO()
+        saved_stderr = sys.stderr
+        sys.stderr = captured
+        try:
+            db.prediction_accuracy_by_gw("v7")
+        finally:
+            sys.stderr = saved_stderr
+            db.get_db_connection = saved_get_conn
+            db._LAST_DB_ERROR = None
+        self.assertIn("permission denied", captured.getvalue())
+
+    def test_a_successful_query_clears_any_stale_error(self):
+        """A transient failure must not haunt the tab forever after the
+        database recovers."""
+        class OkCursor:
+            def execute(self, *a, **k):
+                pass
+            def fetchone(self):
+                return (42,)
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class OkConn:
+            def cursor(self):
+                return OkCursor()
+            def close(self):
+                pass
+
+        saved_get_conn = db.get_db_connection
+        db.get_db_connection = lambda: OkConn()
+        db._LAST_DB_ERROR = ("query", "a previous failure")
+        try:
+            self.assertEqual(db.count_checked_predictions("v7"), 42)
+        finally:
+            db.get_db_connection = saved_get_conn
+            db._LAST_DB_ERROR = None
 
 
 if __name__ == "__main__":

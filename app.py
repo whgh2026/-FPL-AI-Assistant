@@ -2636,6 +2636,10 @@ with tab_health:
                       "(`DATABASE_URL` isn't set).",
             "driver": "The database driver isn't installed in this deployment.",
             "connect": "The results database refused the connection or timed out.",
+            "query": "Connected, but the query itself failed — most likely the "
+                     "`fpl_predictions` table or its columns don't exist yet "
+                     "(migrations haven't run), or the connection was dropped "
+                     "mid-query.",
         }.get(_kind, "The results database couldn't be reached.")
         st.warning(
             f"**No scorecard to show.** {_why}\n\n"
