@@ -32,6 +32,9 @@
   --neg-2:     #EF4444;
   --neg-soft:  #FDA4AF;
   --warn:      #FBBF24;
+  /* Text on a saturated position chip. A literal #fff was the last hardcoded
+     hex outside this block, which is the one thing the Stage 7 gate forbids. */
+  --on-chip:   #FFFFFF;
   /* Status tints: success / danger / warning / info surfaces and their
      foregrounds. Previously 19 loose hex literals doing semantic work. */
   --pos-bg:    #0F2B20;  --pos-bg-2:  #113824;  --pos-bg-3: #0B2418;
@@ -60,7 +63,7 @@
 .section-label {text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.7rem; color: var(--pos); margin-bottom: 10px;}
 .grid {display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 10px;}
 .pc {border: 1px solid var(--text); border-radius: 12px; padding: 12px 13px; background: var(--surface-2); border-color: var(--line);}
-.pc .pos {display: inline-block; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.05em; padding: 2px 7px; border-radius: 5px; color: #fff;}
+.pc .pos {display: inline-block; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.05em; padding: 2px 7px; border-radius: 5px; color: var(--on-chip);}
 .pc .nm {font-weight: 700; font-size: 0.92rem; margin: 6px 0 1px 0; color: var(--text);}
 .pc .meta {color: var(--muted); font-size: 0.75rem;}
 .bar {height: 5px; background: var(--line); border-radius: 3px; margin: 8px 0 4px 0; overflow: hidden;}

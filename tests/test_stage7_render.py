@@ -14,6 +14,7 @@ outage rendered as confident advice.
 """
 
 import os
+import re
 import subprocess
 import sys
 import unittest
@@ -169,6 +170,108 @@ class InformationArchitectureTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          f"UI probes failed:\n{r.stdout}\n{r.stderr[-2000:]}")
         self.assertIn("all probes passed", r.stdout)
+
+
+class PerformanceTest(unittest.TestCase):
+    """C33/C34. Nothing here changes an answer; they change how many times the
+    app pays to compute the same one."""
+
+    def test_fixture_lookup_is_memoised(self):
+        """Called from 50+ sites, and each call re-walked and re-sorted every
+        fixture, refetched the odds and re-read the ratings."""
+        import fpl_tools
+        from tests import harness
+        with harness.synthetic_world():
+            bootstrap, _ = harness.load_synthetic()
+            first = fpl_tools._build_fixture_lookup(bootstrap)
+            self.assertIs(fpl_tools._build_fixture_lookup(bootstrap), first,
+                          "the lookup is rebuilt on every call")
+
+    def test_clearing_the_ratings_also_clears_the_lookup(self):
+        """The lookup embeds the ratings, so a stale lookup would serve the old
+        fit through a different door."""
+        import fpl_tools
+        from tests import harness
+        with harness.synthetic_world():
+            bootstrap, _ = harness.load_synthetic()
+            first = fpl_tools._build_fixture_lookup(bootstrap)
+            fpl_tools._clear_rating_caches()
+            self.assertIsNot(fpl_tools._build_fixture_lookup(bootstrap), first)
+
+    def test_manager_endpoints_go_through_the_cache(self):
+        """score_my_squad walked back up to 38 gameweeks looking for picks, one
+        uncached request each -- and that slow path was the COMMON one, since it
+        only triggers for a manager who has not set a team yet. get_free_transfers
+        made three uncached calls per invocation, on every rerun."""
+        src = open(os.path.join(ROOT, "fpl_tools.py"), encoding="utf-8").read()
+        for fn in ("def score_my_squad", "def get_free_transfers"):
+            start = src.index(fn)
+            body = src[start:start + 2600]
+            self.assertNotIn("requests.get(f\"{BASE_URL}/entry/", body,
+                             f"{fn} still makes an uncached manager request")
+
+    def test_the_picks_walk_is_bounded_by_the_managers_first_season(self):
+        src = open(os.path.join(ROOT, "fpl_tools.py"), encoding="utf-8").read()
+        start = src.index("def score_my_squad")
+        body = src[start:start + 2600]
+        self.assertIn("floor_gw", body,
+                      "the picks walk still runs to gameweek 1 unconditionally")
+
+
+class StructuralHealthCopyTest(unittest.TestCase):
+    """Part E. The expander header was renamed in the copy pass but the four
+    labels inside it were not, so the panel opened onto the jargon it was
+    supposed to have replaced."""
+
+    def test_labels_are_in_plain_english(self):
+        """Scans only the strings the READER sees. The docstring and the
+        numbered comments still use the internal names, which is right: they
+        describe the branch to whoever maintains it."""
+        src = open(os.path.join(ROOT, "fpl_tools.py"), encoding="utf-8").read()
+        start = src.index("def _squad_structural_health")
+        body = src[start:src.index("return checks", start)]
+        shown = "\n".join(
+            ln for ln in body.splitlines()
+            if not ln.lstrip().startswith("#")
+            and ('"label"' in ln or '"detail"' in ln or ln.lstrip().startswith(
+                ('f"', '"', "f'", "'", "+ ", "if ", "else")))
+        )
+        for jargon in ("Stranded bench capital", "Enabler efficiency",
+                       "Formation optionality", "Price-point pivot liquidity",
+                       "Deadlock:"):
+            self.assertNotIn(jargon, shown, f"{jargon!r} is still shown to the reader")
+
+    def test_checks_carry_a_stable_key_for_lookup(self):
+        """Copy must never be an identifier. Matching on the label is what let a
+        wording change break unrelated logic."""
+        import fpl_tools
+        from tests import harness
+        with harness.synthetic_world():
+            bootstrap, _ = harness.load_synthetic()
+            squad = harness.build_squad(bootstrap, "balanced")
+            checks = fpl_tools._squad_structural_health(
+                harness.squad_as_manager_input(bootstrap, squad), 1.0)
+            keys = {c.get("key") for c in checks}
+            self.assertEqual(
+                keys, {"bench_capital", "enabler_efficiency",
+                       "formation_optionality", "pivot_liquidity"})
+            for c in checks:
+                self.assertTrue(c.get("label"), "a check has no display label")
+
+
+class StylesheetTest(unittest.TestCase):
+    def test_no_hardcoded_hex_outside_root(self):
+        """The Stage 7 gate. One #fff had survived on .pc .pos."""
+        path = os.path.join(ROOT, "static", "app.css")
+        offenders, in_root = [], False
+        for n, line in enumerate(open(path, encoding="utf-8"), 1):
+            if line.startswith(":root"):
+                in_root = True
+            elif in_root and line.startswith("}"):
+                in_root = False
+            elif not in_root and re.search(r"#[0-9a-fA-F]{3,8}\b", line):
+                offenders.append(f"{n}: {line.strip()}")
+        self.assertEqual(offenders, [], "hardcoded hex outside :root")
 
 
 class ModelHealthDataTest(unittest.TestCase):

@@ -539,9 +539,15 @@ def _clear_rating_caches() -> None:
     not matter".
     """
     global _TEAM_RATINGS_CACHE, _TEAM_RATINGS_TS, _DC_RAW
+    global _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS
     _TEAM_RATINGS_CACHE = None
     _TEAM_RATINGS_TS = 0.0
     _DC_RAW = {}
+    # The lookup embeds the ratings, so leaving it behind would serve the old
+    # fit through a different door -- exactly the failure this function exists
+    # to prevent.
+    _FIXTURE_LOOKUP_CACHE = None
+    _FIXTURE_LOOKUP_TS = 0.0
 
 
 def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
@@ -869,7 +875,30 @@ def _fixture_lambdas(home_id: int, away_id: int) -> Tuple[float, float]:
             min(LAMBDA_MAX, max(LAMBDA_MIN, lam_a)))
 
 
+_FIXTURE_LOOKUP_CACHE: Optional[Dict[int, List[Dict[str, Any]]]] = None
+_FIXTURE_LOOKUP_TS: float = 0.0
+FIXTURE_LOOKUP_TTL_SECONDS = 300.0
+
+
 def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[int, List[Dict[str, Any]]]:
+    """Per-team fixture lists, decorated with ratings, lambdas and odds.
+
+    Memoised. This is called from more than fifty sites -- score_my_squad,
+    rank_players_by_xp, the swing scores, every transfer solve -- and each call
+    re-walked and re-sorted the whole fixture list, refetched the odds and
+    re-read the ratings. A single page render did that work repeatedly for a
+    result that cannot change between calls.
+
+    The TTL matches the ratings cache, so the two expire together rather than
+    the lookup pinning ratings that have already moved on. _clear_rating_caches
+    drops this too, for the same reason: anything that changes the fit has to
+    invalidate what was built on top of it.
+    """
+    global _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS
+    if (_FIXTURE_LOOKUP_CACHE is not None
+            and (time.time() - _FIXTURE_LOOKUP_TS) < FIXTURE_LOOKUP_TTL_SECONDS):
+        return _FIXTURE_LOOKUP_CACHE
+
     if bootstrap is None:
         bootstrap = _get_bootstrap()
     teams = {t["id"]: t for t in bootstrap.get("teams", [])}
@@ -924,6 +953,8 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
 
     for t in lookup:
         lookup[t].sort(key=lambda x: x["event"] if x["event"] is not None else 999)
+    _FIXTURE_LOOKUP_CACHE = lookup
+    _FIXTURE_LOOKUP_TS = time.time()
     return lookup
 
 
@@ -1552,13 +1583,15 @@ def get_upcoming_gameweek() -> Dict[str, Any]:
 def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
     manager_id = _clean_manager_id(manager_id)
     try:
-        entry = requests.get(f"{BASE_URL}/entry/{manager_id}/", timeout=10).json()
+        # Three uncached round trips per call, and this is called on every
+        # rerun. _cached_json already existed; these simply never used it.
+        entry = _cached_json(f"{BASE_URL}/entry/{manager_id}/")
         started_event = int(entry.get("started_event") or 1)
         if target_gw is None:
             target_gw = _next_gameweek(_get_bootstrap())
 
-        history = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10).json()
-        transfers = requests.get(f"{BASE_URL}/entry/{manager_id}/transfers/", timeout=10).json()
+        history = _cached_json(f"{BASE_URL}/entry/{manager_id}/history/")
+        transfers = _cached_json(f"{BASE_URL}/entry/{manager_id}/transfers/")
 
         transfers_per_event: Dict[int, int] = {}
         for t in transfers:
@@ -2137,14 +2170,27 @@ def score_my_squad(manager_id: str, gw: int, risk: str = "balanced") -> Dict[str
     teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
     fixture_lookup = _build_fixture_lookup(bootstrap)
 
+    # Walk BACK from the requested gameweek to find the manager's most recent
+    # picks. A manager with no picks for the current gameweek used to trigger up
+    # to 38 sequential uncached HTTP round trips -- the exact case this loop
+    # exists to serve, so the slow path was the common one for anyone who had
+    # not yet set a team. Two changes: the manager's first season entry bounds
+    # the walk (there are no picks before it), and each probe is cached, so a
+    # rerun costs nothing.
     picks_data = None
     picks_gw = None
-    for attempt in range(gw, 0, -1):
-        resp = requests.get(f"{BASE_URL}/entry/{manager_id}/event/{attempt}/picks/", timeout=10)
-        if resp.status_code == 200:
-            picks_data = resp.json()
+    try:
+        entry = _cached_json(f"{BASE_URL}/entry/{manager_id}/")
+        floor_gw = max(1, int(entry.get("started_event") or 1))
+    except Exception:
+        floor_gw = 1
+    for attempt in range(gw, floor_gw - 1, -1):
+        try:
+            picks_data = _cached_json(f"{BASE_URL}/entry/{manager_id}/event/{attempt}/picks/")
             picks_gw = attempt
             break
+        except Exception:
+            continue           # no picks for that gameweek; try the one before
     if picks_data is None:
         return {"error": f"Could not fetch squad for Manager ID {manager_id}."}
 
@@ -3405,6 +3451,10 @@ def _fixture_swing_scores(fixture_lookup, start_event, n=6):
 _NON_PLAYING_NOTES = ("Injured", "Suspended", "Unavailable", "No minutes", "OUT", "Blank")
 
 
+# Each check carries a stable `key` alongside its display `label`. Callers and
+# tests match on the key; only the UI reads the label. Matching on the label
+# meant the Part E copy pass silently broke logic that had nothing to do with
+# wording -- which is a good reason for copy never to be an identifier.
 def _squad_structural_health(squad, bank):
     """Audit squad structure: stranded capital, enabler efficiency, formation
     optionality, and price-point pivot liquidity.
@@ -3421,9 +3471,13 @@ def _squad_structural_health(squad, bank):
     bench_cost = sum(_to_float(p.get("price", 0.0)) for p in bench)
     stranded = bench_cost > 15.0
     checks.append({
-        "label": "Stranded bench capital",
+        "key": "bench_capital",
+        "label": "Money sat on your bench",
         "ok": not stranded,
-        "detail": f"Bench costs £{bench_cost:.1f}m {'(> £15.0m)' if stranded else '(≤ £15.0m)'}.",
+        "detail": (f"£{bench_cost:.1f}m of your budget is sitting on the bench — that's "
+                   f"money not scoring you points."
+                   if stranded else
+                   f"£{bench_cost:.1f}m on the bench. That's sensible."),
     })
 
     # 2. Enabler efficiency: non-playing outfield assets > £4.0m on B2/B3
@@ -3435,9 +3489,13 @@ def _squad_structural_health(squad, bank):
         if non_playing and _to_float(slot_p.get("price", 0.0)) > 4.0:
             dead.append(f"{slot_p.get('name', '?')} (£{_to_float(slot_p.get('price', 0.0)):.1f}m)")
     checks.append({
-        "label": "Enabler efficiency (B2/B3)",
+        "key": "enabler_efficiency",
+        "label": "Dead weight in your last two bench slots",
         "ok": not dead,
-        "detail": ("Non-playing >£4.0m enablers: " + "; ".join(dead)) if dead else "No overpriced dead assets on bench slots 2/3.",
+        "detail": ("You're paying over £4.0m for players who aren't playing: "
+                   + "; ".join(dead)
+                   if dead else
+                   "Your last two bench slots are cheap, which is exactly what you want."),
     })
 
     # 3. Formation optionality: formations within 5% of peak XI xP
@@ -3456,9 +3514,14 @@ def _squad_structural_health(squad, bank):
     within = sum(1 for v in form_xp if v >= 0.95 * peak) if peak > 0 else 0
     optionality_ok = within >= 3
     checks.append({
-        "label": "Formation optionality",
+        "key": "formation_optionality",
+        "label": "Can you change shape?",
         "ok": optionality_ok,
-        "detail": f"{within} formation(s) within 5% of peak xP ({'flexible' if optionality_ok else 'inflexible'}).",
+        "detail": (f"You can line up {within} different ways without losing much — "
+                   f"handy when someone gets injured."
+                   if optionality_ok else
+                   f"Only {within} formation really works for this squad. One injury "
+                   f"and you're stuck."),
     })
 
     # 4. Price-point liquidity: can the squad fund a one-transfer 3-5-2 <-> 3-4-3 pivot?
@@ -3473,12 +3536,16 @@ def _squad_structural_health(squad, bank):
     def_to_mid = cheapest_mid - cheapest_def
     deadlock = (mid_to_fwd > 0 and bank < mid_to_fwd) or (def_to_mid > 0 and bank < def_to_mid)
     checks.append({
-        "label": "Price-point pivot liquidity",
+        "key": "pivot_liquidity",
+        "label": "Can you afford to switch formation?",
         "ok": not deadlock,
         "detail": (
-            f"Bank £{bank:.1f}m; MID→FWD gap £{max(0.0, mid_to_fwd):.1f}m, DEF→MID gap £{max(0.0, def_to_mid):.1f}m."
+            f"£{bank:.1f}m in the bank covers a swap either way "
+            f"(you'd need £{max(0.0, mid_to_fwd):.1f}m to go MID→FWD, "
+            f"£{max(0.0, def_to_mid):.1f}m for DEF→MID)."
             if not deadlock else
-            f"Deadlock: bank £{bank:.1f}m cannot fund the cheapest formation-pivot swap."
+            f"You're stuck: £{bank:.1f}m isn't enough to switch shape, even with "
+            f"your cheapest swap."
         ),
     })
 

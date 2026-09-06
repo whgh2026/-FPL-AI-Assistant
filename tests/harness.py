@@ -31,6 +31,8 @@ _CACHE_RESET = {
     "_WEIGHTS_CACHE": lambda: None,
     "_WEIGHTS_STAMP": lambda: (0.0, 0.0),
     "_DC_RAW": dict,
+    "_FIXTURE_LOOKUP_CACHE": lambda: None,
+    "_FIXTURE_LOOKUP_TS": float,
     "_EO_CACHE": dict,
     "_EO_CACHE_TS": float,
     "_LIVE_CACHE": dict,

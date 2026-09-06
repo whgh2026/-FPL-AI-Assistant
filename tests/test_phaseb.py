@@ -117,13 +117,13 @@ class StructuralHealthTest(unittest.TestCase):
 
     def test_flags_stranded_bench_capital(self):
         checks = fpl_tools._squad_structural_health(self._squad(), 0.5)
-        stranded = next(c for c in checks if c["label"] == "Stranded bench capital")
+        stranded = next(c for c in checks if c["key"] == "bench_capital")
         # This squad's bench exceeds £15m (expensive MID/FWD bench).
         self.assertFalse(stranded["ok"])
 
     def test_formation_optionality_flexible(self):
         checks = fpl_tools._squad_structural_health(self._squad(), 2.0)
-        opt = next(c for c in checks if c["label"] == "Formation optionality")
+        opt = next(c for c in checks if c["key"] == "formation_optionality")
         self.assertTrue(opt["ok"])
 
 
