@@ -60,251 +60,13 @@ POS_COLORS = {"GK": "#f59e0b", "DEF": "#0ea5e9", "MID": "#10b981", "FWD": "#f43f
 POS_ORDER = ["GK", "DEF", "MID", "FWD"]
 ALL_CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
 
-CSS = """
-<style>
-  #MainMenu, footer {visibility: hidden;}
-  .block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1240px;}
-  .hero {background: linear-gradient(120deg, #4f46e5 0%, #6d5cf0 45%, #38bdf8 100%);
-         color: #fff; border-radius: 18px; padding: 26px 28px; margin-bottom: 14px;
-         box-shadow: 0 12px 30px rgba(79,70,229,0.22);}
-  .hero h1 {font-size: 1.7rem; font-weight: 800; letter-spacing: -0.02em; margin: 0;}
-  .hero .sub {color: #eef2ff; font-size: 0.95rem; margin-top: 0.4rem; line-height: 1.45;}
-  .deadline-hero {background: #fff; border: 1px solid #e2e8f0; border-left: 6px solid #4f46e5;
-         border-radius: 14px; padding: 18px 22px; margin-bottom: 16px;
-         box-shadow: 0 6px 18px rgba(15,23,42,0.06);}
-  .dl-gw {font-size: 0.78rem; font-weight: 800; letter-spacing: 0.14em; color: #4f46e5; text-transform: uppercase;}
-  .dl-time {font-size: 1.9rem; font-weight: 800; color: #0f172a; line-height: 1.15; margin-top: 2px;}
-  .dl-sub {color: #64748b; font-size: 0.9rem; margin-top: 2px;}
-  .dl-warning {color: #e11d48; font-size: 0.88rem; margin-top: 6px;}
-  .overview {background: #eef2ff; border: 1px solid #e0e7ff; border-radius: 14px; padding: 16px 20px;
-         color: #3730a3; font-size: 0.94rem; line-height: 1.55; margin-bottom: 8px;}
-  .overview b {color: #312e81;}
-  .card {background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px;
-         margin-bottom: 14px; box-shadow: 0 4px 14px rgba(15,23,42,0.05);}
-  .card h3 {margin: 0 0 2px 0; font-size: 1.02rem; font-weight: 700; color: #0f172a;}
-  .section-label {text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.7rem; color: #64748b; margin-bottom: 10px;}
-  .grid {display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 10px;}
-  .pc {border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 13px; background: #fff;}
-  .pc .pos {display:inline-block; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.05em;
-            padding: 2px 7px; border-radius: 5px; color: #fff;}
-  .pc .nm {font-weight: 700; font-size: 0.92rem; margin: 6px 0 1px 0; color: #0f172a;}
-  .pc .meta {color: #64748b; font-size: 0.75rem;}
-  .bar {height: 5px; background: #e2e8f0; border-radius: 3px; margin: 8px 0 4px 0; overflow: hidden;}
-  .bar-fill {height: 100%; border-radius: 3px;}
-  .xp {font-weight: 800; font-size: 0.88rem;}
-  .badge {display:inline-flex; align-items:center; gap:8px; padding: 8px 13px; border-radius: 999px;
-          background:#eef2ff; border:1px solid #e0e7ff; font-size:0.8rem; color:#3730a3;}
-  .badge .g {width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;}
-  .transfer {display:flex; align-items:center; gap: 10px; padding: 9px 0; border-bottom: 1px solid #e2e8f0;}
-  .transfer .arrow {color: #94a3b8;}
-  .out {color: #e11d48; font-weight: 700;}
-  .inn {color: #059669; font-weight: 700;}
-  .gain {margin-left: auto; font-weight: 700; font-size: 0.85rem; color: #475569;}
-  .cap-card {border: 1px solid #fbbf24; background: #fff7ed;}
-  .role {display:inline-block; font-size: 0.62rem; font-weight: 800; padding: 1px 6px; border-radius: 5px;
-         margin-left: 5px; vertical-align: middle;}
-  .role-c {background: #f59e0b; color: #fff;}
-  .role-vc {background: #cbd5e1; color: #334155;}
-  .stat-badge {display:inline-block; font-size:0.6rem; font-weight:700; padding:1px 5px; border-radius:4px; margin-left:4px; white-space:nowrap; vertical-align: middle;}
-  .stat-out {background:#fee2e2; color:#b91c1c; border:1px solid #fecaca;}
-  .stat-doubt {background:#fef3c7; color:#b45309; border:1px solid #fde68a;}
-  .chip-banner {background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 5px solid #16a34a; border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; font-size: 0.9rem; color: #166534;}
-  .override-head {background: #fff7ed; border: 1px solid #fed7aa; border-left: 6px solid #f59e0b;
-         border-radius: 14px 14px 0 0; padding: 16px 20px; font-size: 1.15rem; font-weight: 800;
-         color: #9a3412; margin-top: 26px;}
-  .override-head span {color: #c2410c; font-size: 0.82rem; font-weight: 600; margin-left: 8px;}
-  .dummy-url {display:inline-block; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:6px;
-              padding:2px 8px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-              font-size:0.78rem; color:#64748b; margin-left:6px;}
-  .team-row {display:flex; gap:12px; align-items:stretch; margin-bottom:10px;}
-  .pos-col {flex:0 0 64px; display:flex; flex-direction:column; align-items:center; justify-content:center;
-            background:#f1f5f9; border-radius:10px; padding:8px;}
-  .pos-emoji {font-size:1.3rem;}
-  .pos-name {font-weight:800; font-size:0.68rem; letter-spacing:.06em; color:#475569; margin-top:2px;}
-  .starters {flex:1; display:grid; grid-template-columns:repeat(auto-fill,minmax(148px,1fr)); gap:8px; align-content:start;}
-  .subs {flex:0 0 205px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:10px; padding:8px 10px;}
-  .sub-title {font-size:0.62rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
-              color:#94a3b8; margin-bottom:4px;}
-  .sub-item {font-size:0.75rem; color:#0f172a; font-weight:600; padding:4px 0; border-bottom:1px dotted #e2e8f0;
-             display:flex; justify-content:space-between; align-items:center; gap:4px;}
-  .sub-item:last-child {border-bottom:none;}
-  .sub-meta {color:#64748b; font-size:0.68rem; margin-top:2px;}
-  .sub-xp {color:#0f172a; font-weight:800; white-space:nowrap; margin-top:2px;}
-  .empty {color:#cbd5e1; font-size:0.8rem;}
-  .mc {border:1px solid #e2e8f0; border-left:3px solid #94a3b8; border-radius:10px; padding:8px 10px;
-       background:#fff; min-width:0;}
-  .mc .pos {display:inline-block; font-size:0.6rem; font-weight:800; letter-spacing:0.04em;
-            padding:1px 6px; border-radius:4px; color:#fff; vertical-align: middle;}
-  .mc-nm {font-weight:700; font-size:0.82rem; color:#0f172a; margin-top:4px;
-          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-  .mc-meta {color:#64748b; font-size:0.7rem; margin-top:2px;}
-  .mc-xp {font-weight:800; font-size:0.8rem; margin-top:3px; color:#0f172a;}
-  .alert-box {background: #fff1f2; border: 1px solid #fecdd3; border-left: 4px solid #e11d48; padding: 12px 16px; border-radius: 8px; margin: 10px 0;}
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
 # Dark "Final Boss" theme overrides + analytics component styles
 # ------------------------------------------------------------------
-DARK_CSS = """
-<style>
-  .stApp {background: #0B1320;}
-  .block-container {color: #E2E8F0;}
-  [data-testid="stSidebar"] {background: #0F172A; border-right: 1px solid #334155;}
-  [data-testid="stSidebar"] * {color: #E2E8F0;}
-  [data-testid="stHeader"] {background: rgba(11,19,32,0.5);}
 
-  .deadline-hero {background: #1E293B; border-color: #334155; border-left-color: #00F5A0; box-shadow: none;}
-  .dl-time {color: #E2E8F0;}
-  .dl-gw {color: #00F5A0;}
-  .dl-sub {color: #94a3b8;}
-  .dl-warning {color: #fda4af;}
-  .overview {background: #1E293B; border-color: #334155; color: #cbd5e1;}
-  .overview b {color: #00F5A0;}
-  .card {background: #1E293B; border-color: #334155; box-shadow: 0 4px 14px rgba(0,0,0,0.25);}
-  .card h3 {color: #E2E8F0;}
-  .section-label {color: #00F5A0;}
-  .pc {background: #0F172A; border-color: #334155;}
-  .pc .nm {color: #E2E8F0;}
-  .pc .meta {color: #94a3b8;}
-  .bar {background: #334155;}
-  .badge {background: #1E293B; border-color: #334155; color: #00F5A0;}
-  .badge .g {background: #00F5A0; box-shadow: 0 0 8px #00F5A0;}
-  .transfer {border-bottom-color: #334155;}
-  .out {color: #fda4af;}
-  .inn {color: #00F5A0;}
-  .gain {color: #94a3b8;}
-  .cap-card {border-color: #00F5A0; background: #0f2b20;}
-  .role-vc {background: #334155; color: #cbd5e1;}
-  .role-c {background: #00F5A0; color: #0B1320;}
-  .stat-out {background: #3b1220; color: #fda4af; border-color: #7f1d1d;}
-  .stat-doubt {background: #3b2f12; color: #fbbf24; border-color: #92400e;}
-  .chip-banner {background: #0f2b20; border-color: #16a34a; border-left-color: #00F5A0; color: #bbf7d0;}
-  .override-head {background: #1E293B; border-color: #334155; border-left-color: #00F5A0; color: #E2E8F0;}
-  .override-head span {color: #00F5A0;}
-  .dummy-url {background: #0F172A; border-color: #334155; color: #94a3b8;}
-  .pos-col {background: #0F172A; border-color: #334155;}
-  .pos-name {color: #94a3b8;}
-  .subs {background: #0F172A; border-color: #334155;}
-  .sub-item {color: #E2E8F0; border-bottom-color: #334155;}
-  .sub-meta {color: #94a3b8;}
-  .sub-xp {color: #00F5A0;}
-  .empty {color: #475569;}
-  .mc {background: #0F172A; border-color: #334155;}
-  .mc-nm {color: #E2E8F0;}
-  .mc-meta {color: #94a3b8;}
-  .mc-xp {color: #00F5A0;}
-  .mc .pos {color: #0B1320;}
-  .alert-box {background: #3b1220; border-color: #7f1d1d; border-left-color: #fda4af; color: #fecdd3;}
-</style>
-"""
-st.markdown(DARK_CSS, unsafe_allow_html=True)
 
-DARK_CSS2 = """
-<style>
-  .headshot {width: 44px; height: 56px; object-fit: cover; border-radius: 6px; background: #0F172A; border: 1px solid #334155;}
-  .badge-img {width: 26px; height: 26px; object-fit: contain; vertical-align: middle;}
-  .badge-lg {width: 40px; height: 40px; object-fit: contain;}
 
-  .pitch {background: linear-gradient(180deg, #113824 0%, #0b2418 100%); border: 2px solid #334155; border-radius: 16px; padding: 20px 16px; margin-bottom: 14px;}
-  .pitch-row {display: flex; justify-content: space-around; align-items: center; margin: 14px 0;}
-  .pitch-player {text-align: center; width: 92px;}
-  .pitch-player .nm {font-size: 0.72rem; font-weight: 700; color: #E2E8F0; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
-  .pitch-player .meta {font-size: 0.62rem; color: #94a3b8;}
-  .pitch-player .xp {font-size: 0.72rem; font-weight: 800; color: #00F5A0;}
-  .dugout {background: #0F172A; border: 1px dashed #334155; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px;}
-  .dugout-title {font-size: 0.62rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: #64748b; margin-bottom: 10px;}
-
-  .transfer-pair {display: flex; align-items: center; gap: 10px; margin-bottom: 10px;}
-  .transfer-card {flex: 1; border-radius: 12px; padding: 12px 14px; border: 1px solid #334155; background: #0F172A;}
-  .transfer-card.tc-out {border-left: 4px solid #f43f5e;}
-  .transfer-card.tc-in {border-left: 4px solid #00F5A0;}
-  .transfer-arrow {font-size: 1.4rem; color: #00F5A0; font-weight: 800;}
-  .tc-name {font-weight: 700; font-size: 0.9rem; color: #E2E8F0;}
-  .tc-meta {font-size: 0.72rem; color: #94a3b8;}
-
-  .rot-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px;}
-  .rot-score {font-size: 1.1rem; font-weight: 800; color: #00F5A0; min-width: 54px;}
-  .fdr-strip {display: flex; gap: 4px; margin-top: 8px;}
-  .fdr-cell {width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.72rem; font-weight: 800; color: #0B1320;}
-
-  .strength-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;}
-  .strength-bar {height: 6px; background: #334155; border-radius: 3px; overflow: hidden; margin: 4px 0;}
-  .strength-fill-home {height: 100%; background: #38bdf8;}
-  .strength-fill-away {height: 100%; background: #00F5A0;}
-  .strength-num {font-weight: 800; color: #00F5A0;}
-
-  .momentum-row {display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #334155;}
-  .momentum-row:last-child {border-bottom: none;}
-  .momentum-badge-up {background: #0f2b20; color: #00F5A0; border: 1px solid #16a34a; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; white-space: nowrap;}
-  .momentum-badge-down {background: #3b1220; color: #fda4af; border: 1px solid #7f1d1d; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; white-space: nowrap;}
-
-  .radar-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 12px 14px;}
-  .radar-card .nm {font-weight: 700; font-size: 0.85rem; color: #E2E8F0;}
-  .radar-card .meta {color: #94a3b8; font-size: 0.7rem;}
-
-  .cap-pill {background: #00F5A0; color: #0B1320; font-weight: 800; font-size: 0.6rem; padding: 1px 5px; border-radius: 4px;}
-</style>
-"""
-st.markdown(DARK_CSS2, unsafe_allow_html=True)
-
-DARK_CSS3 = """
-<style>
-  .photo-frame {position: relative; display: inline-block; line-height: 0;}
-  .photo-frame .badge-overlay {position: absolute; right: -3px; bottom: -3px; line-height: 0;}
-  .photo-frame .badge-overlay .badge-img {width: 18px; height: 18px; border-radius: 50%; background: #0B1320; border: 1px solid #0B1320;}
-
-  /* Pitch player cards: strict fixed dimensions so a 404 fallback never collapses the grid. */
-  .pitch-player {display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; width: 96px;}
-  .pitch-player .photo-frame {width: 65px; height: 85px; display: flex; align-items: center; justify-content: center;}
-  .pitch-player .headshot {width: 65px; height: 85px; object-fit: cover; border-radius: 8px; display: block;}
-  .pitch-player .nm {width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.72rem; font-weight: 700; color: #E2E8F0;}
-  .pitch-player .meta {width: 100%; font-size: 0.68rem; color: #94a3b8; white-space: nowrap;}
-  .pitch-player .fx-dots {font-size: 0.74rem; letter-spacing: 1.5px; white-space: nowrap;}
-
-  /* Pitch row position labels */
-  .pitch-row {display: flex; align-items: center; gap: 10px; margin: 14px 0;}
-  .pitch-row-label {flex: 0 0 34px; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em; text-align: center; text-transform: uppercase;}
-  .pitch-row-cards {flex: 1; display: flex; justify-content: space-around; align-items: center; gap: 8px;}
-
-  .tc-head {display: flex; align-items: center; gap: 8px;}
-
-  /* Player Inspector */
-  .inspector-card {background: #0F172A; border: 1px solid #334155; border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
-  .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted #334155;}
-  .insp-fixture:last-child {border-bottom: none;}
-  @media (max-width: 768px) {
-    .pitch { padding: 12px 6px !important; }
-    .pitch-row-label { display: none !important; }
-    .pitch-row-cards { width: 100% !important; gap: 2px !important; justify-content: space-evenly !important; }
-    .pitch-player { width: auto !important; flex: 1 1 0 !important; max-width: 20% !important; min-width: 0 !important; padding: 2px !important; gap: 1px !important; }
-    .pitch-player .photo-frame, .pitch-player .headshot { display: none !important; }
-    .pitch-player .nm { font-size: 0.65rem !important; }
-    .pitch-player .meta { font-size: 0.58rem !important; }
-    .pitch-player .fx-dots { font-size: 0.62rem !important; letter-spacing: 0.5px !important; }
-    .dugout { padding: 10px 8px !important; }
-    .dugout > div:last-child { gap: 4px !important; justify-content: space-evenly !important; }
-  }
-</style>
-"""
-st.markdown(DARK_CSS3, unsafe_allow_html=True)
-
-DARK_CSS4 = """
-<style>
-  .signal-grid {display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;}
-  .signal-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 12px 14px;}
-  .signal-head {display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-weight: 700; color: #E2E8F0;}
-  .signal-score {margin-left: auto; font-size: 1.15rem; font-weight: 800; color: #00F5A0;}
-  .signal-delta {font-size: 0.72rem; font-weight: 700; margin-left: 4px;}
-  .signal-row {display: flex; align-items: center; gap: 6px; margin: 5px 0;}
-  .signal-label {flex: 0 0 132px; font-size: 0.66rem; color: #94a3b8; letter-spacing: 0.02em;}
-  .signal-bar {flex: 1; height: 5px; background: #334155; border-radius: 3px; overflow: hidden;}
-  .signal-fill {height: 100%; border-radius: 3px;}
-  .signal-val {flex: 0 0 22px; font-size: 0.7rem; font-weight: 700; text-align: right;}
-</style>
-"""
-st.markdown(DARK_CSS4, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
@@ -488,6 +250,39 @@ def clear_transfer_cache():
         if k.startswith("man_out") or k.startswith("man_in"):
             st.session_state.pop(k, None)
 
+
+# ------------------------------------------------------------------
+# Styling
+# ------------------------------------------------------------------
+STYLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "app.css")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_css(path: str, _mtime: float) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _inject_css() -> None:
+    """One stylesheet, from disk.
+
+    Was five <style> blocks injected in sequence, where the result depended on
+    injection order: .streamlit/config.toml forces a dark theme, so the light
+    block was dead for every class the dark blocks redefined -- yet ten classes
+    styled ONLY there still rendered light-on-dark. Selectors were also
+    redefined across blocks with different values (.pitch-player 92px then 96px,
+    .headshot 44x56 then 65x85).
+
+    Keyed on mtime so editing the CSS shows up on the next rerun.
+    """
+    try:
+        css = _load_css(STYLE_PATH, os.path.getmtime(STYLE_PATH))
+    except OSError:
+        return
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+
+_inject_css()
 
 # ------------------------------------------------------------------
 # Official Premier League asset helpers
@@ -778,7 +573,7 @@ def _momentum_row_html(r, up: bool = True) -> str:
         f'<img class="headshot" src="{_headshot_url(_photo_code(r["photo"]))}" alt="" loading="lazy">'
         f'{_badge_img(r["team"])}'
         f'<div style="flex:1;">'
-        f'<div style="font-weight:700;color:#E2E8F0;">{r["name"]}</div>'
+        f'<div style="font-weight:700;color:var(--text);">{r["name"]}</div>'
         f'<div class="tc-meta">{r["pos"]} · £{r["price"]:.1f}m · net {r["net"]:+,}</div>'
         f'</div>'
         f'{arrow} {badge}'
@@ -793,7 +588,7 @@ def _regression_row(r, high: bool) -> str:
         f'<div style="display:flex;justify-content:space-between;align-items:center;'
         f'padding:7px 0;border-bottom:1px solid #1e293b;">'
         f'<div style="min-width:0;">'
-        f'<div style="font-weight:700;color:#E2E8F0;">{r["name"]}</div>'
+        f'<div style="font-weight:700;color:var(--text);">{r["name"]}</div>'
         f'<div class="tc-meta">{r["position"]} · {r["team"]} · £{r["price"]:.1f}m</div>'
         f'<div class="tc-meta">G {r["goals"]} A {r["assists"]} vs xG {r["xg"]} xA {r["xa"]}</div>'
         f'</div>'
@@ -859,7 +654,7 @@ def _pitch_player_html(p, role: str = None) -> str:
     if role == "C":
         role_html = '<span class="cap-pill">C</span>'
     elif role == "VC":
-        role_html = '<span class="cap-pill" style="background:#334155;color:#cbd5e1;">V</span>'
+        role_html = '<span class="cap-pill" style="background:var(--line);color:var(--text-2);">V</span>'
     name = _web_name(p)
     return (
         f'<div class="pitch-player">'
@@ -895,7 +690,7 @@ def _pitch_html(starters, bench, captain_id=None, vcap_id=None) -> str:
 def _fixture_key_html() -> str:
     """Permanent fixture-key legend rendered directly above every pitch view."""
     return (
-        '<div style="font-size:0.8rem;color:#94a3b8;margin:0 0 6px 0;line-height:1.5;">'
+        '<div style="font-size:0.8rem;color:var(--muted);margin:0 0 6px 0;line-height:1.5;">'
         'Fixture Outlook: 🟢 Favourable · 🟡 Moderate · 🔴 Difficult<br>'
         '<span style="font-size:0.68rem;font-style:italic;">'
         '*Ratings derived from our proprietary algorithmic model, blending live market sentiment with opponent defensive/offensive strength.</span>'
@@ -1052,7 +847,7 @@ def _render_positional_diagnostic(starters, bench=None, prev=None, caption: str 
     if not signals:
         return None
     if caption:
-        st.markdown(f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{caption}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:0.78rem;color:var(--muted);margin:0 0 8px 0;">{caption}</div>', unsafe_allow_html=True)
     legend_cols = st.columns(3)
     for col, (label, desc) in zip(legend_cols, _SIGNAL_LABELS.values()):
         with col:
@@ -1123,7 +918,7 @@ def _render_player_inspector(squad) -> None:
         if fx.get("kickoff_time"):
             try:
                 dt = dateutil.parser.isoparse(fx.get("kickoff_time")).astimezone(tz.gettz("Europe/London"))
-                date_str = f" <span style='color:#64748b;font-weight:normal;font-size:0.75rem;margin-left:6px;'>{dt.strftime('%d %b %H:%M')}</span>"
+                date_str = f" <span style='color:var(--muted-2);font-weight:normal;font-size:0.75rem;margin-left:6px;'>{dt.strftime('%d %b %H:%M')}</span>"
             except:
                 pass
         wp = fx.get("win_prob")
@@ -1135,8 +930,8 @@ def _render_player_inspector(squad) -> None:
             
         fx_rows += (
             f'<div class="insp-fixture">'
-            f'<div style="font-weight:700;color:#E2E8F0;">{opp_name} '
-            f'<span style="font-weight:600;color:#94a3b8;">({venue})</span>{date_str}</div>'
+            f'<div style="font-weight:700;color:var(--text);">{opp_name} '
+            f'<span style="font-weight:600;color:var(--muted);">({venue})</span>{date_str}</div>'
             f'<div class="tc-meta">{odds_desc}</div>'
             f'</div>'
         )
@@ -1157,11 +952,11 @@ def _render_player_inspector(squad) -> None:
         f'{_headshot_img(player)}'
         f'<div style="flex:1;min-width:0;">'
         f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
-        f'<span style="font-weight:800;color:#E2E8F0;font-size:1.05rem;">{_web_name(player)}</span>'
+        f'<span style="font-weight:800;color:var(--text);font-size:1.05rem;">{_web_name(player)}</span>'
         f'{_badge_img(team_id, large=True)}'
         f'</div>'
         f'<div class="tc-meta">{player.get("position", "")} · {player.get("team", "")} · £{player.get("price", 0):.1f}m</div>'
-        f'<div style="margin-top:6px;font-size:0.85rem;color:#E2E8F0;">{_friendly_status(player.get("status"))}{tightrope_html}</div>'
+        f'<div style="margin-top:6px;font-size:0.85rem;color:var(--text);">{_friendly_status(player.get("status"))}{tightrope_html}</div>'
         f'</div></div>'
         f'<div style="margin-top:14px;"><div class="section-label">Next 4 Fixtures</div>{fx_rows}</div>'
         f'</div>'
@@ -1175,7 +970,7 @@ def _transfer_pair_html(moves) -> str:
         out = m["out"]
         inn = m["in"]
         in_tightrope = (
-            '<div class="tc-meta" style="color:#b45309;font-weight:600;">⚠️ 1 card from ban</div>'
+            '<div class="tc-meta" style="color:var(--warn-fg);font-weight:600;">⚠️ 1 card from ban</div>'
             if inn.get("on_yellow_card_tightrope") else ""
         )
         html += (
@@ -1199,7 +994,7 @@ def _transfer_pair_html(moves) -> str:
         )
         rationale = m.get("rationale")
         if rationale:
-            html += f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{rationale}</div>'
+            html += f'<div style="font-size:0.78rem;color:var(--muted);margin:0 0 8px 0;">{rationale}</div>'
     return html
 
 
@@ -1449,7 +1244,7 @@ with tab_planner:
             _render_player_inspector(starters + bench)
 
             st.markdown(
-                '<div style="font-size:0.95rem;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#94a3b8;margin:12px 0 10px 0;">'
+                '<div style="font-size:0.95rem;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted);margin:12px 0 10px 0;">'
                 'Here is what the models and market consensus say about your squad across three core analytical engines:'
                 '</div>',
                 unsafe_allow_html=True,
@@ -1779,23 +1574,23 @@ with tab_planner:
                     if m["in"]["id"] in riser_ids:
                         market_rows.append(f'<div style="margin-bottom:4px;">📈 <b>Imminent Price Rise Target:</b> {m["in"]["name"]} ({m["in"]["team"]})</div>')
                 if market_rows:
-                    market_html = '<div style="margin-bottom:6px;color:#475569;">Prices update overnight (~01:30–02:30 UK). Act before the next update:</div>' + "".join(market_rows)
+                    market_html = '<div style="margin-bottom:6px;color:var(--line-2);">Prices update overnight (~01:30–02:30 UK). Act before the next update:</div>' + "".join(market_rows)
                 else:
-                    market_html = '<div style="color:#64748b;">No imminent price changes detected for your squad or transfer targets.</div>'
+                    market_html = '<div style="color:var(--muted-2);">No imminent price changes detected for your squad or transfer targets.</div>'
                 st.markdown(_card(market_html, "📊 Market Alert & Value Tracker"), unsafe_allow_html=True)
             except Exception:
                 pass
     
             transfer_html = (
-                '<div style="font-size:0.78rem;color:#94a3b8;font-style:italic;margin:0 0 10px 0;">'
+                '<div style="font-size:0.78rem;color:var(--muted);font-style:italic;margin:0 0 10px 0;">'
                 'Note: xP (Expected Points) is a projection from our closed-loop algorithmic simulation model — a forecast of potential performance, not a guaranteed outcome.'
                 '</div>'
-                f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
+                f'<div style="color:var(--line-2);margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
             )
             if moves:
                 transfer_html += _transfer_pair_html(moves)
             else:
-                transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
+                transfer_html += '<div style="color:var(--muted-2);">No transfers recommended.</div>'
             st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
 
             # ---- Scenario Distribution (SAA floor vs ceiling) ----
@@ -1805,9 +1600,9 @@ with tab_planner:
                     p5, p50, p95 = sd.get("p5", 0.0), sd.get("p50", 0.0), sd.get("p95", 0.0)
                     dist_html = (
                         '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;">'
-                        f'<div><div class="tc-meta">FLOOR (P5)</div><div style="font-weight:800;color:#ef4444;font-size:1.3rem;">{p5}</div></div>'
-                        f'<div><div class="tc-meta">MEDIAN (P50)</div><div style="font-weight:800;color:#E2E8F0;font-size:1.3rem;">{p50}</div></div>'
-                        f'<div><div class="tc-meta">CEILING (P95)</div><div style="font-weight:800;color:#10b981;font-size:1.3rem;">{p95}</div></div>'
+                        f'<div><div class="tc-meta">FLOOR (P5)</div><div style="font-weight:800;color:var(--neg-2);font-size:1.3rem;">{p5}</div></div>'
+                        f'<div><div class="tc-meta">MEDIAN (P50)</div><div style="font-weight:800;color:var(--text);font-size:1.3rem;">{p50}</div></div>'
+                        f'<div><div class="tc-meta">CEILING (P95)</div><div style="font-weight:800;color:var(--pos-2);font-size:1.3rem;">{p95}</div></div>'
                         '</div>'
                     )
                     st.markdown(_card(dist_html, "🎲 Scenario Distribution · 4-GW horizon (500 sims)"), unsafe_allow_html=True)
@@ -1826,7 +1621,7 @@ with tab_planner:
                         hit = f" (-{4 * s['hits']})" if s.get("hits") else ""
                         rows.append(
                             f'<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #1e293b;align-items:flex-start;">'
-                            f'<div style="flex:0 0 52px;font-weight:800;color:#4f46e5;">GW{s["gw"]}</div>'
+                            f'<div style="flex:0 0 52px;font-weight:800;color:var(--info);">GW{s["gw"]}</div>'
                             f'<div style="flex:1;min-width:0;">'
                             f'<div class="tc-meta">Sell: {sells}</div>'
                             f'<div class="tc-meta">Buy: {buys}</div>'
@@ -1907,7 +1702,7 @@ with tab_planner:
                             f'<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid #1e293b;">'
                             f'<span style="flex:0 0 auto;">{icon}</span>'
                             f'<div style="flex:1;min-width:0;">'
-                            f'<div style="color:#E2E8F0;font-weight:600;">{h["label"]}</div>'
+                            f'<div style="color:var(--text);font-weight:600;">{h["label"]}</div>'
                             f'<div class="tc-meta">{h["detail"]}</div>'
                             f'</div></div>',
                             unsafe_allow_html=True,
@@ -1938,7 +1733,7 @@ with tab_planner:
                         html = "".join(
                             f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
                             f'<div style="flex:0 0 auto;font-weight:700;">{flag}</div>'
-                            f'<div style="flex:1;min-width:0;"><div style="color:#E2E8F0;font-weight:600;">{name}</div>'
+                            f'<div style="flex:1;min-width:0;"><div style="color:var(--text);font-weight:600;">{name}</div>'
                             f'<div class="tc-meta">{detail}</div></div></div>'
                             for flag, name, detail in rows
                         )
@@ -2155,9 +1950,9 @@ with tab_planner:
                         colour = "#10b981" if margin >= 0 else "#ef4444"
                         h2h_html = (
                             '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;margin-bottom:10px;">'
-                            f'<div><div class="tc-meta">You</div><div style="font-weight:800;font-size:1.4rem;color:#E2E8F0;">{h2h["my_total"]}</div></div>'
+                            f'<div><div class="tc-meta">You</div><div style="font-weight:800;font-size:1.4rem;color:var(--text);">{h2h["my_total"]}</div></div>'
                             f'<div><div class="tc-meta">Margin</div><div style="font-weight:800;font-size:1.4rem;color:{colour};">{margin:+.1f}</div></div>'
-                            f'<div><div class="tc-meta">Rival</div><div style="font-weight:800;font-size:1.4rem;color:#E2E8F0;">{h2h["rival_total"]}</div></div>'
+                            f'<div><div class="tc-meta">Rival</div><div style="font-weight:800;font-size:1.4rem;color:var(--text);">{h2h["rival_total"]}</div></div>'
                             '</div>'
                         )
                         for r in h2h["my_rows"]:
@@ -2165,8 +1960,8 @@ with tab_planner:
                             cap = " (C)" if r["multiplier"] > 1 else ""
                             h2h_html += (
                                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e293b;">'
-                                f'<span style="color:#E2E8F0;">{r["name"]}{cap}{prog}</span>'
-                                f'<span style="font-weight:700;color:#E2E8F0;">{r["points"]}</span></div>'
+                                f'<span style="color:var(--text);">{r["name"]}{cap}{prog}</span>'
+                                f'<span style="font-weight:700;color:var(--text);">{r["points"]}</span></div>'
                             )
                         st.markdown(_card(h2h_html, "🆚 Live H2H vs Rival"), unsafe_allow_html=True)
             except Exception:
@@ -2239,9 +2034,9 @@ with tab_planner:
             mult_val = cap["xp"] * 3 if is_tc else cap["xp"] * 2
             cap_role_title = "Captain (Triple Captain Active)" if is_tc else "Captain"
             
-            cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:#f59e0b; margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.2f} xP)</div></div>'
+            cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:var(--warn-2); margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.2f} xP)</div></div>'
             if vcap:
-                cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div style="margin-bottom:2px;" class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:#475569; margin-top:4px;">{vcap["xp"]} xP</div></div>'
+                cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div style="margin-bottom:2px;" class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:var(--line-2); margin-top:4px;">{vcap["xp"]} xP</div></div>'
             cap_html += "</div>"
             st.markdown(_card(cap_html, "⭐ Captaincy"), unsafe_allow_html=True)
     
@@ -2400,8 +2195,8 @@ with tab_insights:
                     f'<div class="rot-card">'
                     f'<div class="rot-score">{p["avg"]:.2f}</div>'
                     f'<div style="flex:1;">'
-                    f'<div style="display:flex;align-items:center;gap:8px;font-weight:700;color:#E2E8F0;">'
-                    f'{_badge_img(p["t1"])} {t1["name"]} <span style="color:#94a3b8;">+</span> {_badge_img(p["t2"])} {t2["name"]}'
+                    f'<div style="display:flex;align-items:center;gap:8px;font-weight:700;color:var(--text);">'
+                    f'{_badge_img(p["t1"])} {t1["name"]} <span style="color:var(--muted);">+</span> {_badge_img(p["t2"])} {t2["name"]}'
                     f'</div>'
                     f'<div class="fdr-strip">{cells}</div>'
                     f'</div></div>'
@@ -2420,11 +2215,11 @@ with tab_insights:
                 grid += (
                     f'<div class="strength-card">'
                     f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
-                    f'{_badge_img(s["id"], large=True)} <span style="font-weight:700;color:#E2E8F0;">{s["name"]}</span>'
+                    f'{_badge_img(s["id"], large=True)} <span style="font-weight:700;color:var(--text);">{s["name"]}</span>'
                     f'</div>'
-                    f'<div style="font-size:0.7rem;color:#94a3b8;">Attack {s["att"]:.1f}/5</div>'
+                    f'<div style="font-size:0.7rem;color:var(--muted);">Attack {s["att"]:.1f}/5</div>'
                     f'<div class="strength-bar"><div class="strength-fill-home" style="width:{att_pct}%"></div></div>'
-                    f'<div style="font-size:0.7rem;color:#94a3b8;">Defence {s["def"]:.1f}/5</div>'
+                    f'<div style="font-size:0.7rem;color:var(--muted);">Defence {s["def"]:.1f}/5</div>'
                     f'<div class="strength-bar"><div class="strength-fill-away" style="width:{def_pct}%"></div></div>'
                     f'</div>'
                 )
@@ -2440,19 +2235,19 @@ with tab_insights:
             with c_enter:
                 html = "".join(
                     f'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
-                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:#E2E8F0;">{s["name"]}</span>'
-                    f'<span style="margin-left:auto;color:#10b981;font-weight:700;">+{s["att_slope"]:.2f}</span></div>'
+                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:var(--text);">{s["name"]}</span>'
+                    f'<span style="margin-left:auto;color:var(--pos-2);font-weight:700;">+{s["att_slope"]:.2f}</span></div>'
                     for s in enter
                 )
-                st.markdown(_card(html or '<div style="color:#64748b;">No improving fixtures.</div>', "🟢 Prime entry windows (attackers)"), unsafe_allow_html=True)
+                st.markdown(_card(html or '<div style="color:var(--muted-2);">No improving fixtures.</div>', "🟢 Prime entry windows (attackers)"), unsafe_allow_html=True)
             with c_exit:
                 html = "".join(
                     f'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
-                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:#E2E8F0;">{s["name"]}</span>'
-                    f'<span style="margin-left:auto;color:#ef4444;font-weight:700;">{s["att_slope"]:.2f}</span></div>'
+                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:var(--text);">{s["name"]}</span>'
+                    f'<span style="margin-left:auto;color:var(--neg-2);font-weight:700;">{s["att_slope"]:.2f}</span></div>'
                     for s in exit_
                 )
-                st.markdown(_card(html or '<div style="color:#64748b;">No deteriorating fixtures.</div>', "🔴 Exit windows (attackers)"), unsafe_allow_html=True)
+                st.markdown(_card(html or '<div style="color:var(--muted-2);">No deteriorating fixtures.</div>', "🔴 Exit windows (attackers)"), unsafe_allow_html=True)
 
 with tab_radar:
     st.markdown("### 📡 Player Radar & Market")
@@ -2492,7 +2287,7 @@ with tab_radar:
                 f'<div class="nm">{r["name"]}</div>'
                 f'<div class="meta">{r["pos"]} · {_badge_img(r["team"])} · £{r["price"]:.1f}m</div>'
                 f'<div class="meta">Owned {r["ownership"]:.1f}% · {lights}</div>'
-                f'<div style="font-weight:800;color:#00F5A0;margin-top:4px;">{r["xp"]} xP</div>'
+                f'<div style="font-weight:800;color:var(--pos);margin-top:4px;">{r["xp"]} xP</div>'
                 f'</div></div></div>'
             )
         grid += "</div>"
@@ -2508,14 +2303,14 @@ with tab_radar:
         with c_sell:
             sell_rows = "".join(_regression_row(r, True) for r in reg["sell_high"][:8])
             st.markdown(
-                _card(sell_rows or '<div style="color:#64748b;">No clear over-performers right now.</div>',
+                _card(sell_rows or '<div style="color:var(--muted-2);">No clear over-performers right now.</div>',
                       "📉 Over-performing — SELL-HIGH candidates"),
                 unsafe_allow_html=True,
             )
         with c_buy:
             buy_rows = "".join(_regression_row(r, False) for r in reg["buy_low"][:8])
             st.markdown(
-                _card(buy_rows or '<div style="color:#64748b;">No clear under-performers right now.</div>',
+                _card(buy_rows or '<div style="color:var(--muted-2);">No clear under-performers right now.</div>',
                       "📈 Under-performing — BUY-LOW candidates"),
                 unsafe_allow_html=True,
             )
@@ -2563,7 +2358,7 @@ with tab_radar:
 st.markdown(
     """
     <hr style="margin-top: 3rem; margin-bottom: 1rem; border: none; border-top: 1px solid #e0e0e0;">
-    <div style="text-align: center; color: #6b7280; font-size: 0.85rem; font-weight: 500; letter-spacing: 0.5px;">
+    <div style="text-align: center; color:var(--muted-2); font-size: 0.85rem; font-weight: 500; letter-spacing: 0.5px;">
         Built by Waqas Hussain
     </div>
     """,
