@@ -75,22 +75,33 @@ class StrategyModeTest(unittest.TestCase):
         self.assertEqual(fpl_tools._strategy_mode("aggressive"), "divergence")
         self.assertEqual(fpl_tools._strategy_mode("rank_chasing"), "divergence")
         self.assertEqual(fpl_tools._strategy_mode("balanced"), "ev")
-        self.assertEqual(fpl_tools.PHASE2_START_GW, 26)
+        # Was: assertEqual(fpl_tools.PHASE2_START_GW, 26). That constant is gone.
+        # Rank-aware logic is now driven by the chosen strategy rather than the
+        # calendar, so there is no gameweek at which the modes switch on.
+        self.assertFalse(hasattr(fpl_tools, "PHASE2_START_GW"))
 
     def test_blocker_penalises_low_eo(self):
         pool = _squad_pool()
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=set(range(1, 16)),
-            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
+            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1,
+                        # hurdle_scale=0: these tests isolate the EO terms. With the
+                        # Stage 3 churn brake active they would measure the brake
+                        # instead, since the EO bonus here (0.25) is well inside it.
+                        "hurdle_scale": 0.0},
             eo_map=_eo_map_high_low(), mode="blocker", phase=2,
         )
         self.assertNotIn(99, sel)  # low-EO incoming is penalised in blocker mode
 
     def test_divergence_rewards_low_eo(self):
         pool = _squad_pool()
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=set(range(1, 16)),
-            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
+            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1,
+                        # hurdle_scale=0: these tests isolate the EO terms. With the
+                        # Stage 3 churn brake active they would measure the brake
+                        # instead, since the EO bonus here (0.25) is well inside it.
+                        "hurdle_scale": 0.0},
             eo_map=_eo_map_high_low(), mode="divergence", phase=2,
         )
         self.assertIn(99, sel)  # low-EO differential is rewarded in divergence mode
@@ -98,9 +109,13 @@ class StrategyModeTest(unittest.TestCase):
     def test_phase1_no_eo_terms(self):
         # In phase 1 the EO terms are inactive; the solver still solves cleanly.
         pool = _squad_pool()
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=set(range(1, 16)),
-            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
+            hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1,
+                        # hurdle_scale=0: these tests isolate the EO terms. With the
+                        # Stage 3 churn brake active they would measure the brake
+                        # instead, since the EO bonus here (0.25) is well inside it.
+                        "hurdle_scale": 0.0},
             eo_map=_eo_map_high_low(), mode="blocker", phase=1,
         )
         self.assertEqual(len(sel), 15)
@@ -116,8 +131,26 @@ class ChipSchedulingTest(unittest.TestCase):
         self.assertGreater(tc17, tc19)
 
     def test_forced_exercise(self):
-        self.assertEqual(fpl_tools._chip_reservation_threshold("Wildcard", 18), 0.0)
+        """At the set deadline the reservation collapses: use it or lose it.
+
+        Was: assertEqual(threshold("Wildcard", 18), 0.0). The old function
+        returned a hard 0.0 for EVERY gw >= 18 -- which is the bug, because that
+        includes GW20-38 where the second chip set lives, so from GW18 onward
+        the top-ranked chip cleared its threshold every week for the rest of the
+        season. The intent (collapse toward the deadline) is preserved; the
+        assertion now tests that intent rather than the constant.
+        """
+        self.assertLess(fpl_tools._chip_reservation_threshold("Wildcard", 18), 0.1)
+        self.assertEqual(fpl_tools._chip_reservation_threshold("Wildcard", 19), 0.0)
         self.assertEqual(fpl_tools._chip_reservation_threshold("Triple Captain", 19), 0.0)
+
+    def test_set2_reservation_resets(self):
+        """The second chip set is a fresh option with its own deadline."""
+        at_deadline = fpl_tools._chip_reservation_threshold("Wildcard", 19)
+        just_after = fpl_tools._chip_reservation_threshold("Wildcard", 20)
+        self.assertEqual(at_deadline, 0.0)
+        self.assertGreater(just_after, 5.0, "Set 2 must not inherit Set 1's spent clock")
+        self.assertEqual(fpl_tools._chip_reservation_threshold("Wildcard", 38), 0.0)
 
     def test_inventory_expiry(self):
         inv1 = fpl_tools._chip_inventory(19)

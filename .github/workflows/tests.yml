@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    - cron: '0 3 * * *'   # nightly full golden-file suite
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install requests pulp numpy python-dateutil pytest
+
+      # Scope split. 20 squads x 4 solve paths is 80 MILP solves, and the
+      # deterministic profile allows each up to 60s -- a worst case no one wants
+      # blocking a pull request. Per-commit runs the 5-squad smoke set (both
+      # formation traps included, so the Stage 1 gate keeps its teeth); the
+      # nightly run does all 20.
+      - name: Select golden-file scope
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "FPL_GOLDEN_SCOPE=full" >> "$GITHUB_ENV"
+          else
+            echo "FPL_GOLDEN_SCOPE=smoke" >> "$GITHUB_ENV"
+          fi
+
+      # Solves must prove optimality here. A wall-clock-limited incumbent varies
+      # with runner load, which would make the golden files flap.
+      - name: Run tests
+        env:
+          FPL_SOLVER_PROFILE: deterministic
+        run: python -m pytest tests/ -q
+
+      # The committed fixture must be exactly what the generator produces --
+      # a hand-edited fixture would make every golden file unreproducible.
+      - name: Verify fixture is reproducible
+        run: |
+          python tests/fixtures/build_bootstrap.py
+          git diff --exit-code -- tests/fixtures/

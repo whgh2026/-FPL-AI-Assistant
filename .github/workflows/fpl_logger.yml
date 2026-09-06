@@ -2,10 +2,18 @@ name: Continuous Learning Engine
 
 on:
   schedule:
+    - cron: '0 2 * * *'  # Nightly bootstrap archive
     - cron: '0 16 * * 5' # Friday Snapshot
     - cron: '0 10 * * 2' # Tuesday Ingest
     - cron: '0 10 * * 3' # Wednesday Auto-Tune
   workflow_dispatch:
+    inputs:
+      step:
+        description: 'Which step to run manually'
+        required: true
+        default: archive
+        type: choice
+        options: [archive, snapshot, ingest, autotune]
 
 permissions:
   contents: write # Crucial for auto-committing weights.json
@@ -24,23 +32,44 @@ jobs:
         with:
           python-version: '3.10'
 
+      # Was: pip install requests pulp pandas psycopg2-binary numpy.
+      # `pandas` is used nowhere in the repository; it was silently supplying
+      # python-dateutil, which fpl_tools imports unguarded. Dropping pandas
+      # without noticing that would have broken all three jobs on import.
       - name: Install Dependencies
-        run: pip install requests pulp pandas psycopg2-binary numpy
+        run: pip install requests pulp psycopg2-binary numpy python-dateutil
 
+      # Every day this does not run is a day of replay history that cannot be
+      # recovered later. Deliberately the cheapest and most frequent job.
+      - name: Nightly Bootstrap Archive
+        if: (github.event_name == 'workflow_dispatch' && inputs.step == 'archive') || github.event.schedule == '0 2 * * *'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/archive_bootstrap.py
+
+      # NB: snapshot_xp.py opens with DELETE FROM fpl_predictions WHERE
+      # gameweek = %s. Previously every step ran on any workflow_dispatch, so a
+      # manual run mid-gameweek deleted that gameweek's predictions and
+      # destroyed their pairing with the actuals already ingested. The step
+      # input above makes each step individually selectable.
       - name: Friday Snapshot
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 16 * * 5'
+        if: (github.event_name == 'workflow_dispatch' && inputs.step == 'snapshot') || github.event.schedule == '0 16 * * 5'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/snapshot_xp.py
 
       - name: Tuesday Ingest Actuals
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 10 * * 2'
+        if: (github.event_name == 'workflow_dispatch' && inputs.step == 'ingest') || github.event.schedule == '0 10 * * 2'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/ingest_actuals.py
 
+      # Auto-tune stays disabled until Stage 8 repairs the calibration loop
+      # (damping, frozen dc_sensitivity gradient, surrogate mismatch, loss
+      # floor). Running coordinate descent against a misspecified surrogate on
+      # early v2 rows would drift the weights in a direction driven by noise.
       - name: Wednesday Auto-Tune & Commit
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 10 * * 3'
+        if: (github.event_name == 'workflow_dispatch' && inputs.step == 'autotune')
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |

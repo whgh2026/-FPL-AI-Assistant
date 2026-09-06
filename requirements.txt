@@ -1,9 +1,26 @@
-streamlit
-google-genai
-requests
-pulp
-python-dotenv
-Pillow
-python-dateutil
-psycopg2-binary
-numpy
+# Floors are the versions this build is tested against; the upper bounds cap
+# the major, so a security patch still installs but a breaking release cannot
+# arrive silently on the next Railway deploy.
+#
+# pulp<4 is the load-bearing one. The suite already emits "PULP_CBC_CMD is
+# deprecated and will be removed in PuLP 4.0" and "Constructing LpVariable
+# directly is deprecated" -- both are APIs the solver is built on, so an
+# unpinned install would take the entire transfer engine down the day PuLP 4.0
+# ships, in production, with no code change to blame it on.
+streamlit>=1.63,<2
+requests>=2.33,<3
+pulp>=3.3,<4
+numpy>=2.4,<3
+python-dateutil>=2.9,<3
+Pillow>=12.3,<13
+
+# Not importable in the test container, so these carry floors rather than
+# tested versions: psycopg2-binary is exercised only against a real database,
+# and google-genai only by the screenshot importer.
+psycopg2-binary>=2.9,<3
+google-genai>=1.0,<2
+
+# python-dotenv was removed here: it was installed but never imported, so .env
+# files were silently NOT being loaded. Anyone who put secrets in one and
+# assumed they were live was wrong. Configuration comes from the Railway
+# dashboard and GitHub Actions secrets.

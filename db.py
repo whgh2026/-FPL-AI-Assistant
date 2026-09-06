@@ -1,3 +1,4 @@
+import gzip
 import math
 import os
 import json
@@ -38,24 +39,217 @@ def calculate_decaying_tax(current_gw, purchase_gw, status="a"):
     return round(2.0 * math.exp(-0.7 * held), 2)
 
 
+CONNECT_TIMEOUT_SECONDS = 10
+POOL_MIN, POOL_MAX = 1, 8
+
+_POOL = None
+_LAST_DB_ERROR = None      # (kind, message) or None
+
+
+def last_db_error():
+    """Why the most recent connection attempt failed, or None.
+
+    get_db_connection returns None on every failure, which is the right shape
+    for callers that must degrade -- but it threw away the REASON, so a page
+    could only ever say "unavailable". "No DATABASE_URL configured" and "the
+    database refused the connection" need different responses from whoever is
+    reading, and one of them is a five-second fix.
+    """
+    return _LAST_DB_ERROR
+
+
+def _database_url():
+    if st is not None:
+        try:
+            url = st.secrets.get("DATABASE_URL")
+            if url:
+                return url
+        except Exception:
+            pass
+    return os.getenv("DATABASE_URL")
+
+
+class _PooledConnection:
+    """A pooled connection that behaves like a plain one at the call site.
+
+    All thirteen callers do `conn.close()` in a finally block, which against a
+    pool would destroy the connection rather than return it. This intercepts
+    close() to hand it back instead.
+
+    It also ROLLS BACK first, which matters more than the pooling: several
+    callers catch an exception and return a default inside a try/finally that
+    closes the connection, leaving the transaction aborted. Handed to the next
+    caller unchanged, that connection fails every subsequent statement with
+    "current transaction is aborted" -- one bad query would poison the pool for
+    the life of the process.
+    """
+
+    def __init__(self, conn, pool):
+        self._conn = conn
+        self._pool = pool
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self._conn.__enter__()
+
+    def __exit__(self, *exc):
+        return self._conn.__exit__(*exc)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        broken = False
+        try:
+            self._conn.rollback()
+        except Exception:
+            broken = True          # unusable; do not return it to the pool
+        try:
+            self._pool.putconn(self._conn, close=broken)
+        except Exception:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+
+def _get_pool():
+    global _POOL
+    if _POOL is not None:
+        return _POOL
+    url = _database_url()
+    if not url:
+        return None
+    from psycopg2 import pool as _pgpool
+    _POOL = _pgpool.ThreadedConnectionPool(
+        POOL_MIN, POOL_MAX, url, connect_timeout=CONNECT_TIMEOUT_SECONDS)
+    return _POOL
+
+
 def get_db_connection():
-    """Return a psycopg2 connection from DATABASE_URL, or None on failure."""
+    """A pooled psycopg2 connection, or None on failure.
+
+    Pooled because thirteen call sites each opened a fresh TCP connection and
+    ran authentication, and Streamlit re-executes the whole script on every
+    interaction -- so a single page could pay for several full connection
+    handshakes before rendering anything.
+
+    connect_timeout is the more important half. There was none, so an
+    unreachable database did not fail: it HUNG, and took the page render with
+    it for as long as the OS was willing to wait on the socket.
+    """
+    global _LAST_DB_ERROR, _POOL
     if not _PSYCOPG2:
+        _LAST_DB_ERROR = ("driver", "psycopg2 is not installed")
+        return None
+    if not _database_url():
+        _LAST_DB_ERROR = ("config", "DATABASE_URL is not set")
         return None
     try:
-        url = None
-        if st is not None:
-            try:
-                url = st.secrets.get("DATABASE_URL")
-            except Exception:
-                url = None
-        if not url:
-            url = os.getenv("DATABASE_URL")
-        if not url:
+        pool = _get_pool()
+        if pool is None:
+            _LAST_DB_ERROR = ("config", "DATABASE_URL is not set")
             return None
-        return psycopg2.connect(url)
-    except Exception:
+        conn = _PooledConnection(pool.getconn(), pool)
+        _LAST_DB_ERROR = None
+        return conn
+    except Exception as exc:
+        _LAST_DB_ERROR = ("connect", str(exc) or exc.__class__.__name__)
+        # A pool that cannot hand out connections is not worth keeping: drop it
+        # so the next attempt rebuilds rather than reusing a broken one.
+        _POOL = None
         return None
+
+
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+# Every table the application reads or writes, created in one place.
+#
+# `fpl_predictions` and `manager_transfer_ledger` previously had no CREATE
+# statement anywhere in the repository: the calibration snapshot would fail on a
+# fresh database with UndefinedTable, and the ledger's ON CONFLICT DO NOTHING
+# had no unique constraint to act on, so re-running the backfill duplicated rows
+# instead of no-oping.
+#
+# The other tables are also created lazily inside their writers. That is left in
+# place for now (removing the per-insert DDL is Stage 8) -- these statements are
+# idempotent, so running both is harmless.
+_SCHEMA = (
+    # Calibration loop: pre-deadline predictions, joined to realised points.
+    """
+    CREATE TABLE IF NOT EXISTS fpl_predictions (
+        id BIGSERIAL PRIMARY KEY,
+        player_id INTEGER NOT NULL,
+        gameweek INTEGER NOT NULL,
+        player_name TEXT,
+        position TEXT,
+        team TEXT,
+        predicted_xp DOUBLE PRECISION,
+        actual_points DOUBLE PRECISION,
+        base_pts DOUBLE PRECISION,
+        cameo_mass DOUBLE PRECISION,
+        rotation_variance DOUBLE PRECISION,
+        dc_sensitivity DOUBLE PRECISION,
+        minutes_floor DOUBLE PRECISION,
+        model_version TEXT DEFAULT 'v1',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (player_id, gameweek))
+    """,
+    "CREATE INDEX IF NOT EXISTS fpl_predictions_gw_idx ON fpl_predictions (gameweek)",
+    # Ledger: establishes true purchase price, and therefore selling price, per
+    # manager. The UNIQUE is what makes the backfill's ON CONFLICT idempotent.
+    """
+    CREATE TABLE IF NOT EXISTS manager_transfer_ledger (
+        id BIGSERIAL PRIMARY KEY,
+        manager_id BIGINT NOT NULL,
+        player_id INTEGER NOT NULL,
+        gameweek INTEGER NOT NULL,
+        direction TEXT NOT NULL,
+        purchase_price DOUBLE PRECISION,
+        selling_price DOUBLE PRECISION,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (manager_id, player_id, gameweek, direction))
+    """,
+    "CREATE INDEX IF NOT EXISTS manager_ledger_mgr_idx ON manager_transfer_ledger (manager_id)",
+    # Archive of the raw FPL bootstrap, so the Stage 8 backtester can replay a
+    # gameweek against the data the model actually saw at the time. Payload is
+    # gzipped JSON: raw is ~3MB, compressed ~250KB.
+    """
+    CREATE TABLE IF NOT EXISTS bootstrap_snapshots (
+        id BIGSERIAL PRIMARY KEY,
+        gameweek INTEGER NOT NULL,
+        captured_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        captured_at TIMESTAMPTZ DEFAULT NOW(),
+        payload BYTEA NOT NULL,
+        UNIQUE (gameweek, captured_date))
+    """,
+)
+
+
+def run_migrations():
+    """Create every table the app needs. Idempotent; safe to call on each boot.
+
+    Returns True on success, False if the database is unreachable or the DDL
+    failed -- callers that care should surface that rather than assume success.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    try:
+        with conn.cursor() as cur:
+            for stmt in _SCHEMA:
+                cur.execute(stmt)
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 
 def _reconstruct_holdings(rows):
@@ -247,6 +441,16 @@ def ensure_calibration_columns():
         ("rotation_variance", "DOUBLE PRECISION"),
         ("dc_sensitivity", "DOUBLE PRECISION"),
         ("base_pts", "DOUBLE PRECISION"),
+        ("model_version", "TEXT DEFAULT 'v1'"),
+        # Stage 8: the surrogate needs the cameo-penalty CLAMP input and the
+        # ep_next blend weight to reproduce _player_xp_raw. Without them it
+        # modelled the penalty unclamped and unblended, over-attributing a unit
+        # change by up to 2x. Nullable on purpose -- rows written before this
+        # fall back to the old arithmetic in reproject() rather than being lost.
+        ("raw_total", "DOUBLE PRECISION"),
+        ("xp_cameo", "DOUBLE PRECISION"),
+        ("ep_w", "DOUBLE PRECISION"),
+        ("ep_term", "DOUBLE PRECISION"),
     ]
     try:
         conn = get_db_connection()
@@ -264,18 +468,34 @@ def ensure_calibration_columns():
         return False
 
 
-def get_prediction_history():
-    """Return calibration rows: predicted_xp, actual_points and the feature columns."""
+def get_prediction_history(model_version=None):
+    """Return calibration rows for one model version.
+
+    Filtering matters: the Dixon-Coles centring and sign fix changed what
+    predicted_xp means, so pre-fix rows carry a systematically different bias.
+    Fitting across the boundary would have the calibrator chase a discontinuity
+    rather than the model's real error. Passing None returns every row, which is
+    only appropriate for inspection, never for tuning.
+    """
     try:
         conn = get_db_connection()
         if conn is None:
             return []
         try:
             cur = conn.cursor()
-            cur.execute(
-                "SELECT predicted_xp, actual_points, base_pts, cameo_mass, rotation_variance, dc_sensitivity "
-                "FROM fpl_predictions WHERE actual_points IS NOT NULL"
-            )
+            if model_version is None:
+                cur.execute(
+                    "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
+                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
+                    "ep_w, ep_term "
+                    "FROM fpl_predictions WHERE actual_points IS NOT NULL")
+            else:
+                cur.execute(
+                    "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
+                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
+                    "ep_w, ep_term "
+                    "FROM fpl_predictions WHERE actual_points IS NOT NULL "
+                    "AND model_version = %s", (model_version,))
             rows = []
             for r in cur.fetchall():
                 rows.append({
@@ -285,12 +505,156 @@ def get_prediction_history():
                     "cameo_mass": r[3] or 0.0,
                     "rotation_variance": r[4] or 0.0,
                     "dc_sensitivity": r[5] or 0.0,
+                    # None, not 0.0: reproject() distinguishes "no clamp input
+                    # recorded" (fall back to the old unclamped arithmetic) from
+                    # "the cameo projection really was zero", and 0.0 would make
+                    # the clamp bind on every legacy row.
+                    "raw_total": r[6],
+                    "xp_cameo": r[7],
+                    "ep_w": r[8],
+                    "ep_term": r[9] or 0.0,
                 })
             return rows
         finally:
             conn.close()
     except Exception:
         return []
+
+
+def save_bootstrap_snapshot(bootstrap, gameweek):
+    """Archive the raw FPL bootstrap for later replay.
+
+    One row per (gameweek, date), so re-running on the same day overwrites
+    rather than accumulating. Payload is gzipped JSON.
+
+    This is what the Stage 8 backtester replays against: without an archive of
+    what the model could see at the time, "did this change help?" is not an
+    answerable question. Every day this is not running is a day of history lost,
+    which is why it lands in Stage 0 rather than alongside the backtester.
+    """
+    try:
+        payload = gzip.compress(json.dumps(bootstrap, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return False
+    conn = get_db_connection()
+    if conn is None:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO bootstrap_snapshots (gameweek, payload) VALUES (%s, %s) "
+                "ON CONFLICT (gameweek, captured_date) DO UPDATE "
+                "SET payload = EXCLUDED.payload, captured_at = NOW()",
+                (int(gameweek), psycopg2.Binary(payload)),
+            )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def load_bootstrap_snapshot(gameweek, captured_date=None):
+    """Return an archived bootstrap dict, or None. Used by the backtester."""
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            if captured_date is None:
+                cur.execute(
+                    "SELECT payload FROM bootstrap_snapshots WHERE gameweek = %s "
+                    "ORDER BY captured_at DESC LIMIT 1", (int(gameweek),))
+            else:
+                cur.execute(
+                    "SELECT payload FROM bootstrap_snapshots "
+                    "WHERE gameweek = %s AND captured_date = %s", (int(gameweek), captured_date))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return json.loads(gzip.decompress(bytes(row[0])).decode("utf-8"))
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def count_checked_predictions(model_version=None):
+    """How many predictions have been paired with a real result, for one model
+    version. Returns None when the database is unreachable -- distinct from 0,
+    which means "connected, nothing banked yet".
+
+    Drives the UI's recalibration copy. Hardcoding a gameweek there would be
+    wrong twice over: the count restarts at each model_version bump, and with
+    the active-player filter 5,000 rows is ~18 gameweeks, not the ~7 an
+    unfiltered count suggests.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            if model_version is None:
+                cur.execute("SELECT count(*) FROM fpl_predictions "
+                            "WHERE actual_points IS NOT NULL")
+            else:
+                cur.execute("SELECT count(*) FROM fpl_predictions "
+                            "WHERE actual_points IS NOT NULL AND model_version = %s",
+                            (model_version,))
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def prediction_accuracy_by_gw(model_version=None, limit=12):
+    """Per-gameweek forecast accuracy, newest last. [] when unavailable.
+
+    The app claims a self-checking model, so the check has to be visible: this
+    is what the Model Health tab reads. RMSE says how far off the projections
+    were, bias says which way (positive = we over-projected), and corr() is the
+    Pearson correlation between projected and actual -- the number that says
+    whether the RANKING was right, which matters more for transfer advice than
+    the absolute level does.
+
+    Rows with no result yet are excluded, as are gameweeks with too few paired
+    rows for the statistics to mean anything.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return []
+    try:
+        where = "actual_points IS NOT NULL"
+        params = []
+        if model_version is not None:
+            where += " AND model_version = %s"
+            params.append(model_version)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT gameweek, count(*), "
+                "  sqrt(avg(power(predicted_xp - actual_points, 2))), "
+                "  avg(predicted_xp - actual_points), "
+                "  corr(predicted_xp, actual_points) "
+                f"FROM fpl_predictions WHERE {where} "
+                "GROUP BY gameweek HAVING count(*) >= 20 "
+                "ORDER BY gameweek DESC LIMIT %s", (*params, limit))
+            rows = [
+                {"gameweek": int(r[0]), "n": int(r[1]),
+                 "rmse": float(r[2]) if r[2] is not None else None,
+                 "bias": float(r[3]) if r[3] is not None else None,
+                 "corr": float(r[4]) if r[4] is not None else None}
+                for r in cur.fetchall()
+            ]
+        rows.reverse()
+        return rows
+    except Exception:
+        return []
+    finally:
+        conn.close()
 
 
 def save_plan(manager_id, gameweek, plan):

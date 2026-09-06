@@ -72,8 +72,18 @@ class TransferPolicyTest(unittest.TestCase):
         self.assertIn(15, outs)
 
     def test_at_max_ft_cap_burns_transfer(self):
+        # At the 5-FT cap banking is nearly worthless (the 5th banked transfer
+        # is worth 0.05), so a clear upgrade should be taken rather than wasted.
+        #
+        # The incoming projection was raised from 14.0 to 20.0 in Stage 3. Under
+        # the old economics a +2.0 horizon gain cleared the friction stack; the
+        # separable hurdle that replaced it charges HURDLE_BASE plus 1.2*sigma
+        # per leg, and sigma on this pool is ~1.1, so a swap now has to clear
+        # roughly 3.4 points. 14.0 left the decision genuinely marginal, which
+        # is not what this test is for -- it tests the FT-cap incentive, so the
+        # gain is now unambiguous.
         squad = _squad()
-        res = _run(squad, {16: 14.0}, {16: 3.5}, {}, free_transfers=5)
+        res = _run(squad, {16: 20.0}, {16: 5.0}, {}, free_transfers=5)
         self.assertEqual(len(res["transfers"]), 1)
 
 

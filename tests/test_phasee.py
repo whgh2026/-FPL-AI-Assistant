@@ -35,11 +35,27 @@ class CalibrationTest(unittest.TestCase):
         self.assertAlmostEqual(r["rmse"], abs(pred - 5.0), places=3)
 
     def test_calibrate_converges(self):
+        """At the PRODUCTION damping, not damping=1.0.
+
+        This test used to pass damping=1.0 -- twenty times the shipped 0.05 --
+        so the setting that actually ran was never exercised, and the fact that
+        it moved a weight by only 0.5% per run went unnoticed for a season.
+        """
         base = 4.0
         rows = [{"base_pts": base, "cameo_mass": 0.0, "rotation_variance": 0.0,
                  "dc_sensitivity": 0.0, "actual_points": 1.4 * base} for _ in range(50)]
-        new = fpl_tools.calibrate_weights(rows, _weights(), damping=1.0)
+        new = fpl_tools.calibrate_weights(rows, _weights())
         self.assertGreater(new["global_xP_modifier"], 1.0)
+
+    def test_default_damping_reaches_a_target_within_a_season(self):
+        """The C14 defect, as a number. The probe is +/-10%, so one run moves a
+        weight by damping*10%. At 0.05 that is 0.5% per run and 1.005^n = 1.30
+        needs n = 53 weekly runs against a 38-gameweek season -- weights.json
+        could not meaningfully move within a season whatever the data said."""
+        per_run = fpl_tools.CALIBRATION_DAMPING * 0.10
+        runs = math.log(1.30) / math.log(1.0 + per_run)
+        self.assertLess(runs, 20,
+                        f"{runs:.0f} runs to move a weight 30%, against a 38-week season")
 
 
 class CvarTest(unittest.TestCase):
@@ -60,12 +76,19 @@ class CvarTest(unittest.TestCase):
         if not fpl_tools.HAS_NUMPY:
             self.skipTest("numpy required")
         import numpy as np
+        # Shape is (S, n): three SCENARIOS down the rows, one gameweek across.
+        # This test previously wrote [np.array([10.0, 5.0, 8.0])] -- shape (1, 3)
+        # -- i.e. one scenario over three gameweeks, encoding the transposed
+        # layout the consumers were buggily assuming. The intent (three
+        # scenarios, pick the worst two) is unchanged; only the orientation is
+        # corrected, so the expected values are identical.
         matrix = {
-            1: [np.array([10.0, 5.0, 8.0])],
-            2: [np.array([3.0, 2.0, 4.0])],
+            1: np.array([[10.0], [5.0], [8.0]]),
+            2: np.array([[3.0], [2.0], [4.0]]),
         }
         out = fpl_tools._select_stress_scenarios(matrix, K=2)
-        # Aggregate totals: [13, 7, 12] -> lowest two are scenarios 1 then 2.
+        # Aggregate totals per scenario: [13, 7, 12] -> lowest two are
+        # scenario 1 (7.0) then scenario 2 (12.0).
         self.assertEqual(out[1], [5.0, 8.0])
 
     def test_blocker_solves_with_cvar(self):
@@ -90,7 +113,7 @@ class CvarTest(unittest.TestCase):
         current_ids = set(range(1, 16))
         eo_map = {pid: {"eo": 20.0} for pid in current_ids}
         cvar = {pid: [5.0] * 10 for pid in current_ids}  # 10 stress scenarios
-        sel, _ = fpl_tools._solve_squad(
+        sel, _, _parts = fpl_tools._solve_squad(
             pool, budget=100.0, must_include_ids=current_ids,
             hit_config={"free_transfers": 1, "hit_cost": 0.0, "max_transfers": 1, "ft_friction": 0.0},
             eo_map=eo_map, mode="blocker", phase=2, cvar_scenarios=cvar,

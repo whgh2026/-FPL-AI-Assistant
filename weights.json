@@ -1,1 +1,25 @@
-{"global_xP_modifier": 1.0, "home_advantage": 1.0, "clean_sheet_confidence": 1.0, "autosub_ref": 1.8, "rotation_convexity": 0.4, "dixon_coles_decay": 0.03, "dixon_coles_tau": 0.2, "rating_scale": 2.0, "eo_tc_mass": 0.03, "eo_floor": 15.0, "eo_ceil": 10.0, "block_weight": 0.04, "diverge_weight": 0.05, "stack_weight": 0.3, "track_weight": 0.5, "saa_att_sigma": 0.25, "saa_def_sigma": 0.2, "saa_crisis_prob": 0.05, "term_equity": 0.1, "term_ft": 1.5, "term_dead": 0.5, "cvar_alpha": 0.1, "cvar_lambda": 0.05}
+{
+  "global_xP_modifier": 1.0,
+  "home_advantage": 1.0,
+  "clean_sheet_confidence": 1.0,
+  "autosub_ref": 1.8,
+  "rotation_convexity": 0.4,
+  "dixon_coles_decay": 0.03,
+  "dixon_coles_tau": -0.1,
+  "rating_scale": 2.0,
+  "eo_tc_mass": 0.03,
+  "eo_floor": 15.0,
+  "eo_ceil": 10.0,
+  "block_weight": 0.04,
+  "diverge_weight": 0.05,
+  "stack_weight": 0.3,
+  "track_weight": 0.5,
+  "saa_att_sigma": 0.25,
+  "saa_def_sigma": 0.2,
+  "saa_crisis_prob": 0.05,
+  "term_equity": 0.1,
+  "term_ft": 1.5,
+  "term_dead": 0.5,
+  "cvar_alpha": 0.1,
+  "cvar_lambda": 0.05
+}

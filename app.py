@@ -12,11 +12,24 @@ from db import get_or_backfill_manager_history, log_decision, log_squad_health, 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
 def get_caveat_html():
-    fetch_ts = fpl_tools.get_api_timestamp()
-    uk_zone = tz.gettz('Europe/London')
-    dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(uk_zone)
-    time_str = dt.strftime("%H:%M on %d %B %Y")
-    return f'<div style="font-size:0.78rem;color:#64748b;margin:6px 0 10px 0;">ℹ️ <b>Note:</b> Player values and expected points (xP) are derived from our closed-loop algorithmic simulation model, refreshed at {time_str} UK time. Prices update once daily at roughly 01:30 UK time.</div>'
+    """Data-freshness note. Never raises: it is decoration on every page.
+
+    This called get_api_timestamp() unguarded, so an FPL outage took the ENTIRE
+    page down from a footnote -- the user got a Streamlit traceback instead of a
+    squad, for want of a timestamp.
+    """
+    try:
+        fetch_ts = fpl_tools.get_api_timestamp()
+        uk_zone = tz.gettz("Europe/London")
+        dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(uk_zone)
+        when = f"refreshed at {dt.strftime('%H:%M on %d %B %Y')} UK time"
+    except Exception:
+        when = "last refresh time unavailable"
+    return (
+        '<div class="note">ℹ️ <b>Heads up:</b> projected points are our best '
+        f'guess, not a promise ({when}). Prices update once a day, at about '
+        '01:30 UK time.</div>'
+    )
 
 # ------------------------------------------------------------------
 # Auto-detect the upcoming gameweek straight from the FPL API
@@ -47,251 +60,13 @@ POS_COLORS = {"GK": "#f59e0b", "DEF": "#0ea5e9", "MID": "#10b981", "FWD": "#f43f
 POS_ORDER = ["GK", "DEF", "MID", "FWD"]
 ALL_CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
 
-CSS = """
-<style>
-  #MainMenu, footer {visibility: hidden;}
-  .block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1240px;}
-  .hero {background: linear-gradient(120deg, #4f46e5 0%, #6d5cf0 45%, #38bdf8 100%);
-         color: #fff; border-radius: 18px; padding: 26px 28px; margin-bottom: 14px;
-         box-shadow: 0 12px 30px rgba(79,70,229,0.22);}
-  .hero h1 {font-size: 1.7rem; font-weight: 800; letter-spacing: -0.02em; margin: 0;}
-  .hero .sub {color: #eef2ff; font-size: 0.95rem; margin-top: 0.4rem; line-height: 1.45;}
-  .deadline-hero {background: #fff; border: 1px solid #e2e8f0; border-left: 6px solid #4f46e5;
-         border-radius: 14px; padding: 18px 22px; margin-bottom: 16px;
-         box-shadow: 0 6px 18px rgba(15,23,42,0.06);}
-  .dl-gw {font-size: 0.78rem; font-weight: 800; letter-spacing: 0.14em; color: #4f46e5; text-transform: uppercase;}
-  .dl-time {font-size: 1.9rem; font-weight: 800; color: #0f172a; line-height: 1.15; margin-top: 2px;}
-  .dl-sub {color: #64748b; font-size: 0.9rem; margin-top: 2px;}
-  .dl-warning {color: #e11d48; font-size: 0.88rem; margin-top: 6px;}
-  .overview {background: #eef2ff; border: 1px solid #e0e7ff; border-radius: 14px; padding: 16px 20px;
-         color: #3730a3; font-size: 0.94rem; line-height: 1.55; margin-bottom: 8px;}
-  .overview b {color: #312e81;}
-  .card {background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px 20px;
-         margin-bottom: 14px; box-shadow: 0 4px 14px rgba(15,23,42,0.05);}
-  .card h3 {margin: 0 0 2px 0; font-size: 1.02rem; font-weight: 700; color: #0f172a;}
-  .section-label {text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.7rem; color: #64748b; margin-bottom: 10px;}
-  .grid {display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 10px;}
-  .pc {border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 13px; background: #fff;}
-  .pc .pos {display:inline-block; font-size: 0.66rem; font-weight: 800; letter-spacing: 0.05em;
-            padding: 2px 7px; border-radius: 5px; color: #fff;}
-  .pc .nm {font-weight: 700; font-size: 0.92rem; margin: 6px 0 1px 0; color: #0f172a;}
-  .pc .meta {color: #64748b; font-size: 0.75rem;}
-  .bar {height: 5px; background: #e2e8f0; border-radius: 3px; margin: 8px 0 4px 0; overflow: hidden;}
-  .bar-fill {height: 100%; border-radius: 3px;}
-  .xp {font-weight: 800; font-size: 0.88rem;}
-  .badge {display:inline-flex; align-items:center; gap:8px; padding: 8px 13px; border-radius: 999px;
-          background:#eef2ff; border:1px solid #e0e7ff; font-size:0.8rem; color:#3730a3;}
-  .badge .g {width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 8px #10b981;}
-  .transfer {display:flex; align-items:center; gap: 10px; padding: 9px 0; border-bottom: 1px solid #e2e8f0;}
-  .transfer .arrow {color: #94a3b8;}
-  .out {color: #e11d48; font-weight: 700;}
-  .inn {color: #059669; font-weight: 700;}
-  .gain {margin-left: auto; font-weight: 700; font-size: 0.85rem; color: #475569;}
-  .cap-card {border: 1px solid #fbbf24; background: #fff7ed;}
-  .role {display:inline-block; font-size: 0.62rem; font-weight: 800; padding: 1px 6px; border-radius: 5px;
-         margin-left: 5px; vertical-align: middle;}
-  .role-c {background: #f59e0b; color: #fff;}
-  .role-vc {background: #cbd5e1; color: #334155;}
-  .stat-badge {display:inline-block; font-size:0.6rem; font-weight:700; padding:1px 5px; border-radius:4px; margin-left:4px; white-space:nowrap; vertical-align: middle;}
-  .stat-out {background:#fee2e2; color:#b91c1c; border:1px solid #fecaca;}
-  .stat-doubt {background:#fef3c7; color:#b45309; border:1px solid #fde68a;}
-  .chip-banner {background: #f0fdf4; border: 1px solid #bbf7d0; border-left: 5px solid #16a34a; border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; font-size: 0.9rem; color: #166534;}
-  .override-head {background: #fff7ed; border: 1px solid #fed7aa; border-left: 6px solid #f59e0b;
-         border-radius: 14px 14px 0 0; padding: 16px 20px; font-size: 1.15rem; font-weight: 800;
-         color: #9a3412; margin-top: 26px;}
-  .override-head span {color: #c2410c; font-size: 0.82rem; font-weight: 600; margin-left: 8px;}
-  .dummy-url {display:inline-block; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:6px;
-              padding:2px 8px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
-              font-size:0.78rem; color:#64748b; margin-left:6px;}
-  .team-row {display:flex; gap:12px; align-items:stretch; margin-bottom:10px;}
-  .pos-col {flex:0 0 64px; display:flex; flex-direction:column; align-items:center; justify-content:center;
-            background:#f1f5f9; border-radius:10px; padding:8px;}
-  .pos-emoji {font-size:1.3rem;}
-  .pos-name {font-weight:800; font-size:0.68rem; letter-spacing:.06em; color:#475569; margin-top:2px;}
-  .starters {flex:1; display:grid; grid-template-columns:repeat(auto-fill,minmax(148px,1fr)); gap:8px; align-content:start;}
-  .subs {flex:0 0 205px; background:#f8fafc; border:1px dashed #cbd5e1; border-radius:10px; padding:8px 10px;}
-  .sub-title {font-size:0.62rem; font-weight:800; letter-spacing:.08em; text-transform:uppercase;
-              color:#94a3b8; margin-bottom:4px;}
-  .sub-item {font-size:0.75rem; color:#0f172a; font-weight:600; padding:4px 0; border-bottom:1px dotted #e2e8f0;
-             display:flex; justify-content:space-between; align-items:center; gap:4px;}
-  .sub-item:last-child {border-bottom:none;}
-  .sub-meta {color:#64748b; font-size:0.68rem; margin-top:2px;}
-  .sub-xp {color:#0f172a; font-weight:800; white-space:nowrap; margin-top:2px;}
-  .empty {color:#cbd5e1; font-size:0.8rem;}
-  .mc {border:1px solid #e2e8f0; border-left:3px solid #94a3b8; border-radius:10px; padding:8px 10px;
-       background:#fff; min-width:0;}
-  .mc .pos {display:inline-block; font-size:0.6rem; font-weight:800; letter-spacing:0.04em;
-            padding:1px 6px; border-radius:4px; color:#fff; vertical-align: middle;}
-  .mc-nm {font-weight:700; font-size:0.82rem; color:#0f172a; margin-top:4px;
-          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-  .mc-meta {color:#64748b; font-size:0.7rem; margin-top:2px;}
-  .mc-xp {font-weight:800; font-size:0.8rem; margin-top:3px; color:#0f172a;}
-  .alert-box {background: #fff1f2; border: 1px solid #fecdd3; border-left: 4px solid #e11d48; padding: 12px 16px; border-radius: 8px; margin: 10px 0;}
-</style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
 # Dark "Final Boss" theme overrides + analytics component styles
 # ------------------------------------------------------------------
-DARK_CSS = """
-<style>
-  .stApp {background: #0B1320;}
-  .block-container {color: #E2E8F0;}
-  [data-testid="stSidebar"] {background: #0F172A; border-right: 1px solid #334155;}
-  [data-testid="stSidebar"] * {color: #E2E8F0;}
-  [data-testid="stHeader"] {background: rgba(11,19,32,0.5);}
 
-  .deadline-hero {background: #1E293B; border-color: #334155; border-left-color: #00F5A0; box-shadow: none;}
-  .dl-time {color: #E2E8F0;}
-  .dl-gw {color: #00F5A0;}
-  .dl-sub {color: #94a3b8;}
-  .dl-warning {color: #fda4af;}
-  .overview {background: #1E293B; border-color: #334155; color: #cbd5e1;}
-  .overview b {color: #00F5A0;}
-  .card {background: #1E293B; border-color: #334155; box-shadow: 0 4px 14px rgba(0,0,0,0.25);}
-  .card h3 {color: #E2E8F0;}
-  .section-label {color: #00F5A0;}
-  .pc {background: #0F172A; border-color: #334155;}
-  .pc .nm {color: #E2E8F0;}
-  .pc .meta {color: #94a3b8;}
-  .bar {background: #334155;}
-  .badge {background: #1E293B; border-color: #334155; color: #00F5A0;}
-  .badge .g {background: #00F5A0; box-shadow: 0 0 8px #00F5A0;}
-  .transfer {border-bottom-color: #334155;}
-  .out {color: #fda4af;}
-  .inn {color: #00F5A0;}
-  .gain {color: #94a3b8;}
-  .cap-card {border-color: #00F5A0; background: #0f2b20;}
-  .role-vc {background: #334155; color: #cbd5e1;}
-  .role-c {background: #00F5A0; color: #0B1320;}
-  .stat-out {background: #3b1220; color: #fda4af; border-color: #7f1d1d;}
-  .stat-doubt {background: #3b2f12; color: #fbbf24; border-color: #92400e;}
-  .chip-banner {background: #0f2b20; border-color: #16a34a; border-left-color: #00F5A0; color: #bbf7d0;}
-  .override-head {background: #1E293B; border-color: #334155; border-left-color: #00F5A0; color: #E2E8F0;}
-  .override-head span {color: #00F5A0;}
-  .dummy-url {background: #0F172A; border-color: #334155; color: #94a3b8;}
-  .pos-col {background: #0F172A; border-color: #334155;}
-  .pos-name {color: #94a3b8;}
-  .subs {background: #0F172A; border-color: #334155;}
-  .sub-item {color: #E2E8F0; border-bottom-color: #334155;}
-  .sub-meta {color: #94a3b8;}
-  .sub-xp {color: #00F5A0;}
-  .empty {color: #475569;}
-  .mc {background: #0F172A; border-color: #334155;}
-  .mc-nm {color: #E2E8F0;}
-  .mc-meta {color: #94a3b8;}
-  .mc-xp {color: #00F5A0;}
-  .mc .pos {color: #0B1320;}
-  .alert-box {background: #3b1220; border-color: #7f1d1d; border-left-color: #fda4af; color: #fecdd3;}
-</style>
-"""
-st.markdown(DARK_CSS, unsafe_allow_html=True)
 
-DARK_CSS2 = """
-<style>
-  .headshot {width: 44px; height: 56px; object-fit: cover; border-radius: 6px; background: #0F172A; border: 1px solid #334155;}
-  .badge-img {width: 26px; height: 26px; object-fit: contain; vertical-align: middle;}
-  .badge-lg {width: 40px; height: 40px; object-fit: contain;}
 
-  .pitch {background: linear-gradient(180deg, #113824 0%, #0b2418 100%); border: 2px solid #334155; border-radius: 16px; padding: 20px 16px; margin-bottom: 14px;}
-  .pitch-row {display: flex; justify-content: space-around; align-items: center; margin: 14px 0;}
-  .pitch-player {text-align: center; width: 92px;}
-  .pitch-player .nm {font-size: 0.72rem; font-weight: 700; color: #E2E8F0; margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
-  .pitch-player .meta {font-size: 0.62rem; color: #94a3b8;}
-  .pitch-player .xp {font-size: 0.72rem; font-weight: 800; color: #00F5A0;}
-  .dugout {background: #0F172A; border: 1px dashed #334155; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px;}
-  .dugout-title {font-size: 0.62rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: #64748b; margin-bottom: 10px;}
-
-  .transfer-pair {display: flex; align-items: center; gap: 10px; margin-bottom: 10px;}
-  .transfer-card {flex: 1; border-radius: 12px; padding: 12px 14px; border: 1px solid #334155; background: #0F172A;}
-  .transfer-card.tc-out {border-left: 4px solid #f43f5e;}
-  .transfer-card.tc-in {border-left: 4px solid #00F5A0;}
-  .transfer-arrow {font-size: 1.4rem; color: #00F5A0; font-weight: 800;}
-  .tc-name {font-weight: 700; font-size: 0.9rem; color: #E2E8F0;}
-  .tc-meta {font-size: 0.72rem; color: #94a3b8;}
-
-  .rot-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px;}
-  .rot-score {font-size: 1.1rem; font-weight: 800; color: #00F5A0; min-width: 54px;}
-  .fdr-strip {display: flex; gap: 4px; margin-top: 8px;}
-  .fdr-cell {width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.72rem; font-weight: 800; color: #0B1320;}
-
-  .strength-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;}
-  .strength-bar {height: 6px; background: #334155; border-radius: 3px; overflow: hidden; margin: 4px 0;}
-  .strength-fill-home {height: 100%; background: #38bdf8;}
-  .strength-fill-away {height: 100%; background: #00F5A0;}
-  .strength-num {font-weight: 800; color: #00F5A0;}
-
-  .momentum-row {display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid #334155;}
-  .momentum-row:last-child {border-bottom: none;}
-  .momentum-badge-up {background: #0f2b20; color: #00F5A0; border: 1px solid #16a34a; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; white-space: nowrap;}
-  .momentum-badge-down {background: #3b1220; color: #fda4af; border: 1px solid #7f1d1d; padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 800; white-space: nowrap;}
-
-  .radar-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 12px 14px;}
-  .radar-card .nm {font-weight: 700; font-size: 0.85rem; color: #E2E8F0;}
-  .radar-card .meta {color: #94a3b8; font-size: 0.7rem;}
-
-  .cap-pill {background: #00F5A0; color: #0B1320; font-weight: 800; font-size: 0.6rem; padding: 1px 5px; border-radius: 4px;}
-</style>
-"""
-st.markdown(DARK_CSS2, unsafe_allow_html=True)
-
-DARK_CSS3 = """
-<style>
-  .photo-frame {position: relative; display: inline-block; line-height: 0;}
-  .photo-frame .badge-overlay {position: absolute; right: -3px; bottom: -3px; line-height: 0;}
-  .photo-frame .badge-overlay .badge-img {width: 18px; height: 18px; border-radius: 50%; background: #0B1320; border: 1px solid #0B1320;}
-
-  /* Pitch player cards: strict fixed dimensions so a 404 fallback never collapses the grid. */
-  .pitch-player {display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; width: 96px;}
-  .pitch-player .photo-frame {width: 65px; height: 85px; display: flex; align-items: center; justify-content: center;}
-  .pitch-player .headshot {width: 65px; height: 85px; object-fit: cover; border-radius: 8px; display: block;}
-  .pitch-player .nm {width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.72rem; font-weight: 700; color: #E2E8F0;}
-  .pitch-player .meta {width: 100%; font-size: 0.68rem; color: #94a3b8; white-space: nowrap;}
-  .pitch-player .fx-dots {font-size: 0.74rem; letter-spacing: 1.5px; white-space: nowrap;}
-
-  /* Pitch row position labels */
-  .pitch-row {display: flex; align-items: center; gap: 10px; margin: 14px 0;}
-  .pitch-row-label {flex: 0 0 34px; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em; text-align: center; text-transform: uppercase;}
-  .pitch-row-cards {flex: 1; display: flex; justify-content: space-around; align-items: center; gap: 8px;}
-
-  .tc-head {display: flex; align-items: center; gap: 8px;}
-
-  /* Player Inspector */
-  .inspector-card {background: #0F172A; border: 1px solid #334155; border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
-  .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted #334155;}
-  .insp-fixture:last-child {border-bottom: none;}
-  @media (max-width: 768px) {
-    .pitch { padding: 12px 6px !important; }
-    .pitch-row-label { display: none !important; }
-    .pitch-row-cards { width: 100% !important; gap: 2px !important; justify-content: space-evenly !important; }
-    .pitch-player { width: auto !important; flex: 1 1 0 !important; max-width: 20% !important; min-width: 0 !important; padding: 2px !important; gap: 1px !important; }
-    .pitch-player .photo-frame, .pitch-player .headshot { display: none !important; }
-    .pitch-player .nm { font-size: 0.65rem !important; }
-    .pitch-player .meta { font-size: 0.58rem !important; }
-    .pitch-player .fx-dots { font-size: 0.62rem !important; letter-spacing: 0.5px !important; }
-    .dugout { padding: 10px 8px !important; }
-    .dugout > div:last-child { gap: 4px !important; justify-content: space-evenly !important; }
-  }
-</style>
-"""
-st.markdown(DARK_CSS3, unsafe_allow_html=True)
-
-DARK_CSS4 = """
-<style>
-  .signal-grid {display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;}
-  .signal-card {background: #0F172A; border: 1px solid #334155; border-radius: 12px; padding: 12px 14px;}
-  .signal-head {display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-weight: 700; color: #E2E8F0;}
-  .signal-score {margin-left: auto; font-size: 1.15rem; font-weight: 800; color: #00F5A0;}
-  .signal-delta {font-size: 0.72rem; font-weight: 700; margin-left: 4px;}
-  .signal-row {display: flex; align-items: center; gap: 6px; margin: 5px 0;}
-  .signal-label {flex: 0 0 132px; font-size: 0.66rem; color: #94a3b8; letter-spacing: 0.02em;}
-  .signal-bar {flex: 1; height: 5px; background: #334155; border-radius: 3px; overflow: hidden;}
-  .signal-fill {height: 100%; border-radius: 3px;}
-  .signal-val {flex: 0 0 22px; font-size: 0.7rem; font-weight: 700; text-align: right;}
-</style>
-"""
-st.markdown(DARK_CSS4, unsafe_allow_html=True)
 
 
 # ------------------------------------------------------------------
@@ -331,17 +106,17 @@ def _player_card(p, max_xp: float, role: str = None) -> str:
 
 
 def _get_fixture_context():
-    """Cached fixture lookup + upcoming gameweek for traffic-light indicators."""
-    if "fx_context" not in st.session_state:
-        try:
-            bootstrap = fpl_tools._get_bootstrap()
-            st.session_state["fx_context"] = {
-                "lookup": fpl_tools._build_fixture_lookup(bootstrap),
-                "start_event": fpl_tools._next_gameweek(bootstrap),
-            }
-        except Exception:
-            st.session_state["fx_context"] = None
-    return st.session_state["fx_context"]
+    """Fixture lookup + upcoming gameweek, as a view onto the single cache.
+
+    Was a SECOND, independent session-state cache of the same data, with no TTL
+    on either. Once populated, both were stale for the entire browser session --
+    so price changes, injury flags and new fixtures never refreshed without a
+    hard reload, and the two could disagree with each other.
+    """
+    ctx = _bootstrap_ctx()
+    if not ctx:
+        return None
+    return {"lookup": ctx["lookup"], "start_event": ctx["start"]}
 
 
 def _name_with_fixtures(p) -> str:
@@ -477,26 +252,73 @@ def clear_transfer_cache():
 
 
 # ------------------------------------------------------------------
+# Styling
+# ------------------------------------------------------------------
+STYLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "app.css")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_css(path: str, _mtime: float) -> str:
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _inject_css() -> None:
+    """One stylesheet, from disk.
+
+    Was five <style> blocks injected in sequence, where the result depended on
+    injection order: .streamlit/config.toml forces a dark theme, so the light
+    block was dead for every class the dark blocks redefined -- yet ten classes
+    styled ONLY there still rendered light-on-dark. Selectors were also
+    redefined across blocks with different values (.pitch-player 92px then 96px,
+    .headshot 44x56 then 65x85).
+
+    Keyed on mtime so editing the CSS shows up on the next rerun.
+    """
+    try:
+        css = _load_css(STYLE_PATH, os.path.getmtime(STYLE_PATH))
+    except OSError:
+        return
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+
+_inject_css()
+
+# ------------------------------------------------------------------
 # Official Premier League asset helpers
 # ------------------------------------------------------------------
-@st.cache_data(ttl=86400)
-def _headshot_url(player_code: str) -> str:
-    """Return a validated CDN headshot URL, falling back to the placeholder.
+PHOTO_FALLBACK = ("https://resources.premierleague.com/premierleague/photos/"
+                  "players/110x140/Photo-Missing.png")
 
-    Uses a fast HEAD request so a broken primary image never renders as the
-    browser's default broken-image icon (Streamlit strips the HTML `onerror`
-    attribute when `unsafe_allow_html=True`).
+
+def _headshot_style(player_code: str) -> str:
+    """CSS background declaration for a player headshot, with a fallback layer.
+
+    The previous version issued a blocking `requests.head` PER PLAYER to check
+    the CDN before rendering. Cached for 24h, but a cold cache serialised up to
+    two seconds each: fifteen on the pitch, twenty-two on the radar, two per
+    transfer row. That was the single largest contributor to cold-render time.
+
+    CSS background layers replace it. Layers paint front-to-back, and a layer
+    that fails to load simply paints nothing -- so the fallback beneath shows
+    through with no request from us and no broken-image icon. (Streamlit strips
+    the `onerror` attribute under unsafe_allow_html, which is why an <img> tag
+    cannot do this.)
     """
-    fallback_url = "https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png"
     if not player_code:
-        return fallback_url
-    primary_url = f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{player_code}.png"
-    try:
-        if requests.head(primary_url, timeout=2).status_code == 200:
-            return primary_url
-    except Exception:
-        pass
-    return fallback_url
+        return f"background-image:url('{PHOTO_FALLBACK}');"
+    primary = ("https://resources.premierleague.com/premierleague/photos/"
+               f"players/250x250/p{player_code}.png")
+    return (f"background-image:url('{primary}'), url('{PHOTO_FALLBACK}');"
+            "background-size:cover;background-position:center;")
+
+
+def _headshot_url(player_code: str) -> str:
+    """Primary CDN URL. No network call: validation is the browser's job now."""
+    if not player_code:
+        return PHOTO_FALLBACK
+    return ("https://resources.premierleague.com/premierleague/photos/"
+            f"players/250x250/p{player_code}.png")
 
 
 def _photo_code(photo: str) -> str:
@@ -521,22 +343,74 @@ def _num(v, default=0.0):
         return default
 
 
+BOOTSTRAP_TTL_SECONDS = 300
+# Module-level, not session_state: the banner must render even on the very first
+# pass, and session_state is unavailable in bare/script mode.
+_DATA_ERROR = None
+_DATA_CACHE = {"ctx": None, "ts": 0.0}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _dropdown_options(bootstrap, teams, _pos_map):
+    """Player picker labels: name, club, price. No projections.
+
+    This previously ran a full _player_xp for EVERY player in the game -- ~700
+    projections, each evaluating multiple fixtures -- purely to put an xP figure
+    in a dropdown label, and it re-ran on every Streamlit rerun while the
+    midweek-transfers box was open. Typing a character in the Manager ID field
+    paid for the whole market.
+
+    Labels now carry only fields already present on the bootstrap row, and the
+    result is cached.
+    """
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+    options = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
+    for p in bootstrap.get("elements", []):
+        pos = pos_map.get(p["element_type"])
+        if not pos:
+            continue
+        initial = p["first_name"][0] + "." if p.get("first_name") else ""
+        label = (f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) "
+                 f"£{p['now_cost'] / 10:.1f}m")
+        options[pos].append((p["id"], label))
+    for pos in POS_ORDER:
+        options[pos] = [options[pos][0]] + sorted(
+            options[pos][1:], key=lambda x: x[1].split()[-2].lower() if x[1] else "")
+    return options
+
+
 def _bootstrap_ctx():
-    """Cached access to the live FPL bootstrap + fixture lookup."""
-    if "bootstrap_ctx" not in st.session_state:
-        try:
-            bootstrap = fpl_tools._get_bootstrap()
-            lookup = fpl_tools._build_fixture_lookup(bootstrap)
-            st.session_state["bootstrap_ctx"] = {
-                "bootstrap": bootstrap,
-                "lookup": lookup,
-                "players_by_id": {p["id"]: p for p in bootstrap.get("elements", [])},
-                "teams_by_id": {t["id"]: t for t in bootstrap.get("teams", [])},
-                "start": fpl_tools._next_gameweek(bootstrap),
-            }
-        except Exception:
-            st.session_state["bootstrap_ctx"] = None
-    return st.session_state["bootstrap_ctx"]
+    """The single cached view of the live FPL data. TTL'd, and honest on failure."""
+    global _DATA_ERROR
+    cached = _DATA_CACHE["ctx"]
+    if cached and (time.time() - _DATA_CACHE["ts"]) < BOOTSTRAP_TTL_SECONDS:
+        return cached
+    try:
+        bootstrap = fpl_tools._get_bootstrap()
+        lookup = fpl_tools._build_fixture_lookup(bootstrap)
+        _DATA_CACHE["ctx"] = {
+            "bootstrap": bootstrap,
+            "lookup": lookup,
+            "players_by_id": {p["id"]: p for p in bootstrap.get("elements", [])},
+            "teams_by_id": {t["id"]: t for t in bootstrap.get("teams", [])},
+            "start": fpl_tools._next_gameweek(bootstrap),
+        }
+        _DATA_CACHE["ts"] = time.time()
+        _DATA_ERROR = None
+    except Exception as exc:
+        _DATA_ERROR = str(exc) or exc.__class__.__name__
+        # Keep serving the last good data if there is any -- a stale squad beats
+        # a blank page -- but the banner will say so.
+    return _DATA_CACHE["ctx"]
+
+
+def _data_error():
+    """The last data-load failure, or None."""
+    return _DATA_ERROR
+
+
+def _data_is_stale():
+    return bool(_DATA_CACHE["ctx"])
 
 
 def _headshot_img(p) -> str:
@@ -545,7 +419,7 @@ def _headshot_img(p) -> str:
         ctx = _bootstrap_ctx()
         el = (ctx or {}).get("players_by_id", {}).get(_pid(p), {})
         photo = el.get("photo", "")
-    url = _headshot_url(_photo_code(photo))
+    style = _headshot_style(_photo_code(photo))
     badge = ""
     team_id = p.get("team_id")
     if team_id is None and isinstance(p.get("team"), int):
@@ -553,9 +427,12 @@ def _headshot_img(p) -> str:
     if team_id is not None:
         badge = _badge_img(team_id)
     overlay = f'<div class="badge-overlay">{badge}</div>' if badge else ""
+    # A div with layered backgrounds rather than an <img>: the fallback layer
+    # shows through automatically if the CDN photo 404s, with no HEAD request
+    # and no broken-image icon.
     return (
         f'<div class="photo-frame">'
-        f'<img class="headshot" src="{url}" alt="" loading="lazy">'
+        f'<div class="headshot" style="{style}"></div>'
         f'{overlay}'
         f'</div>'
     )
@@ -595,7 +472,7 @@ def _fdr_cell(ease) -> str:
 
 
 # ------------------------------------------------------------------
-# Insights Lab — Fixture Rotation Solver & Team Strength Index
+# Fixtures tab — rotation solver, team strength, fixture swings
 # ------------------------------------------------------------------
 def _team_ease_series(team_id, lookup, start, n: int = 6):
     """Continuous fixture-ease series (higher = easier) from Dixon-Coles ratings."""
@@ -696,7 +573,7 @@ def _momentum_row_html(r, up: bool = True) -> str:
         f'<img class="headshot" src="{_headshot_url(_photo_code(r["photo"]))}" alt="" loading="lazy">'
         f'{_badge_img(r["team"])}'
         f'<div style="flex:1;">'
-        f'<div style="font-weight:700;color:#E2E8F0;">{r["name"]}</div>'
+        f'<div style="font-weight:700;color:var(--text);">{r["name"]}</div>'
         f'<div class="tc-meta">{r["pos"]} · £{r["price"]:.1f}m · net {r["net"]:+,}</div>'
         f'</div>'
         f'{arrow} {badge}'
@@ -711,7 +588,7 @@ def _regression_row(r, high: bool) -> str:
         f'<div style="display:flex;justify-content:space-between;align-items:center;'
         f'padding:7px 0;border-bottom:1px solid #1e293b;">'
         f'<div style="min-width:0;">'
-        f'<div style="font-weight:700;color:#E2E8F0;">{r["name"]}</div>'
+        f'<div style="font-weight:700;color:var(--text);">{r["name"]}</div>'
         f'<div class="tc-meta">{r["position"]} · {r["team"]} · £{r["price"]:.1f}m</div>'
         f'<div class="tc-meta">G {r["goals"]} A {r["assists"]} vs xG {r["xg"]} xA {r["xa"]}</div>'
         f'</div>'
@@ -720,7 +597,10 @@ def _regression_row(r, high: bool) -> str:
     )
 
 
-def _radar_shortlists(kind: str, limit: int = 12, risk: str = "balanced"):
+def _radar_shortlists(kind: str, limit: int = 12):
+    # No `risk` parameter: the radar ranks on the projection, which is now
+    # strategy-blind by construction. Keeping the argument would imply the
+    # shortlist responds to strategy when it cannot.
     ctx = _bootstrap_ctx()
     if not ctx:
         return []
@@ -735,7 +615,7 @@ def _radar_shortlists(kind: str, limit: int = 12, risk: str = "balanced"):
         if not pos:
             continue
         price = _num(e.get("now_cost")) / 10.0
-        xp4, note = fpl_tools._player_xp_horizon(e, lookup, start, risk=risk, n=4)
+        xp4, note = fpl_tools._player_xp_horizon(e, lookup, start, n=4)
         if note in ("Injured", "Suspended", "Unavailable", "No minutes", "Blank"):
             continue
         if xp4 <= 0:
@@ -774,7 +654,7 @@ def _pitch_player_html(p, role: str = None) -> str:
     if role == "C":
         role_html = '<span class="cap-pill">C</span>'
     elif role == "VC":
-        role_html = '<span class="cap-pill" style="background:#334155;color:#cbd5e1;">V</span>'
+        role_html = '<span class="cap-pill" style="background:var(--line);color:var(--text-2);">V</span>'
     name = _web_name(p)
     return (
         f'<div class="pitch-player">'
@@ -810,7 +690,7 @@ def _pitch_html(starters, bench, captain_id=None, vcap_id=None) -> str:
 def _fixture_key_html() -> str:
     """Permanent fixture-key legend rendered directly above every pitch view."""
     return (
-        '<div style="font-size:0.8rem;color:#94a3b8;margin:0 0 6px 0;line-height:1.5;">'
+        '<div style="font-size:0.8rem;color:var(--muted);margin:0 0 6px 0;line-height:1.5;">'
         'Fixture Outlook: 🟢 Favourable · 🟡 Moderate · 🔴 Difficult<br>'
         '<span style="font-size:0.68rem;font-style:italic;">'
         '*Ratings derived from our proprietary algorithmic model, blending live market sentiment with opponent defensive/offensive strength.</span>'
@@ -967,7 +847,7 @@ def _render_positional_diagnostic(starters, bench=None, prev=None, caption: str 
     if not signals:
         return None
     if caption:
-        st.markdown(f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{caption}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:0.78rem;color:var(--muted);margin:0 0 8px 0;">{caption}</div>', unsafe_allow_html=True)
     legend_cols = st.columns(3)
     for col, (label, desc) in zip(legend_cols, _SIGNAL_LABELS.values()):
         with col:
@@ -1038,7 +918,7 @@ def _render_player_inspector(squad) -> None:
         if fx.get("kickoff_time"):
             try:
                 dt = dateutil.parser.isoparse(fx.get("kickoff_time")).astimezone(tz.gettz("Europe/London"))
-                date_str = f" <span style='color:#64748b;font-weight:normal;font-size:0.75rem;margin-left:6px;'>{dt.strftime('%d %b %H:%M')}</span>"
+                date_str = f" <span style='color:var(--muted-2);font-weight:normal;font-size:0.75rem;margin-left:6px;'>{dt.strftime('%d %b %H:%M')}</span>"
             except:
                 pass
         wp = fx.get("win_prob")
@@ -1050,8 +930,8 @@ def _render_player_inspector(squad) -> None:
             
         fx_rows += (
             f'<div class="insp-fixture">'
-            f'<div style="font-weight:700;color:#E2E8F0;">{opp_name} '
-            f'<span style="font-weight:600;color:#94a3b8;">({venue})</span>{date_str}</div>'
+            f'<div style="font-weight:700;color:var(--text);">{opp_name} '
+            f'<span style="font-weight:600;color:var(--muted);">({venue})</span>{date_str}</div>'
             f'<div class="tc-meta">{odds_desc}</div>'
             f'</div>'
         )
@@ -1072,16 +952,72 @@ def _render_player_inspector(squad) -> None:
         f'{_headshot_img(player)}'
         f'<div style="flex:1;min-width:0;">'
         f'<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'
-        f'<span style="font-weight:800;color:#E2E8F0;font-size:1.05rem;">{_web_name(player)}</span>'
+        f'<span style="font-weight:800;color:var(--text);font-size:1.05rem;">{_web_name(player)}</span>'
         f'{_badge_img(team_id, large=True)}'
         f'</div>'
         f'<div class="tc-meta">{player.get("position", "")} · {player.get("team", "")} · £{player.get("price", 0):.1f}m</div>'
-        f'<div style="margin-top:6px;font-size:0.85rem;color:#E2E8F0;">{_friendly_status(player.get("status"))}{tightrope_html}</div>'
+        f'<div style="margin-top:6px;font-size:0.85rem;color:var(--text);">{_friendly_status(player.get("status"))}{tightrope_html}</div>'
         f'</div></div>'
         f'<div style="margin-top:14px;"><div class="section-label">Next 4 Fixtures</div>{fx_rows}</div>'
         f'</div>'
     )
     st.markdown(card, unsafe_allow_html=True)
+
+
+# Display order and plain-English labels for the objective decomposition. The
+# keys come straight from _solve_squad, so what is shown here IS what was
+# maximised -- previously the UI recomputed a naive sum(xp_in - xp_out) that
+# excluded captaincy, bench weights, CVaR, stacking, EO and tax, and could rank
+# moves differently from the solver that chose them.
+WATERFALL_ROWS = [
+    ("projected_points", "Projected points over 4 gameweeks"),
+    ("points_hit", "Points hit"),
+    ("transfer_bar", "The bar a transfer has to clear"),
+    ("banked_transfer_value", "Free transfer you'd have banked"),
+    ("chip_cost", "Cost of burning the chip"),
+    ("cash_optionality", "Money kept in the bank"),
+]
+
+
+def _waterfall_html(breakdown: dict) -> str:
+    """Render the objective decomposition, with an interaction residual.
+
+    The residual is the honest part: these components are direct deltas, not a
+    Shapley decomposition, so they need not sum exactly to the net figure. When
+    the unexplained remainder is large the move is driven by interactions
+    between components and the row-by-row story is misleading -- so the page
+    says so rather than presenting a tidy sum that hides it.
+    """
+    if not breakdown:
+        return ""
+    rows, shown = [], 0.0
+    for key, label in WATERFALL_ROWS:
+        val = float(breakdown.get(key, 0.0) or 0.0)
+        if abs(val) < 0.005:
+            continue
+        shown += val
+        colour = "var(--pos)" if val > 0 else "var(--neg)"
+        rows.append(
+            f'<div class="wf-row"><span>{label}</span>'
+            f'<span style="color:{colour};font-variant-numeric:tabular-nums;">'
+            f'{val:+.1f}</span></div>')
+    net = float(breakdown.get("net", 0.0) or 0.0)
+    residual = net - shown
+    if abs(residual) >= 0.05:
+        rows.append(
+            f'<div class="wf-row"><span>Everything else combined</span>'
+            f'<span style="color:var(--muted);font-variant-numeric:tabular-nums;">'
+            f'{residual:+.1f}</span></div>')
+    rows.append(
+        f'<div class="wf-row wf-net"><span>Net</span>'
+        f'<span style="font-variant-numeric:tabular-nums;">{net:+.1f}</span></div>')
+
+    warn = ""
+    if abs(net) > 0.01 and abs(residual) > 0.2 * abs(net):
+        warn = ('<div class="wf-warn">⚠️ A fair chunk of this move comes from how '
+                "the pieces interact rather than any single line above, so treat "
+                "the breakdown as a rough guide.</div>")
+    return f'<div class="wf">{"".join(rows)}{warn}</div>'
 
 
 def _transfer_pair_html(moves) -> str:
@@ -1090,7 +1026,7 @@ def _transfer_pair_html(moves) -> str:
         out = m["out"]
         inn = m["in"]
         in_tightrope = (
-            '<div class="tc-meta" style="color:#b45309;font-weight:600;">⚠️ 1 card from ban</div>'
+            '<div class="tc-meta" style="color:var(--warn-fg);font-weight:600;">⚠️ 1 card from ban</div>'
             if inn.get("on_yellow_card_tightrope") else ""
         )
         html += (
@@ -1114,27 +1050,159 @@ def _transfer_pair_html(moves) -> str:
         )
         rationale = m.get("rationale")
         if rationale:
-            html += f'<div style="font-size:0.78rem;color:#94a3b8;margin:0 0 8px 0;">{rationale}</div>'
+            html += f'<div style="font-size:0.78rem;color:var(--muted);margin:0 0 8px 0;">{rationale}</div>'
     return html
+
+
+NAILED_ON_FRACTION = 0.8      # 72+ expected minutes reads as a starter
+
+
+def _set_piece_note(element) -> str:
+    """Which dead balls a player is first choice for, from the bootstrap orders."""
+    if not element:
+        return ""
+    duties = []
+    if element.get("penalties_order") == 1:
+        duties.append("pens")
+    if element.get("direct_freekicks_order") == 1:
+        duties.append("free-kicks")
+    if element.get("corners_and_indirect_freekicks_order") == 1:
+        duties.append("corners")
+    return ", ".join(duties)
+
+
+def _squad_scorecard(starters, bench, players_by_id) -> dict:
+    """The four numbers that describe a squad's shape, not its scoreline.
+
+    Points tell you how good the XI is. These tell you whether the squad is
+    BUILT right -- whether the bench is dead money, whether the XI actually
+    starts, and who takes the dead balls. A 60-point XI resting on four
+    rotation risks and £22m of bench is a different proposition from the same
+    60 points on eleven nailed starters, and the old three-metric row
+    ("Final Starting XI xP / Final Bench xP / Final Squad xP") could not
+    distinguish them.
+    """
+    nailed, takers = 0, []
+    for p in starters:
+        el = players_by_id.get(p.get("player_id"))
+        if el:
+            try:
+                frac = fpl_tools._expected_playing_fraction(el, el.get("status", "a"))
+            except Exception:
+                frac = 0.0
+            if frac >= NAILED_ON_FRACTION:
+                nailed += 1
+            duty = _set_piece_note(el)
+            if duty:
+                takers.append((_web_name(p), duty))
+    return {
+        "xi_points": round(sum(p.get("xp", 0) for p in starters), 1),
+        "bench_cost": round(sum(p.get("price", 0) for p in bench), 1),
+        "nailed": nailed,
+        "of": len(starters),
+        "takers": takers,
+    }
+
+
+def _scorecard_html(card: dict, delta_xi=None) -> str:
+    """Four tiles, in the words a manager already uses (Part E)."""
+    bench = card["bench_cost"]
+    # £16m is the standard-gameweek bench budget the construction solves target.
+    bench_tone, bench_note = (
+        ("var(--pos-2)", "sensible") if bench <= 16.0 else
+        ("var(--warn-2)", "a bit rich") if bench <= 19.0 else
+        ("var(--neg-2)", "dead money")
+    )
+    nailed_tone = (
+        "var(--pos-2)" if card["nailed"] >= 9 else
+        "var(--warn-2)" if card["nailed"] >= 7 else "var(--neg-2)"
+    )
+    if card["takers"]:
+        takers = " · ".join(f"{n} ({d})" for n, d in card["takers"][:4])
+        takers_extra = f" +{len(card['takers']) - 4} more" if len(card["takers"]) > 4 else ""
+        takers_html = f'<div class="sc-takers">{takers}{takers_extra}</div>'
+        takers_val = str(len(card["takers"]))
+        takers_tone = "var(--pos-2)"
+    else:
+        takers_html = '<div class="sc-takers">Nobody in your XI is on dead balls.</div>'
+        takers_val = "0"
+        takers_tone = "var(--neg-2)"
+
+    delta = ""
+    if delta_xi:
+        tone = "var(--pos-2)" if delta_xi > 0 else "var(--neg-2)"
+        delta = f'<div class="sc-sub" style="color:{tone};">{delta_xi:+.1f} vs your original XI</div>'
+
+    return (
+        '<div class="scorecard">'
+        f'<div class="sc-tile"><div class="sc-label">Starting XI points</div>'
+        f'<div class="sc-value">{card["xi_points"]:.1f}</div>'
+        f'<div class="sc-sub">projected, this gameweek</div>{delta}</div>'
+        f'<div class="sc-tile"><div class="sc-label">Money on the bench</div>'
+        f'<div class="sc-value" style="color:{bench_tone};">£{bench:.1f}m</div>'
+        f'<div class="sc-sub">{bench_note}</div></div>'
+        f'<div class="sc-tile"><div class="sc-label">Who\'s nailed on</div>'
+        f'<div class="sc-value" style="color:{nailed_tone};">{card["nailed"]}<span class="sc-of">/{card["of"]}</span></div>'
+        f'<div class="sc-sub">expected to play the full 90</div></div>'
+        f'<div class="sc-tile"><div class="sc-label">Set-piece takers</div>'
+        f'<div class="sc-value" style="color:{takers_tone};">{takers_val}</div>'
+        f'{takers_html}</div>'
+        '</div>'
+    )
 
 
 # ------------------------------------------------------------------
 # Sidebar
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## ⚽ FPL Quant Manager (Proprietary In-House Engine)")
-    st.caption("Your data-driven pre-deadline quant engine")
+    st.markdown("## ⚽ FPL Quant Manager")
+    st.caption("Work out your best move before the deadline")
 
-    with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
+    # Strategy lives here, not buried in step 3.
+    #
+    # It used to render inside `if "override_analysis" in st.session_state`,
+    # i.e. only AFTER the user had already run the numbers -- so the setting
+    # that governs the entire objective was invisible until the work it governs
+    # had been done. In the sidebar it is always visible and always applies.
+    st.markdown("#### 🎯 How should we play it?")
+    risk_label = st.radio(
+        "Strategy",
+        ["Balanced", "Conservative", "Aggressive",
+         "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
+        index=0,
+        key="risk",
+        label_visibility="collapsed",
+        help="How big a gain we demand before pulling the trigger.",
+        captions=[
+            "Chase the most points. No thumb on the scale.",
+            "Play it safe. Own what your rivals own, and only move for a clear upgrade.",
+            "Go hunting. Back differentials and take a hit for a big enough gain.",
+            "Protect a lead. Mirror the players your rivals own so their good weeks can't hurt you.",
+            "Close a gap. Target players almost nobody else has.",
+        ],
+        on_change=clear_transfer_cache,
+    )
+
+    if risk_label in ("Conservative", "Rank Protecting (Shield)"):
+        st.text_input(
+            "Rival's team ID (optional)",
+            key="rival_id_input",
+            help="We'll shadow this rival's squad so their good weeks can't hurt you.",
+        )
+
+    st.markdown("---")
+
+    with st.expander("🧠 How it thinks", expanded=False):
         st.markdown(
-            "**Why 4 Gameweeks?**  \n"
-            "Proprietary dark arts. Planning 10 weeks ahead sounds great until Pep roulette, hamstring tweaks, and "
-            "pure vibes derail your season. The engine models a protected 4-week tactical horizon—just far enough to "
-            "target form and fixtures without walking into a trap.\n\n"
-            "**Transfer Friction:**  \n"
-            "Step away from the knee-jerk. Banked transfers win mini-leagues. The model slaps a strict mathematical "
-            "penalty on itchy trigger fingers; unless an incoming player is a decisive, undeniable upgrade, the "
-            "engine banks the transfer and lets your rivals burn their rank."
+            "**Why only four gameweeks?**  \n"
+            "Planning ten weeks ahead sounds clever right up until Pep roulette, a "
+            "hamstring, and pure vibes derail the lot. Four weeks is far enough to "
+            "catch a fixture swing and near enough to still be true.\n\n"
+            "**Why it so often says do nothing**  \n"
+            "Because a banked transfer is worth something and a marginal one isn't. "
+            "Every move has to clear a bar: the four points if you're taking a hit, "
+            "plus a margin for how uncertain the gain is. Under that bar, sitting on "
+            "your hands genuinely is the better play."
         )
 
     st.markdown("---")
@@ -1142,6 +1210,34 @@ with st.sidebar:
         '<div class="badge"><span class="g"></span> Built by Waqas Hussain</div>',
         unsafe_allow_html=True,
     )
+
+
+def _calibration_status_html() -> str:
+    """Recalibration progress, from a live row count rather than a fixed date.
+
+    The count restarts whenever MODEL_VERSION bumps (three times during this
+    rebuild), and with the active-player filter the 5,000-row threshold is about
+    eighteen gameweeks rather than the seven an unfiltered count implies. Any
+    hardcoded "recalibrating after Gameweek N" would therefore have been wrong
+    on both counts -- and the whole point of this copy pass is to stop the page
+    claiming things the engine does not do.
+    """
+    try:
+        import db as _db
+        banked = _db.count_checked_predictions(fpl_tools.MODEL_VERSION)
+        target = 5000
+    except Exception:
+        banked = None
+    if banked is None:
+        return ('<br><br><span class="note-inline">Model baseline active. '
+                "Progress unavailable — can't reach the results database.</span>")
+    if banked >= target:
+        return ('<br><br><span class="note-inline">✅ Recalibrating from banked '
+                f'results ({banked:,} checked predictions).</span>')
+    pct = int(100 * banked / target)
+    return ('<br><br><span class="note-inline">Model baseline active — '
+            f'recalibration starts at {target:,} checked predictions '
+            f'({banked:,} so far, {pct}%).</span>')
 
 
 # ------------------------------------------------------------------
@@ -1152,6 +1248,31 @@ safe_banner = f'<div class="dl-warning">⚠️ <b>Pro Tip:</b> Aim to confirm yo
 # Spacer so the deadline banner doesn't touch the very top of the viewport.
 st.markdown("<div style='margin-top: 2rem;'></div>", unsafe_allow_html=True)
 
+# Data-health banner, first thing on the page.
+#
+# Without it a failed load renders a complete-looking page built on nothing:
+# _build_fixture_lookup used to return {} on error, which makes every player
+# project 0.0 as a "Blank", so the squad reads as fifteen worthless assets and
+# the engine dutifully recommends selling all of them. A total outage rendered
+# as confident advice. It now raises, and this is where the user is told.
+_bootstrap_ctx()          # attempt a load so the banner reflects reality
+_err = _data_error()
+if _err:
+    _have_stale = _data_is_stale()
+    if _have_stale:
+        st.warning(
+            "⚠️ **Can't reach the FPL API right now**, so these numbers are from "
+            "the last successful refresh. Prices, injuries and fixtures may have "
+            "moved since. Worth a reload before you commit any transfers."
+        )
+    else:
+        st.error(
+            "🔌 **Can't reach the FPL API**, so there's nothing to show yet. "
+            "This is almost always temporary — FPL takes the API down around "
+            "price changes and after matches. Try again in a few minutes.\n\n"
+            "Nothing below is real data, so don't act on it."
+        )
+
 st.markdown(
     f'<div class="deadline-hero"><div class="dl-gw">⏰ {GW_NAME} deadline</div>'
     f'<div class="dl-time">{DEADLINE_STR}</div>'
@@ -1161,21 +1282,23 @@ st.markdown(
 
 st.markdown(
     '<div class="overview">'
-    '<b>📊 Your Personal FPL Quant Engine</b><br><br>'
-    'This system operates as a fully automated quantitative analyst for your Fantasy Premier League team. '
-    'It removes human bias by combining predictive modelling, mathematical optimisation, and continuous machine learning:<br><br>'
-    '• <b>The Baseline Projections:</b> It calculates Expected Points (xP) for every player by aggregating '
-    'underlying statistics, fixture difficulty ratings, and positional baselines.<br><br>'
-    '• <b>The Optimiser:</b> Our closed-loop algorithmic simulation model finds the mathematically optimal transfers, '
-    'starting XI, and captaincy — respecting your specific budget, chip strategy, and transfer constraints.<br><br>'
-    '<hr style="border:none;border-top:1px solid #c7d2fe;margin:14px 0;">'
-    '<b>🌟 The Self-Learning Quant Engine 🌟</b><br>'
-    'Most FPL tools are just static calculators. This is a living quantitative model.<br><br>'
-    '<i>Every Gameweek, our closed-loop validation engine benchmarks ex-ante projections against realised Premier '
-    'League match outcomes to assess predictive variance. The system dynamically recalibrates its underlying '
-    'statistical coefficients, ensuring continuous model refinement without exposing execution mechanics.</i><br><br>'
-    'Put simply: it learns from reality. The deeper we get into the season, the smarter and more ruthless the '
-    'algorithm becomes, giving you a compounding edge over your mini-league rivals.'
+    '<b>📊 What this thing actually does</b><br><br>'
+    'Two jobs, in order.<br><br>'
+    '• <b>It works out what every player is likely to score.</b> Who\'s going to '
+    'start, how good the opposition is, and what each player has actually been '
+    'producing — turned into a points forecast for the next four gameweeks.<br><br>'
+    '• <b>It then finds the best squad you can legally build.</b> Every valid '
+    '15, checked against your budget, your free transfers and the three-per-club '
+    'rule, and it picks the one that scores most. The reasoning is shown in full '
+    'underneath the recommendation — nothing is hidden.<br><br>'
+    '<hr style="border:none;border-top:1px solid var(--line);margin:14px 0;">'
+    '<b>🔁 It marks its own homework</b><br>'
+    'Every Friday it saves what it predicted. Every Tuesday it checks that '
+    'against what actually happened. Once enough checked predictions are banked, '
+    'it starts correcting itself — and the week-by-week record is on the '
+    '<b>Model Health</b> tab, so you can check our homework rather than take '
+    'our word for it.'
+    f'{_calibration_status_html()}'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -1216,7 +1339,18 @@ def _gameweek_status_banner() -> str:
 
 # Main navigation
 # ------------------------------------------------------------------
-tab_planner, tab_insights, tab_radar = st.tabs(["🏟️ Quant Auto Transfer Planner", "🔬 Insights Lab", "📡 Player Radar & Market"])
+# Four tabs, named for what the reader wants rather than what the module does.
+# "Insights Lab" and "Player Radar & Market" told you nothing about which one
+# holds the fixture ticker. Model Health is new: the hero copy promises "you
+# can watch the scorecard rather than take our word for it", and until now
+# there was nowhere to watch it.
+#
+# The squad views stay inside My Plan rather than getting a tab of their own.
+# They are produced by the planner wizard -- a Squad tab would sit empty until
+# you had run a plan, then duplicate what the plan already shows, which is more
+# disjointed, not less.
+tab_planner, tab_fixtures, tab_players, tab_health = st.tabs(
+    ["🏟️ My Plan", "🗓️ Fixtures", "📡 Players", "🩺 Model Health"])
 
 with tab_planner:
 
@@ -1339,7 +1473,7 @@ with tab_planner:
             _render_player_inspector(starters + bench)
 
             st.markdown(
-                '<div style="font-size:0.95rem;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:#94a3b8;margin:12px 0 10px 0;">'
+                '<div style="font-size:0.95rem;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;color:var(--muted);margin:12px 0 10px 0;">'
                 'Here is what the models and market consensus say about your squad across three core analytical engines:'
                 '</div>',
                 unsafe_allow_html=True,
@@ -1378,37 +1512,19 @@ with tab_planner:
             if show_override:
                 st.caption("Upload a screenshot or adjust the dropdowns to match your live 15-man squad.")
                 
-                try:
-                    bootstrap = fpl_tools._get_bootstrap()
-                    fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
-                except Exception:
+                _ctx = _bootstrap_ctx()
+                if _ctx:
+                    bootstrap = _ctx["bootstrap"]
+                    fixture_lookup = _ctx["lookup"]
+                else:
                     bootstrap = {"elements": [], "teams": []}
                     fixture_lookup = {}
-    
+
                 players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
                 teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
-                pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-    
-                surname_by_id = {p["id"]: _surname(p) for p in bootstrap.get("elements", [])}
-    
-                dropdown_options = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
-                for p in bootstrap.get("elements", []):
-                    pos = pos_map.get(p["element_type"])
-                    if pos:
-                        xp, _ = fpl_tools._player_xp(p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
-                        initial = p['first_name'][0] + "." if p.get('first_name') else ""
-                        display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m | {xp} xP"
-                        dropdown_options[pos].append((p["id"], display))
-    
-                for pos in POS_ORDER:
-                    dropdown_options[pos] = [dropdown_options[pos][0]] + sorted(
-                        dropdown_options[pos][1:], key=lambda x: surname_by_id.get(x[0], "")
-                    )
-    
-                all_options = [(None, "— Select Player —")]
-                for pos in POS_ORDER:
-                    all_options.extend(dropdown_options[pos][1:])
-                all_options.sort(key=lambda x: "" if x[0] is None else surname_by_id.get(x[0], ""))
+                pos_map = fpl_tools.POS_MAP
+
+                dropdown_options = _dropdown_options(bootstrap, teams, pos_map)
     
                 squad_default = st.session_state.get("squad_preview", {}).get("squad", [])
                 uploaded_image = st.file_uploader("Upload screenshot to auto-fill midweek changes", type=["png", "jpg", "jpeg"], key="override_image")
@@ -1503,7 +1619,7 @@ with tab_planner:
                                 
                             for pid in active_squad_ids:
                                 fpl_p = players_by_id.get(pid)
-                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
+                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID)
                                 analysed.append({
                                     "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
                                     "team": teams.get(fpl_p["team"], "?"), "team_id": fpl_p["team"],
@@ -1559,32 +1675,10 @@ with tab_planner:
             ov = st.session_state["override_analysis"]
             tr = ov["transfers"]
 
-            # Risk strategy selector — moved here so toggling the strategy
-            # immediately recalculates and refreshes the transfer recommendations.
-            st.markdown("#### 🎯 Select Your Strategy")
-            risk_label = st.radio(
-                "Strategy mode",
-                ["Balanced", "Conservative", "Aggressive", "Rank Protecting (Shield)", "Rank Chasing (Hunting)"],
-                index=0,
-                key="risk",
-                help="Tunes the transfer hurdle rate and competitive posture.",
-                captions=[
-                    "Standard transfer hurdle rate; risk-neutral EV maximisation.",
-                    "Phase 2 (GW26+): Blocker — shadows the template/rival to protect a lead (locks the consensus captain, penalises low-EO differentials).",
-                    "Phase 2 (GW26+): Divergence — hunts ceiling variance to close a deficit (low-EO differentials + club stacks).",
-                    "Alias for Conservative/Blocker: mirror template picks and protect rank.",
-                    "Alias for Aggressive/Divergence: target low-ownership differentials with high underlying metrics.",
-                ],
-                on_change=clear_transfer_cache,
-            )
-
-            # Mini-league rival team (Blocker mode only) — rendered conditionally.
-            if risk_label == "Conservative":
-                rival_manager_id = st.text_input(
-                    "Mini-League Rival Team ID (Optional)",
-                    key="rival_id_input",
-                    help="Blocker mode shadows this rival's squad to protect a lead.",
-                )
+            # Strategy and rival now live in the sidebar; resolve the rival here.
+            risk_label = st.session_state.get("risk", "Balanced")
+            if risk_label in ("Conservative", "Rank Protecting (Shield)"):
+                rival_manager_id = st.session_state.get("rival_id_input", "")
                 _rk = rival_manager_id.strip() if rival_manager_id else ""
                 if _rk != st.session_state.get("_rival_resolved", ""):
                     st.session_state["_rival_resolved"] = _rk
@@ -1614,7 +1708,7 @@ with tab_planner:
                             for _p in ov["analysed_squad"]:
                                 _fp = _players.get(_p["player_id"])
                                 if _fp:
-                                    _xp, _note = fpl_tools._player_xp(_fp, _fl, event=GW_ID, risk=risk_label.lower())
+                                    _xp, _note = fpl_tools._player_xp(_fp, _fl, event=GW_ID)
                                     _p["xp"] = _xp
                                     _p["status"] = _note
                         except Exception:
@@ -1669,6 +1763,10 @@ with tab_planner:
             else:
                 moves = tr.get("standard_transfers", tr.get("transfers", []))
                 transfer_advice = tr.get("hit_advice", "")
+            # Remember precisely what the screen shows, so the AI critiques the
+            # plan the user is actually looking at.
+            st.session_state["displayed_moves"] = moves
+            st.session_state["displayed_chip"] = confirmed_chip
     
             # ---- Market Alert & Value Tracker (rendered above transfer recommendations) ----
             try:
@@ -1683,24 +1781,29 @@ with tab_planner:
                     if m["in"]["id"] in riser_ids:
                         market_rows.append(f'<div style="margin-bottom:4px;">📈 <b>Imminent Price Rise Target:</b> {m["in"]["name"]} ({m["in"]["team"]})</div>')
                 if market_rows:
-                    market_html = '<div style="margin-bottom:6px;color:#475569;">Prices update overnight (~01:30–02:30 UK). Act before the next update:</div>' + "".join(market_rows)
+                    market_html = '<div style="margin-bottom:6px;color:var(--line-2);">Prices update overnight (~01:30–02:30 UK). Act before the next update:</div>' + "".join(market_rows)
                 else:
-                    market_html = '<div style="color:#64748b;">No imminent price changes detected for your squad or transfer targets.</div>'
+                    market_html = '<div style="color:var(--muted-2);">No imminent price changes detected for your squad or transfer targets.</div>'
                 st.markdown(_card(market_html, "📊 Market Alert & Value Tracker"), unsafe_allow_html=True)
             except Exception:
                 pass
     
             transfer_html = (
-                '<div style="font-size:0.78rem;color:#94a3b8;font-style:italic;margin:0 0 10px 0;">'
-                'Note: xP (Expected Points) is a projection from our closed-loop algorithmic simulation model — a forecast of potential performance, not a guaranteed outcome.'
+                '<div style="font-size:0.78rem;color:var(--muted);font-style:italic;margin:0 0 10px 0;">'
+                'Projected points — our best guess, not a promise.'
                 '</div>'
-                f'<div style="color:#475569;margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
+                f'<div style="color:var(--line-2);margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
             )
             if moves:
                 transfer_html += _transfer_pair_html(moves)
+                transfer_html += _waterfall_html(tr.get("breakdown") or {})
             else:
-                transfer_html += '<div style="color:#64748b;">No transfers recommended.</div>'
-            st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
+                transfer_html += (
+                    '<div style="color:var(--muted);">'
+                    "Sit on your hands. Nothing on the market is worth your transfer "
+                    "this week — bank it and you'll have two next week."
+                    "</div>")
+            st.markdown(_card(transfer_html, "⚙️ The move"), unsafe_allow_html=True)
 
             # ---- Scenario Distribution (SAA floor vs ceiling) ----
             try:
@@ -1709,12 +1812,12 @@ with tab_planner:
                     p5, p50, p95 = sd.get("p5", 0.0), sd.get("p50", 0.0), sd.get("p95", 0.0)
                     dist_html = (
                         '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;">'
-                        f'<div><div class="tc-meta">FLOOR (P5)</div><div style="font-weight:800;color:#ef4444;font-size:1.3rem;">{p5}</div></div>'
-                        f'<div><div class="tc-meta">MEDIAN (P50)</div><div style="font-weight:800;color:#E2E8F0;font-size:1.3rem;">{p50}</div></div>'
-                        f'<div><div class="tc-meta">CEILING (P95)</div><div style="font-weight:800;color:#10b981;font-size:1.3rem;">{p95}</div></div>'
+                        f'<div><div class="tc-meta">Floor</div><div style="font-weight:800;color:var(--neg-2);font-size:1.3rem;">{p5}</div></div>'
+                        f'<div><div class="tc-meta">Expected</div><div style="font-weight:800;color:var(--text);font-size:1.3rem;">{p50}</div></div>'
+                        f'<div><div class="tc-meta">Ceiling</div><div style="font-weight:800;color:var(--pos-2);font-size:1.3rem;">{p95}</div></div>'
                         '</div>'
                     )
-                    st.markdown(_card(dist_html, "🎲 Scenario Distribution · 4-GW horizon (500 sims)"), unsafe_allow_html=True)
+                    st.markdown(_card(dist_html, "🎲 How it could go"), unsafe_allow_html=True)
             except Exception:
                 pass
 
@@ -1730,23 +1833,135 @@ with tab_planner:
                         hit = f" (-{4 * s['hits']})" if s.get("hits") else ""
                         rows.append(
                             f'<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #1e293b;align-items:flex-start;">'
-                            f'<div style="flex:0 0 52px;font-weight:800;color:#4f46e5;">GW{s["gw"]}</div>'
+                            f'<div style="flex:0 0 52px;font-weight:800;color:var(--info);">GW{s["gw"]}</div>'
                             f'<div style="flex:1;min-width:0;">'
                             f'<div class="tc-meta">Sell: {sells}</div>'
                             f'<div class="tc-meta">Buy: {buys}</div>'
                             f'<div class="tc-meta">Transfers: {s["transfers"]}{hit} · FT after: {s["ft_after"]} · Bank: £{s["bank_after"]:.1f}m</div>'
                             f'</div></div>'
                         )
-                    st.markdown(_card("".join(rows), "🗓️ Multi-Gameweek Transfer Plan (Ω(f) bundling)"), unsafe_allow_html=True)
+                    st.markdown(_card("".join(rows), "🗓️ The next few weeks"), unsafe_allow_html=True)
             except Exception:
                 pass
 
+
+
+
+    
+            with st.expander("🩺 Is your squad set up right?", expanded=False):
+                try:
+                    health = fpl_tools._squad_structural_health(ov["analysed_squad"], float(ov.get("bank", 0.0)))
+                    try:
+                        log_squad_health(manager_id.strip(), GW_ID, health)
+                    except Exception:
+                        pass
+                    for h in health:
+                        icon = "✅" if h["ok"] else "⚠️"
+                        st.markdown(
+                            f'<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid #1e293b;">'
+                            f'<span style="flex:0 0 auto;">{icon}</span>'
+                            f'<div style="flex:1;min-width:0;">'
+                            f'<div style="color:var(--text);font-weight:600;">{h["label"]}</div>'
+                            f'<div class="tc-meta">{h["detail"]}</div>'
+                            f'</div></div>',
+                            unsafe_allow_html=True,
+                        )
+                except Exception:
+                    st.caption("Structural health unavailable.")
+
+            with st.expander("📊 Where you're exposed", expanded=False):
+                try:
+                    eo_map = fpl_tools._eo_map()
+                    _b = fpl_tools._get_bootstrap()
+                    names = {e["id"]: e.get("web_name") or e.get("second_name") or str(e["id"]) for e in _b.get("elements", [])}
+                    lineup = fpl_tools.select_starting_xi(ov["analysed_squad"])
+                    xi_ids = {p["player_id"] for p in lineup["xi"]}
+                    cap_id = lineup["captain"]["player_id"] if lineup.get("captain") else None
+                    squad_ids = {p["player_id"] for p in ov["analysed_squad"]}
+                    rows = []
+                    for p in ov["analysed_squad"]:
+                        eo = eo_map.get(p["player_id"], {}).get("eo", 0.0)
+                        if p["player_id"] in xi_ids and eo > 100.0 and p["player_id"] != cap_id:
+                            per_pt = fpl_tools._rank_exposure(1, eo, 1.0)
+                            rows.append(("⚠️ Inverted", names.get(p["player_id"], p.get("name", "?")), f"EO {eo:.0f}% · {per_pt:+.2f} pts/point (rank drops when they score)"))
+                    for pid, eo_d in eo_map.items():
+                        if eo_d.get("eo", 0.0) > 80.0 and pid not in squad_ids:
+                            per_pt = fpl_tools._rank_exposure(0, eo_d.get("eo", 0.0), 1.0)
+                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (unowned)"))
+                    if rows:
+                        html = "".join(
+                            f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
+                            f'<div style="flex:0 0 auto;font-weight:700;">{flag}</div>'
+                            f'<div style="flex:1;min-width:0;"><div style="color:var(--text);font-weight:600;">{name}</div>'
+                            f'<div class="tc-meta">{detail}</div></div></div>'
+                            for flag, name, detail in rows
+                        )
+                        st.markdown(_card(html, "Rank-risk exposures"), unsafe_allow_html=True)
+                    else:
+                        st.caption("Nothing daft here — your squad's exposure looks sensible.")
+                except Exception:
+                    st.caption("EO diagnostic unavailable.")
+
+            with st.expander("💡 Why we're telling you to do this", expanded=False):
+                explainer_bullets = []
+
+                # 1. Base logic (always true).
+                explainer_bullets.append(
+                    "* **We checked every legal 15 you could build this week.** "
+                    "This one scores highest over the next four gameweeks, once "
+                    "your budget, your free transfers and the three-per-club rule "
+                    "are all accounted for.")
+
+                hits_taken = int(tr.get("hits", 0))
+
+                # 2. Hits (only if hits > 0).
+                if hits_taken > 0:
+                    explainer_bullets.append(
+                        f"* **The {-4 * hits_taken} points is worth paying.** These "
+                        "moves are projected to win that back and then some — "
+                        "otherwise we'd have told you to sit tight.")
+
+                # 3. Goalkeeper swaps (only if a GK is transferred in or out).
+                gk_involved_in_transfer = any(m["out"]["position"] == "GK" or m["in"]["position"] == "GK" for m in moves)
+                if gk_involved_in_transfer:
+                    explainer_bullets.append(
+                        "* **There's a keeper in this.** You must carry exactly two, "
+                        "so the swap keeps your money in the right places between "
+                        "the sticks.")
+
+                # 4. Late fitness gating (only if an outgoing player has a doubtful status).
+                flagged_player_transferred_out = any(m["out"].get("status", "Available") != "Available" for m in moves)
+                if flagged_player_transferred_out:
+                    explainer_bullets.append(
+                        "* **You're shifting a fitness doubt.** Anyone carrying a flag "
+                        "gets marked down hard, because a player who doesn't start "
+                        "scores nothing at all.")
+
+                # 5. Banked transfer (only if 0 transfers were made).
+                if len(moves) == 0:
+                    explainer_bullets.append(
+                        "* **Sit on your hands.** Nothing on the market is worth your "
+                        "transfer this week — bank it and you'll have two next week, "
+                        "which is worth more than a marginal move now.")
+
+                if explainer_bullets:
+                    st.markdown("\n".join(explainer_bullets))
+
+            # Decide, having read the case. These buttons used to sit ABOVE the
+            # three reasoning panels, which asked the reader to commit their
+            # gameweek before showing them why -- the explanation only became
+            # visible once you had scrolled past the decision.
+            st.markdown("---")
             c_fast1, c_fast2 = st.columns(2)
             with c_fast1:
-                accept_all = st.button("✅ Accept All Quant Transfers & Proceed to Lineup", type="primary", use_container_width=True, key="btn_accept_all")
+                accept_all = st.button(
+                    "✅ Do it — make these moves", type="primary",
+                    use_container_width=True, key="btn_accept_all")
             with c_fast2:
-                fast_hold = st.button("⏭️ Make No Changes (Hold Squad) & Proceed to Lineup", type="secondary", use_container_width=True, key="btn_fast_hold")
-            
+                fast_hold = st.button(
+                    "⏭️ Leave it — keep this squad", type="secondary",
+                    use_container_width=True, key="btn_fast_hold")
+
             if fast_hold:
                 with st.spinner("Generating Final Lineup with current squad…"):
                     analysed_current = ov["analysed_squad"]
@@ -1794,92 +2009,6 @@ with tab_planner:
                         pass
                     st.session_state["manual_final"] = lineup
                     st.rerun()
-
-
-
-    
-            with st.expander("🩺 Squad Structural Health & Stranded Capital", expanded=False):
-                try:
-                    health = fpl_tools._squad_structural_health(ov["analysed_squad"], float(ov.get("bank", 0.0)))
-                    try:
-                        log_squad_health(manager_id.strip(), GW_ID, health)
-                    except Exception:
-                        pass
-                    for h in health:
-                        icon = "✅" if h["ok"] else "⚠️"
-                        st.markdown(
-                            f'<div style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid #1e293b;">'
-                            f'<span style="flex:0 0 auto;">{icon}</span>'
-                            f'<div style="flex:1;min-width:0;">'
-                            f'<div style="color:#E2E8F0;font-weight:600;">{h["label"]}</div>'
-                            f'<div class="tc-meta">{h["detail"]}</div>'
-                            f'</div></div>',
-                            unsafe_allow_html=True,
-                        )
-                except Exception:
-                    st.caption("Structural health unavailable.")
-
-            with st.expander("📊 EO & Rank Risk Diagnostic", expanded=False):
-                try:
-                    eo_map = fpl_tools._eo_map()
-                    _b = fpl_tools._get_bootstrap()
-                    names = {e["id"]: e.get("web_name") or e.get("second_name") or str(e["id"]) for e in _b.get("elements", [])}
-                    lineup = fpl_tools.select_starting_xi(ov["analysed_squad"])
-                    xi_ids = {p["player_id"] for p in lineup["xi"]}
-                    cap_id = lineup["captain"]["player_id"] if lineup.get("captain") else None
-                    squad_ids = {p["player_id"] for p in ov["analysed_squad"]}
-                    rows = []
-                    for p in ov["analysed_squad"]:
-                        eo = eo_map.get(p["player_id"], {}).get("eo", 0.0)
-                        if p["player_id"] in xi_ids and eo > 100.0 and p["player_id"] != cap_id:
-                            per_pt = fpl_tools._rank_exposure(1, eo, 1.0)
-                            rows.append(("⚠️ Inverted", names.get(p["player_id"], p.get("name", "?")), f"EO {eo:.0f}% · {per_pt:+.2f} pts/point (rank drops when they score)"))
-                    for pid, eo_d in eo_map.items():
-                        if eo_d.get("eo", 0.0) > 80.0 and pid not in squad_ids:
-                            per_pt = fpl_tools._rank_exposure(0, eo_d.get("eo", 0.0), 1.0)
-                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (unowned)"))
-                    if rows:
-                        html = "".join(
-                            f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
-                            f'<div style="flex:0 0 auto;font-weight:700;">{flag}</div>'
-                            f'<div style="flex:1;min-width:0;"><div style="color:#E2E8F0;font-weight:600;">{name}</div>'
-                            f'<div class="tc-meta">{detail}</div></div></div>'
-                            for flag, name, detail in rows
-                        )
-                        st.markdown(_card(html, "Rank-risk exposures"), unsafe_allow_html=True)
-                    else:
-                        st.caption("No inverted exposures or leveraged shorts detected.")
-                except Exception:
-                    st.caption("EO diagnostic unavailable.")
-
-            with st.expander("💡 The Variables Driving Your Transfer Recommendations", expanded=False):
-                explainer_bullets = []
-    
-                # 1. Base logic (always true).
-                explainer_bullets.append("* **Expected Value Maximisation** — the solver identified these specific moves to maximise your net Expected Points (xP) over the horizon, adjusting for positional baseline metrics.")
-    
-                hits_taken = int(tr.get("hits", 0))
-    
-                # 2. Hit amortisation (only if hits > 0).
-                if hits_taken > 0:
-                    explainer_bullets.append(f"* **Hit amortisation** — the {-4 * hits_taken} point hit is mathematically justified. The engine calculates that these upgrades will recover the penalty points and clear the transfer-friction hurdle.")
-    
-                # 3. Goalkeeper swaps (only if a GK is transferred in or out).
-                gk_involved_in_transfer = any(m["out"]["position"] == "GK" or m["in"]["position"] == "GK" for m in moves)
-                if gk_involved_in_transfer:
-                    explainer_bullets.append("* **Goalkeeper structuring** — the solver navigated the strict 2-GK squad rule, ensuring your premium/budget balance in goal remains optimal.")
-    
-                # 4. Late fitness gating (only if an outgoing player has a doubtful status).
-                flagged_player_transferred_out = any(m["out"].get("status", "Available") != "Available" for m in moves)
-                if flagged_player_transferred_out:
-                    explainer_bullets.append("* **Late fitness gating** — doubtful assets were ruthlessly penalised in the projections, prompting the solver to eject injury risks before the deadline.")
-    
-                # 5. Banked transfer (only if 0 transfers were made).
-                if len(moves) == 0:
-                    explainer_bullets.append("* **Transfer Conservation** — the mathematically optimal move is no move. Rolling the transfer preserves structural flexibility and option value for next week.")
-    
-                if explainer_bullets:
-                    st.markdown("\n".join(explainer_bullets))
     
             target_default_moves = len(moves)
             last_chip_tracked = st.session_state.get("last_confirmed_chip_tracker")
@@ -2018,7 +2147,7 @@ with tab_planner:
                             
                             for pid in new_ids:
                                 fpl_p = players_by_id.get(pid)
-                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID, risk=risk_label.lower())
+                                xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID)
                                 analysed_final.append({
                                     "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
                                     "team": teams.get(fpl_p["team"], "?"), "team_id": fpl_p["team"],
@@ -2059,9 +2188,9 @@ with tab_planner:
                         colour = "#10b981" if margin >= 0 else "#ef4444"
                         h2h_html = (
                             '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;margin-bottom:10px;">'
-                            f'<div><div class="tc-meta">You</div><div style="font-weight:800;font-size:1.4rem;color:#E2E8F0;">{h2h["my_total"]}</div></div>'
+                            f'<div><div class="tc-meta">You</div><div style="font-weight:800;font-size:1.4rem;color:var(--text);">{h2h["my_total"]}</div></div>'
                             f'<div><div class="tc-meta">Margin</div><div style="font-weight:800;font-size:1.4rem;color:{colour};">{margin:+.1f}</div></div>'
-                            f'<div><div class="tc-meta">Rival</div><div style="font-weight:800;font-size:1.4rem;color:#E2E8F0;">{h2h["rival_total"]}</div></div>'
+                            f'<div><div class="tc-meta">Rival</div><div style="font-weight:800;font-size:1.4rem;color:var(--text);">{h2h["rival_total"]}</div></div>'
                             '</div>'
                         )
                         for r in h2h["my_rows"]:
@@ -2069,8 +2198,8 @@ with tab_planner:
                             cap = " (C)" if r["multiplier"] > 1 else ""
                             h2h_html += (
                                 f'<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1e293b;">'
-                                f'<span style="color:#E2E8F0;">{r["name"]}{cap}{prog}</span>'
-                                f'<span style="font-weight:700;color:#E2E8F0;">{r["points"]}</span></div>'
+                                f'<span style="color:var(--text);">{r["name"]}{cap}{prog}</span>'
+                                f'<span style="font-weight:700;color:var(--text);">{r["points"]}</span></div>'
                             )
                         st.markdown(_card(h2h_html, "🆚 Live H2H vs Rival"), unsafe_allow_html=True)
             except Exception:
@@ -2113,11 +2242,25 @@ with tab_planner:
             delta_be = be_xp - base_be
             delta_tot = tot_xp - base_tot
             
+            # Scorecard first: it says whether the squad is BUILT right. The
+            # points row underneath says what it is expected to score. The old
+            # layout showed only the second, so a squad could look healthy on
+            # points while resting on four rotation risks and £22m of bench.
+            _sc_ctx = _bootstrap_ctx() or {}
+            _sc = _squad_scorecard(xi["xi"], xi["bench"], _sc_ctx.get("players_by_id", {}))
+            _sc["xi_points"] = round(st_xp, 1)
+            st.markdown(
+                _card(_scorecard_html(_sc, delta_st if delta_st else None),
+                      "📋 How your squad stacks up"),
+                unsafe_allow_html=True,
+            )
+
             y1, y2, y3 = st.columns(3)
-            y1.metric("🛡️ Final Starting XI xP", f"{st_xp:.2f} xP", f"{delta_st:+.2f} xP" if delta_st != 0 else None)
-            y2.metric("🪑 Final Bench xP", f"{be_xp:.2f} xP", f"{delta_be:+.2f} xP" if delta_be != 0 else None)
-            y3.metric("📊 Final Squad xP", f"{tot_xp:.2f} xP", f"{delta_tot:+.2f} xP" if delta_tot != 0 else None)
-    
+            y1.metric("🛡️ Starting XI", f"{st_xp:.2f} pts", f"{delta_st:+.2f}" if delta_st != 0 else None)
+            y2.metric("🪑 Bench", f"{be_xp:.2f} pts", f"{delta_be:+.2f}" if delta_be != 0 else None)
+            y3.metric("📊 Whole squad", f"{tot_xp:.2f} pts", f"{delta_tot:+.2f}" if delta_tot != 0 else None)
+            st.caption("Projected points for this gameweek, against the squad you started with.")
+
             with st.expander("🛡️ How Your Starting XI, Captain & Bench Are Picked", expanded=False):
                 st.markdown(
                     "The line-up maximises projected points while **always respecting legal FPL formations** "
@@ -2143,9 +2286,9 @@ with tab_planner:
             mult_val = cap["xp"] * 3 if is_tc else cap["xp"] * 2
             cap_role_title = "Captain (Triple Captain Active)" if is_tc else "Captain"
             
-            cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:#f59e0b; margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.2f} xP)</div></div>'
+            cap_html = f'<div class="grid"><div class="pc cap-card">{_pos_chip(cap["position"])}<div style="margin-bottom:2px;" class="nm">⭐ {cap["name"]}</div><div class="meta">{cap["team"]} — {cap_role_title}</div><div class="xp" style="color:var(--warn-2); margin-top:4px;">{cap["xp"]} xP ({mult_str} = {mult_val:.2f} xP)</div></div>'
             if vcap:
-                cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div style="margin-bottom:2px;" class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:#475569; margin-top:4px;">{vcap["xp"]} xP</div></div>'
+                cap_html += f'<div class="pc">{_pos_chip(vcap["position"])}<div style="margin-bottom:2px;" class="nm">{vcap["name"]}</div><div class="meta">{vcap["team"]} — Vice-Captain</div><div class="xp" style="color:var(--line-2); margin-top:4px;">{vcap["xp"]} xP</div></div>'
             cap_html += "</div>"
             st.markdown(_card(cap_html, "⭐ Captaincy"), unsafe_allow_html=True)
     
@@ -2166,7 +2309,15 @@ with tab_planner:
     fb_system_prompt = None
     if fb_lineup:
         fb_tr = st.session_state.get("override_analysis", {}).get("transfers", {})
-        fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
+        # The exact moves rendered above. Previously this read
+        # fb_tr.get("transfers", ...) -- and the engine returns "transfers" and
+        # "standard_transfers" as the SAME object, with "wildcard_transfers"
+        # separate. So with a Wildcard or Free Hit confirmed the screen showed
+        # the 15-transfer chip plan while the AI was handed the standard
+        # 1-transfer plan and reviewed something the user could not see.
+        fb_moves = st.session_state.get("displayed_moves")
+        if fb_moves is None:
+            fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
         fb_hits = int(fb_tr.get("hits", 0))
         fb_hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
         fb_total_hit = fb_hits * fb_hit_cost
@@ -2267,8 +2418,8 @@ with tab_planner:
             else:
                 st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
 
-with tab_insights:
-    st.markdown("### 🔬 Insights Lab")
+with tab_fixtures:
+    st.markdown("### 🗓️ Fixtures & form")
     ctx = _bootstrap_ctx()
     if not ctx:
         st.info("Live FPL data could not be loaded. Check your connection and refresh.")
@@ -2296,8 +2447,8 @@ with tab_insights:
                     f'<div class="rot-card">'
                     f'<div class="rot-score">{p["avg"]:.2f}</div>'
                     f'<div style="flex:1;">'
-                    f'<div style="display:flex;align-items:center;gap:8px;font-weight:700;color:#E2E8F0;">'
-                    f'{_badge_img(p["t1"])} {t1["name"]} <span style="color:#94a3b8;">+</span> {_badge_img(p["t2"])} {t2["name"]}'
+                    f'<div style="display:flex;align-items:center;gap:8px;font-weight:700;color:var(--text);">'
+                    f'{_badge_img(p["t1"])} {t1["name"]} <span style="color:var(--muted);">+</span> {_badge_img(p["t2"])} {t2["name"]}'
                     f'</div>'
                     f'<div class="fdr-strip">{cells}</div>'
                     f'</div></div>'
@@ -2306,7 +2457,7 @@ with tab_insights:
         else:
             st.info("No rotation pairings found.")
 
-        st.markdown("#### 🛡️ Team Strength Index (Dixon-Coles)")
+        st.markdown("#### 🛡️ Who's actually any good")
         strengths = _team_strength_index()
         if strengths:
             grid = '<div class="grid">'
@@ -2316,18 +2467,18 @@ with tab_insights:
                 grid += (
                     f'<div class="strength-card">'
                     f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">'
-                    f'{_badge_img(s["id"], large=True)} <span style="font-weight:700;color:#E2E8F0;">{s["name"]}</span>'
+                    f'{_badge_img(s["id"], large=True)} <span style="font-weight:700;color:var(--text);">{s["name"]}</span>'
                     f'</div>'
-                    f'<div style="font-size:0.7rem;color:#94a3b8;">Attack {s["att"]:.1f}/5</div>'
+                    f'<div style="font-size:0.7rem;color:var(--muted);">Attack {s["att"]:.1f}/5</div>'
                     f'<div class="strength-bar"><div class="strength-fill-home" style="width:{att_pct}%"></div></div>'
-                    f'<div style="font-size:0.7rem;color:#94a3b8;">Defence {s["def"]:.1f}/5</div>'
+                    f'<div style="font-size:0.7rem;color:var(--muted);">Defence {s["def"]:.1f}/5</div>'
                     f'<div class="strength-bar"><div class="strength-fill-away" style="width:{def_pct}%"></div></div>'
                     f'</div>'
                 )
             grid += "</div>"
             st.markdown(_card(grid, "20 Clubs Ranked by Attack + Defence"), unsafe_allow_html=True)
 
-        st.markdown("#### 📈 Fixture Swing Score (Entry / Exit Windows)")
+        st.markdown("#### 📈 Fixtures turning good & turning bad")
         swings = fpl_tools._fixture_swing_scores(ctx["lookup"], ctx["start"], n=6)
         if swings:
             enter = [s for s in swings if s["att_slope"] > 0][:5]
@@ -2336,25 +2487,25 @@ with tab_insights:
             with c_enter:
                 html = "".join(
                     f'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
-                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:#E2E8F0;">{s["name"]}</span>'
-                    f'<span style="margin-left:auto;color:#10b981;font-weight:700;">+{s["att_slope"]:.2f}</span></div>'
+                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:var(--text);">{s["name"]}</span>'
+                    f'<span style="margin-left:auto;color:var(--pos-2);font-weight:700;">+{s["att_slope"]:.2f}</span></div>'
                     for s in enter
                 )
-                st.markdown(_card(html or '<div style="color:#64748b;">No improving fixtures.</div>', "🟢 Prime entry windows (attackers)"), unsafe_allow_html=True)
+                st.markdown(_card(html or '<div style="color:var(--muted-2);">No improving fixtures.</div>', "🟢 Prime entry windows (attackers)"), unsafe_allow_html=True)
             with c_exit:
                 html = "".join(
                     f'<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
-                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:#E2E8F0;">{s["name"]}</span>'
-                    f'<span style="margin-left:auto;color:#ef4444;font-weight:700;">{s["att_slope"]:.2f}</span></div>'
+                    f'{_badge_img(s["team_id"])} <span style="font-weight:600;color:var(--text);">{s["name"]}</span>'
+                    f'<span style="margin-left:auto;color:var(--neg-2);font-weight:700;">{s["att_slope"]:.2f}</span></div>'
                     for s in exit_
                 )
-                st.markdown(_card(html or '<div style="color:#64748b;">No deteriorating fixtures.</div>', "🔴 Exit windows (attackers)"), unsafe_allow_html=True)
+                st.markdown(_card(html or '<div style="color:var(--muted-2);">No deteriorating fixtures.</div>', "🔴 Exit windows (attackers)"), unsafe_allow_html=True)
 
-with tab_radar:
-    st.markdown("### 📡 Player Radar & Market")
+with tab_players:
+    st.markdown("### 📡 Players & the market")
     risk = risk_label.lower()
 
-    st.markdown("#### 📈 24h Ownership Momentum")
+    st.markdown("#### 📈 This week's ins and outs")
     mom = _market_momentum(limit=5)
     tr_, tf_ = st.tabs(["🔥 Risers", "🧊 Fallers"])
     with tr_:
@@ -2373,7 +2524,7 @@ with tab_radar:
     st.markdown("#### 🎯 Player Radar Shortlists")
     kind = st.radio("Filter", ["Differentials", "Best Value", "Top Points"], horizontal=True, key="radar_kind")
     kmap = {"Differentials": "differentials", "Best Value": "value", "Top Points": "points"}
-    rows = _radar_shortlists(kmap[kind], limit=12, risk=risk)
+    rows = _radar_shortlists(kmap[kind], limit=12)
     if rows:
         ctx = _bootstrap_ctx()
         lookup = ctx["lookup"]; start = ctx["start"]
@@ -2388,7 +2539,7 @@ with tab_radar:
                 f'<div class="nm">{r["name"]}</div>'
                 f'<div class="meta">{r["pos"]} · {_badge_img(r["team"])} · £{r["price"]:.1f}m</div>'
                 f'<div class="meta">Owned {r["ownership"]:.1f}% · {lights}</div>'
-                f'<div style="font-weight:800;color:#00F5A0;margin-top:4px;">{r["xp"]} xP</div>'
+                f'<div style="font-weight:800;color:var(--pos);margin-top:4px;">{r["xp"]} xP</div>'
                 f'</div></div></div>'
             )
         grid += "</div>"
@@ -2397,21 +2548,21 @@ with tab_radar:
     else:
         st.info("No players match this filter.")
 
-    st.markdown("#### 🧲 Regression-to-Mean Flags (SELL-HIGH / BUY-LOW)")
+    st.markdown("#### 🧲 Running hot & running cold")
     try:
         reg = fpl_tools.get_regression_candidates()
         c_sell, c_buy = st.columns(2)
         with c_sell:
             sell_rows = "".join(_regression_row(r, True) for r in reg["sell_high"][:8])
             st.markdown(
-                _card(sell_rows or '<div style="color:#64748b;">No clear over-performers right now.</div>',
+                _card(sell_rows or '<div style="color:var(--muted-2);">No clear over-performers right now.</div>',
                       "📉 Over-performing — SELL-HIGH candidates"),
                 unsafe_allow_html=True,
             )
         with c_buy:
             buy_rows = "".join(_regression_row(r, False) for r in reg["buy_low"][:8])
             st.markdown(
-                _card(buy_rows or '<div style="color:#64748b;">No clear under-performers right now.</div>',
+                _card(buy_rows or '<div style="color:var(--muted-2);">No clear under-performers right now.</div>',
                       "📈 Under-performing — BUY-LOW candidates"),
                 unsafe_allow_html=True,
             )
@@ -2450,7 +2601,129 @@ with tab_radar:
             html += "</div>"
             st.markdown(_card(html, "📈 Ranked by xP"), unsafe_allow_html=True)
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
-    
+
+
+# ------------------------------------------------------------------
+# Model Health -- marking our own homework, in public
+# ------------------------------------------------------------------
+with tab_health:
+    st.markdown("### 🩺 How well is the model actually doing?")
+    st.caption(
+        "Every Friday we save what we predicted. Every Tuesday we check it "
+        "against what happened. This page is that record — including the weeks "
+        "we got it wrong."
+    )
+
+    _mh_target = 5000
+    try:
+        import db as _mh_db
+        _mh_banked = _mh_db.count_checked_predictions(fpl_tools.MODEL_VERSION)
+        _mh_rows = _mh_db.prediction_accuracy_by_gw(fpl_tools.MODEL_VERSION)
+    except Exception:
+        _mh_banked, _mh_rows = None, []
+
+    if _mh_banked is None:
+        # Say WHICH failure it was. "Unavailable" is the same message for a
+        # missing environment variable and a database that is refusing
+        # connections, and only one of those is a five-second fix.
+        try:
+            import db as _db_err
+            _kind, _detail = _db_err.last_db_error() or ("unknown", "")
+        except Exception:
+            _kind, _detail = "unknown", ""
+        _why = {
+            "config": "No results database is configured for this deployment "
+                      "(`DATABASE_URL` isn't set).",
+            "driver": "The database driver isn't installed in this deployment.",
+            "connect": "The results database refused the connection or timed out.",
+        }.get(_kind, "The results database couldn't be reached.")
+        st.warning(
+            f"**No scorecard to show.** {_why}\n\n"
+            "The projections on the other tabs are unaffected — they don't need it."
+            + (f"\n\n`{_detail[:200]}`" if _detail else "")
+        )
+    else:
+        pct = min(100, int(100 * _mh_banked / _mh_target))
+        st.markdown(
+            _card(
+                '<div class="mh-grid">'
+                f'<div class="sc-tile"><div class="sc-label">Predictions checked</div>'
+                f'<div class="sc-value">{_mh_banked:,}</div>'
+                f'<div class="sc-sub">against real results</div></div>'
+                f'<div class="sc-tile"><div class="sc-label">Self-correction starts at</div>'
+                f'<div class="sc-value">{_mh_target:,}</div>'
+                f'<div class="mh-bar"><div style="width:{pct}%;"></div></div>'
+                f'<div class="sc-sub">{pct}% of the way there</div></div>'
+                f'<div class="sc-tile"><div class="sc-label">Model in use</div>'
+                f'<div class="sc-value" style="font-size:1.05rem;">{fpl_tools.MODEL_VERSION}</div>'
+                f'<div class="sc-sub">the count restarts whenever this changes</div></div>'
+                '</div>',
+                "📦 Where we're up to",
+            ),
+            unsafe_allow_html=True,
+        )
+        if _mh_banked < _mh_target:
+            st.info(
+                "**Not self-correcting yet — and we're not going to pretend "
+                "otherwise.** The model tunes itself only once there's enough "
+                "checked history to tune against; fitting to a few hundred rows "
+                "would chase noise, not signal. Until then the projections run "
+                "on the model as built."
+            )
+
+    if _mh_rows:
+        _hdr = (
+            '<div class="wf-row" style="font-weight:700;color:var(--text);">'
+            '<span>Gameweek</span><span style="min-width:70px;text-align:right;">How far off</span>'
+            '<span style="min-width:80px;text-align:right;">Over/under</span>'
+            '<span style="min-width:80px;text-align:right;">Right order</span></div>'
+        )
+        _body = ""
+        for r in _mh_rows:
+            rmse = f'{r["rmse"]:.2f}' if r["rmse"] is not None else "—"
+            if r["bias"] is None:
+                bias, bias_tone = "—", "var(--muted-2)"
+            else:
+                # Positive bias means we projected more than they scored.
+                bias = f'{r["bias"]:+.2f}'
+                bias_tone = "var(--neg-2)" if abs(r["bias"]) > 0.5 else "var(--muted)"
+            if r["corr"] is None:
+                corr, corr_tone = "—", "var(--muted-2)"
+            else:
+                corr = f'{r["corr"]:.2f}'
+                corr_tone = "var(--pos-2)" if r["corr"] >= 0.4 else "var(--warn-2)"
+            _body += (
+                f'<div class="wf-row"><span>GW{r["gameweek"]} '
+                f'<span class="tc-meta">({r["n"]:,} players)</span></span>'
+                f'<span style="min-width:70px;text-align:right;">{rmse}</span>'
+                f'<span style="min-width:80px;text-align:right;color:{bias_tone};">{bias}</span>'
+                f'<span style="min-width:80px;text-align:right;color:{corr_tone};">{corr}</span></div>'
+            )
+        st.markdown(_card(_hdr + _body, "📈 Week by week"), unsafe_allow_html=True)
+        st.markdown(
+            '<div class="note"><b>How far off</b> — average miss, in points. Lower is better. '
+            '<b>Over/under</b> — which way we lean; positive means we projected more than '
+            'they scored. <b>Right order</b> — did the players we rated highest actually '
+            'score highest? That one matters most: transfers are a ranking decision, not '
+            'a forecast of the exact score.</div>',
+            unsafe_allow_html=True,
+        )
+    elif _mh_banked:
+        st.caption(
+            "No gameweek has enough checked rows yet to report on. Needs at "
+            "least 20 paired predictions in a week before the numbers mean anything."
+        )
+
+    with st.expander("🔧 What actually changes when it self-corrects", expanded=False):
+        st.markdown(
+            "It doesn't rewrite the model. It nudges a handful of dials — how much "
+            "weight to put on a player's recent form, how harshly to treat rotation "
+            "risk, how far ahead fixture difficulty should count — and only in small "
+            "steps, so one freak gameweek can't drag it around.\n\n"
+            "Everything the model does is visible on the other tabs before any of "
+            "this kicks in. The self-correction makes it sharper; it isn't what "
+            "makes it work."
+        )
 
 
 # ------------------------------------------------------------------
@@ -2459,7 +2732,7 @@ with tab_radar:
 st.markdown(
     """
     <hr style="margin-top: 3rem; margin-bottom: 1rem; border: none; border-top: 1px solid #e0e0e0;">
-    <div style="text-align: center; color: #6b7280; font-size: 0.85rem; font-weight: 500; letter-spacing: 0.5px;">
+    <div style="text-align: center; color:var(--muted-2); font-size: 0.85rem; font-weight: 500; letter-spacing: 0.5px;">
         Built by Waqas Hussain
     </div>
     """,
