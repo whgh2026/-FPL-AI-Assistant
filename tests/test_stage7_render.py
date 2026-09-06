@@ -259,6 +259,78 @@ class StructuralHealthCopyTest(unittest.TestCase):
                 self.assertTrue(c.get("label"), "a check has no display label")
 
 
+class MethodologyLeakTest(unittest.TestCase):
+    """No user-visible copy should name the underlying statistical technique --
+    not because it's wrong to say, but because the deployed app is the one
+    fully public surface (the repo itself is confirmed private), and naming
+    the exact method for free is a bigger giveaway than any UI wording."""
+
+    def test_no_named_technique_survives_in_visible_copy(self):
+        src = _app_source()
+        for jargon in ("Poisson", "DEFCON", "Dixon-Coles", "Dixon–Coles"):
+            for line in src.splitlines():
+                stripped = line.lstrip()
+                if jargon in line and not (stripped.startswith("#") or '"""' in line
+                                           or stripped.startswith("'''")):
+                    self.fail(f"{jargon!r} in live copy: {line.strip()!r}")
+
+    def test_the_engine_description_states_what_it_delivers(self):
+        """Removing jargon must not leave a content-free sentence -- the
+        replacement still has to say what the model actually does."""
+        src = _app_source()
+        start = src.index('"quant": (')
+        desc = src[start:src.index(")", start)]
+        for must_have in ("forecasts points", "fixture difficulty",
+                          "checks itself against real results"):
+            self.assertIn(must_have, desc, f"{must_have!r} missing from the engine description")
+
+    def test_odds_pending_line_matches_its_own_sibling(self):
+        """Same metric, two branches (odds live vs pending) -- the pending
+        branch used to tack '(Dixon-Coles)' onto a label the live branch
+        states plainly. Both must now read the same way."""
+        src = _app_source()
+        self.assertIn('f"Market Odds Pending · Opp. defence: {opp_def:.1f}/5"', src)
+
+
+class RankExposureCopyTest(unittest.TestCase):
+    """'Where you're exposed' is the one place EO turns into a signed number a
+    manager has to interpret unaided -- Short and Inverted mean opposite things
+    and look similar on the page."""
+
+    def test_short_and_inverted_are_both_explained_before_the_list(self):
+        src = _app_source()
+        start = src.index('"📊 Where you\'re exposed"')
+        block = src[start:start + 1400]
+        self.assertIn("**Inverted**", block)
+        self.assertIn("**Short**", block)
+
+    def test_short_explainer_states_the_deficit_widens(self):
+        """The specific claim asked for: a Short exposure costs nothing
+        directly, but every point the player scores widens the gap to the
+        managers who own him."""
+        src = _app_source()
+        start = src.index('"📊 Where you\'re exposed"')
+        block = src[start:start + 1400]
+        self.assertIn("widens the gap", block)
+
+    def test_short_row_detail_carries_its_own_inline_explainer(self):
+        """Mirrors the Inverted row's existing '(rank drops when they score)'
+        -- each row should be self-explanatory without opening the caption
+        above it."""
+        src = _app_source()
+        start = src.index('"🔻 Short"')
+        row = src[start:start + 300]
+        self.assertIn("widens your gap to the field", row)
+
+    def test_short_sign_convention_matches_the_stated_example(self):
+        """-0.89 pts/point at 89% EO, not +0.89 -- the explainer's own example
+        has to match what _rank_exposure actually returns for an unowned
+        player, or the copy would be teaching the wrong sign."""
+        import fpl_tools
+        per_pt = fpl_tools._rank_exposure(0, 89.0, 1.0)
+        self.assertAlmostEqual(per_pt, -0.89, places=6)
+
+
 class StylesheetTest(unittest.TestCase):
     def test_no_hardcoded_hex_outside_root(self):
         """The Stage 7 gate. One #fff had survived on .pc .pos."""

@@ -727,7 +727,7 @@ _SIGNAL_DEPTS = ["GK", "DEF", "MID", "FWD", "Bench"]
 _SIGNAL_EMOJI = {"GK": "🧤", "DEF": "🛡️", "MID": "🎯", "FWD": "⚡", "Bench": "🪑"}
 _SIGNAL_LABELS = {
     "market": ("Bookies", "Live betting market odds converted to expected goals, assists, and clean sheet probabilities."),
-    "quant": ("FPL Quant Manager", "Our proprietary internal quantitative engine. Built specifically for this application, it combines multi-week Poisson projections (xGI, DEFCON, probabilistic minutes, and Dixon–Coles fixture swings) with a continuous post-deadline machine learning feedback loop that dynamically self-tunes week by week."),
+    "quant": ("FPL Quant Manager", "Our own projection model, built for this tool. It forecasts points several weeks out — weighing fixture difficulty, each player's likelihood of featuring, and recent output — then checks itself against real results and refines week by week."),
     "form": ("Recent Form Tracker", "Rolling 30-day baseline performance tracking sustained underlying shot volume and key involvements."),
 }
 
@@ -932,7 +932,7 @@ def _render_player_inspector(squad) -> None:
         if wp is not None:
             odds_desc = f"Market Win Probability: {wp * 100:.0f}% · Opp. defence: {opp_def:.1f}/5"
         else:
-            odds_desc = f"Market Odds Pending · Opp. defence (Dixon-Coles): {opp_def:.1f}/5"
+            odds_desc = f"Market Odds Pending · Opp. defence: {opp_def:.1f}/5"
             
         fx_rows += (
             f'<div class="insp-fixture">'
@@ -1876,6 +1876,18 @@ with tab_planner:
                     st.caption("Structural health unavailable.")
 
             with st.expander("📊 Where you're exposed", expanded=False):
+                st.caption(
+                    "**Inverted** — you own him, but you're not his captain, and "
+                    "a big chunk of the field is. When he hauls, it lifts the "
+                    "rest of the field's rank more than it lifts yours.\n\n"
+                    "**Short** — you don't own him at all, and plenty of the "
+                    "field does. He costs you nothing directly, but every point "
+                    "he scores widens the gap between you and the managers who "
+                    "backed him. The pts/point number below is exactly that gap "
+                    "— e.g. -0.89 means an 89%-owned player, so a big haul from "
+                    "him is a real rank drop for you, even though you never "
+                    "picked him."
+                )
                 try:
                     eo_map = fpl_tools._eo_map()
                     _b = fpl_tools._get_bootstrap()
@@ -1893,7 +1905,7 @@ with tab_planner:
                     for pid, eo_d in eo_map.items():
                         if eo_d.get("eo", 0.0) > 80.0 and pid not in squad_ids:
                             per_pt = fpl_tools._rank_exposure(0, eo_d.get("eo", 0.0), 1.0)
-                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (unowned)"))
+                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (you don't own him — a haul widens your gap to the field)"))
                     if rows:
                         html = "".join(
                             f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
