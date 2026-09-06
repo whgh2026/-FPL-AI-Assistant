@@ -265,3 +265,94 @@ class ClubAliasStalenessTest(unittest.TestCase):
             os.path.abspath(__file__))), "fpl_tools.py"), encoding="utf-8").read()
         head = src[max(0, src.index("_CLUB_ALIASES = {") - 700):src.index("_CLUB_ALIASES = {")]
         self.assertIn("not a club roster", head)
+
+
+class DevigPowerTest(unittest.TestCase):
+    """Power-method de-vig: replaces flat proportional normalisation, which
+    spreads the bookmaker's margin evenly across outcomes when real margin
+    concentrates on the longshot side of a market (the favourite-longshot
+    bias)."""
+
+    def _implied(self, *decimal_odds):
+        return [1.0 / o for o in decimal_odds]
+
+    def test_devigged_probabilities_sum_to_one(self):
+        """The defining property: sum((p_i)^k) == 1.0 at the solved k."""
+        for odds in ([1.80, 3.60, 4.50], [1.50, 4.20, 6.00], [2.10, 3.30, 3.40]):
+            probs = self._implied(*odds)
+            out = fpl_tools._devig_power(probs)
+            self.assertAlmostEqual(sum(out), 1.0, places=6, msg=f"odds={odds}")
+
+    def test_a_fair_market_is_unchanged(self):
+        """No overround at all (S == 1.0) -- k == 1, so p_i* == p_i."""
+        probs = [0.5, 0.3, 0.2]
+        self.assertAlmostEqual(sum(probs), 1.0)
+        out = fpl_tools._devig_power(probs)
+        for got, want in zip(out, probs):
+            self.assertAlmostEqual(got, want, places=6)
+
+    def test_favourite_longshot_bias_direction(self):
+        """The power method must pull LESS of the margin off the favourite,
+        and MORE off the longshot, than a flat proportional split would --
+        that asymmetry is the entire reason to prefer it."""
+        probs = self._implied(1.50, 4.20, 6.00)     # a clear favourite + a longshot
+        total = sum(probs)
+        proportional = [p / total for p in probs]
+        power = fpl_tools._devig_power(probs)
+        favourite_idx, longshot_idx = 0, 2
+        self.assertGreater(power[favourite_idx], proportional[favourite_idx],
+                           "power method should credit the favourite MORE than a flat split")
+        self.assertLess(power[longshot_idx], proportional[longshot_idx],
+                        "power method should credit the longshot LESS than a flat split")
+
+    def test_two_outcome_market(self):
+        """Not three-way-specific -- any number of outcomes works."""
+        probs = self._implied(1.40, 3.00)
+        out = fpl_tools._devig_power(probs)
+        self.assertEqual(len(out), 2)
+        self.assertAlmostEqual(sum(out), 1.0, places=6)
+
+    def test_falls_back_to_proportional_when_scipy_unavailable(self):
+        saved = fpl_tools.HAS_SCIPY
+        fpl_tools.HAS_SCIPY = False
+        try:
+            probs = self._implied(1.80, 3.60, 4.50)
+            total = sum(probs)
+            out = fpl_tools._devig_power(probs)
+            for got, want in zip(out, probs):
+                self.assertAlmostEqual(got, want / total, places=6)
+        finally:
+            fpl_tools.HAS_SCIPY = saved
+
+    def test_falls_back_to_proportional_when_brentq_cannot_bracket(self):
+        """An already-fair-or-inverted 'market' (no positive overround) has no
+        root in [1, 5] to find -- same-signed bracket, brentq raises, and the
+        function must degrade rather than propagate the exception."""
+        saved = fpl_tools.HAS_SCIPY
+        fpl_tools.HAS_SCIPY = True
+        try:
+            probs = [0.3, 0.3, 0.3]           # total 0.9 < 1.0: an inverted "market"
+            total = sum(probs)
+            out = fpl_tools._devig_power(probs)
+            for got, want in zip(out, probs):
+                self.assertAlmostEqual(got, want / total, places=6)
+        finally:
+            fpl_tools.HAS_SCIPY = saved
+
+    def test_empty_input(self):
+        self.assertEqual(fpl_tools._devig_power([]), [])
+
+    def test_non_positive_total_degrades_rather_than_raising(self):
+        try:
+            fpl_tools._devig_power([0.0, 0.0])
+        except Exception as exc:
+            self.fail(f"_devig_power raised on a zero total: {exc}")
+
+    def test_market_win_probs_use_the_power_method(self):
+        """End-to-end: _fetch_market_win_probs's own de-vig step must route
+        through _devig_power, not the flat proportional split it replaced."""
+        import inspect
+        src = inspect.getsource(fpl_tools._fetch_market_win_probs)
+        self.assertIn("_devig_power(", src)
+        self.assertNotIn("h_imp / total", src,
+                         "the old flat proportional normalisation survived alongside it")

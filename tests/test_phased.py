@@ -233,5 +233,127 @@ class FreeTransferStateMachineTest(unittest.TestCase):
         self.assertEqual((ft_next, hits), (5, 0))
 
 
+class TransferGanttDataTest(unittest.TestCase):
+    """build_transfer_gantt_data: pure reshaping of a multi-GW schedule into
+    per-player tenure bars, independent of Plotly or Streamlit."""
+
+    def _squad(self, names, position="MID"):
+        return [{"name": n, "position": position} for n in names]
+
+    def test_empty_schedule_returns_empty_structure(self):
+        out = fpl_tools.build_transfer_gantt_data(self._squad(["A"]), [])
+        self.assertEqual(out["bars"], [])
+        self.assertEqual(out["chip_events"], [])
+        self.assertEqual(out["captains"], {})
+        self.assertIsNone(out["start_gw"])
+        self.assertIsNone(out["end_gw"])
+
+    def test_a_player_held_the_whole_horizon_gets_one_bar_spanning_it(self):
+        squad = self._squad(["A", "B"])
+        schedule = [
+            {"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 11, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 12, "buys": [], "sells": [], "chip": None, "hits": 0},
+        ]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        self.assertEqual(len(out["bars"]), 2)
+        for bar in out["bars"]:
+            self.assertEqual(bar["start_gw"], 10)
+            self.assertEqual(bar["end_gw"], 12)
+            self.assertEqual(bar["entered_via"], "initial")
+            self.assertEqual(bar["left_via"], "horizon_end")
+
+    def test_a_sale_ends_the_bar_the_week_before_the_sale(self):
+        squad = self._squad(["A", "B"])
+        schedule = [
+            {"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 11, "buys": ["C"], "sells": ["A"], "chip": None, "hits": 0},
+            {"gw": 12, "buys": [], "sells": [], "chip": None, "hits": 0},
+        ]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        by_name = {b["name"]: b for b in out["bars"]}
+        self.assertEqual(by_name["A"]["start_gw"], 10)
+        self.assertEqual(by_name["A"]["end_gw"], 10, "must end the week BEFORE the sale, not on it")
+        self.assertEqual(by_name["A"]["left_via"], "sold")
+        self.assertEqual(by_name["B"]["end_gw"], 12)
+        self.assertEqual(by_name["C"]["start_gw"], 11)
+        self.assertEqual(by_name["C"]["entered_via"], "buy")
+        self.assertEqual(by_name["C"]["left_via"], "horizon_end")
+
+    def test_sold_then_bought_back_produces_two_separate_bars(self):
+        squad = self._squad(["A"])
+        schedule = [
+            {"gw": 10, "buys": [], "sells": ["A"], "chip": None, "hits": 0},
+            {"gw": 11, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 12, "buys": ["A"], "sells": [], "chip": None, "hits": 0},
+        ]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        a_bars = sorted((b for b in out["bars"] if b["name"] == "A"), key=lambda b: b["start_gw"])
+        self.assertEqual(len(a_bars), 2, "a resold-then-rebought player must get two segments, not one")
+        self.assertEqual((a_bars[0]["start_gw"], a_bars[0]["end_gw"]), (10, 9))
+        self.assertEqual((a_bars[1]["start_gw"], a_bars[1]["end_gw"]), (12, 12))
+
+    def test_free_hit_does_not_alter_persistent_tenure(self):
+        """Matches _plan_transfers_multi_gw's own freeze: a Free Hit week's
+        buys/sells describe the one-off XI, never the persistent squad."""
+        squad = self._squad(["A", "B"])
+        schedule = [
+            {"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 11, "buys": ["X", "Y"], "sells": ["A", "B"], "chip": "Free Hit", "hits": 0},
+            {"gw": 12, "buys": [], "sells": [], "chip": None, "hits": 0},
+        ]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        names = {b["name"] for b in out["bars"]}
+        self.assertEqual(names, {"A", "B"}, "the Free Hit's one-off X/Y must not appear as tenure bars")
+        for bar in out["bars"]:
+            self.assertEqual((bar["start_gw"], bar["end_gw"]), (10, 12),
+                            "Free Hit must not interrupt persistent tenure")
+
+    def test_chip_events_are_recorded(self):
+        squad = self._squad(["A"])
+        schedule = [
+            {"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 11, "buys": [], "sells": [], "chip": "Wildcard", "hits": 0},
+        ]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        self.assertEqual(out["chip_events"], [{"gw": 11, "chip": "Wildcard"}])
+
+    def test_captain_and_vice_captain_are_the_top_two_by_projected_xp(self):
+        squad = self._squad(["A", "B", "C"])
+        schedule = [{"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0}]
+        xp_lookup = {"A": 4.0, "B": 9.0, "C": 6.5}
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule, xp_lookup=xp_lookup)
+        self.assertEqual(out["captains"][10], {"captain": "B", "vice_captain": "C"})
+
+    def test_no_xp_lookup_means_no_captain_guess(self):
+        squad = self._squad(["A", "B"])
+        schedule = [{"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0}]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        self.assertEqual(out["captains"][10], {"captain": None, "vice_captain": None})
+
+    def test_captain_on_a_free_hit_week_is_drawn_from_the_one_off_squad(self):
+        """The persistent squad's best player isn't necessarily playing that
+        week -- the one-off Free Hit XI is who is actually selected."""
+        squad = self._squad(["A", "B"])
+        schedule = [
+            {"gw": 10, "buys": ["Z"], "sells": ["A"], "chip": "Free Hit", "hits": 0},
+        ]
+        xp_lookup = {"A": 20.0, "B": 3.0, "Z": 9.0}
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule, xp_lookup=xp_lookup)
+        # A (xp=20) is NOT playing this week -- it was sold for the one-off
+        # squad -- so the captain must come from {B, Z}, not A.
+        self.assertEqual(out["captains"][10]["captain"], "Z")
+
+    def test_bars_are_sorted_by_start_then_name(self):
+        squad = self._squad(["B", "A"])
+        schedule = [
+            {"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0},
+            {"gw": 11, "buys": ["C"], "sells": [], "chip": None, "hits": 0},
+        ]
+        out = fpl_tools.build_transfer_gantt_data(squad, schedule)
+        starts = [(b["start_gw"], b["name"]) for b in out["bars"]]
+        self.assertEqual(starts, sorted(starts))
+
+
 if __name__ == "__main__":
     unittest.main()

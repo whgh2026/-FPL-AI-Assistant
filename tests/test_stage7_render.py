@@ -19,6 +19,8 @@ import subprocess
 import sys
 import unittest
 
+import fpl_tools
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "tests", "render_app.py")
 PROBE = os.path.join(ROOT, "tests", "probe_ui.py")
@@ -492,6 +494,43 @@ class ChipCopyTest(unittest.TestCase):
         self.assertIn("transfer strategy.", src)
 
 
+class SectionCaptionTest(unittest.TestCase):
+    """Plain-English captions directly underneath the major Step 3 card
+    titles, so a reader doesn't need to already know what each card is doing
+    to make sense of the number inside it."""
+
+    def test_how_it_could_go_caption(self):
+        src = _app_source()
+        start = src.index('"🎲 How it could go"')
+        block = src[max(0, start - 500):start]
+        self.assertIn("realistic ceiling", block)
+        self.assertIn("expected baseline", block)
+        # 500, not a round headline number that overstates it -- SAA_SCENARIOS
+        # is the actual number of Monte Carlo draws the solver runs.
+        self.assertIn("500 gameweek outcomes", block)
+        self.assertIn(f"{fpl_tools.SAA_SCENARIOS}", block,
+                      "the caption's simulation count must track SAA_SCENARIOS, "
+                      "not a hardcoded figure that can drift from the real one")
+
+    def test_chip_scenario_lab_caption_still_present(self):
+        """The chip card's own copy pass (a separate round) already covers
+        this -- pinned here too since it's now also the literal home for the
+        'Scenario Comparison' framing this class exists to lock down."""
+        src = _app_source()
+        start = src.index('"🎟️ Active Chip Analysis & Recommendations"')
+        block = src[max(0, start - 500):start]
+        self.assertIn("Compares competing strategy paths", block)
+        self.assertIn("highest net expected points", block)
+
+    def test_rolling_transfer_plan_caption(self):
+        src = _app_source()
+        start = src.index('"🗓️ The next few weeks"')
+        block = src[max(0, start - 400):start]
+        self.assertIn("mathematically optimal gameweek-by-gameweek transfer", block)
+        self.assertIn("bank free transfers", block)
+        self.assertIn("carries forward", block)
+
+
 class StylesheetTest(unittest.TestCase):
     def test_no_hardcoded_hex_outside_root(self):
         """The Stage 7 gate. One #fff had survived on .pc .pos."""
@@ -562,6 +601,36 @@ class StylesheetTest(unittest.TestCase):
                             "still a fixed 5-column grid with nowhere to reflow to")
         self.assertIn("auto-fit", rule)
         self.assertIn("minmax(", rule)
+
+    def test_page_config_requests_an_expanded_sidebar(self):
+        src = _app_source()
+        m = re.search(r"st\.set_page_config\([^)]*\)", src, re.DOTALL)
+        self.assertIsNotNone(m, "st.set_page_config(...) not found")
+        self.assertIn('initial_sidebar_state="expanded"', m.group(0))
+
+    def test_desktop_sidebar_is_pinned_open(self):
+        """A misclick on Streamlit's own collapse arrow could hide the
+        Strategy & Chip controls on desktop with no obvious way back. Scoped
+        to >=992px so mobile/tablet keep Streamlit's own collapse-to-
+        hamburger behaviour -- a narrow viewport still needs that space back."""
+        css = self._css()
+        m = re.search(r"@media \(min-width:\s*992px\)\s*\{.*?\n\}", css, re.DOTALL)
+        self.assertIsNotNone(m, "no >=992px desktop media query found")
+        block = m.group(0)
+        self.assertIn('[data-testid="stSidebarCollapseButton"]', block)
+        self.assertIn("display: none !important", block)
+        self.assertIn("min-width: 300px !important", block)
+        self.assertIn("max-width: 320px !important", block)
+        self.assertIn("transform: none !important", block)
+        self.assertIn("visibility: visible !important", block)
+
+    def test_mobile_sidebar_collapse_is_not_touched_by_the_desktop_pin(self):
+        """The >=992px pin must not leak into the existing <=768px mobile
+        block -- narrow viewports still get Streamlit's own collapse."""
+        css = self._css()
+        mobile = re.search(r"@media \(max-width: 768px\) \{.*?\n\s*\}", css, re.DOTALL)
+        self.assertIsNotNone(mobile)
+        self.assertNotIn("stSidebarCollapseButton", mobile.group(0))
 
 
 class ModelHealthDataTest(unittest.TestCase):

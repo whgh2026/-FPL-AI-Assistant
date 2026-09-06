@@ -168,6 +168,39 @@ def main():
           "the internal constant lost its descriptive-slug shape -- auto_tune "
           "and the version-boundary tests key off exactly that shape")
 
+    # ---- rolling transfer horizon Gantt: figure built from real data -------
+    gantt_squad = [{"name": "Held Player", "position": "MID"},
+                   {"name": "Sold Player", "position": "DEF"}]
+    gantt_schedule = [
+        {"gw": 10, "buys": [], "sells": [], "chip": None, "hits": 0},
+        {"gw": 11, "buys": ["Bought Player"], "sells": ["Sold Player"], "chip": None, "hits": 0},
+        {"gw": 12, "buys": [], "sells": [], "chip": "Wildcard", "hits": 0},
+    ]
+    gantt = app.fpl_tools.build_transfer_gantt_data(
+        gantt_squad, gantt_schedule,
+        xp_lookup={"Held Player": 6.0, "Sold Player": 2.0, "Bought Player": 8.0})
+    fig = app._transfer_gantt_figure(gantt)
+    check("gantt_figure_is_a_plotly_figure",
+          isinstance(fig, app.go.Figure),
+          f"{type(fig)!r} -- _transfer_gantt_figure must return a go.Figure")
+    bar_traces = [t for t in fig.data if t.type == "bar"]
+    check("gantt_figure_has_one_bar_trace_per_tenure_segment",
+          len(bar_traces) == len(gantt["bars"]),
+          f"{len(bar_traces)} bar traces for {len(gantt['bars'])} segments")
+    scatter_traces = [t for t in fig.data if t.type == "scatter"]
+    check("gantt_figure_marks_the_captain",
+          any(t.name == "Captain" for t in scatter_traces),
+          "no Captain marker trace found")
+    check("gantt_figure_xaxis_spans_the_horizon",
+          fig.layout.xaxis.range == (gantt["start_gw"] - 0.5, gantt["end_gw"] + 0.5),
+          f"{fig.layout.xaxis.range!r} vs expected horizon "
+          f"({gantt['start_gw']}, {gantt['end_gw']})")
+
+    empty_fig = app._transfer_gantt_figure({"start_gw": None, "end_gw": None,
+                                            "bars": [], "chip_events": [], "captains": {}})
+    check("gantt_figure_handles_an_empty_schedule_without_raising",
+          isinstance(empty_fig, app.go.Figure))
+
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) failed:")
         for f in FAILURES:

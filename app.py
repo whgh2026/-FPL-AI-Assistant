@@ -8,9 +8,11 @@ import dateutil.parser
 from dateutil import tz
 import datetime
 import time
+import plotly.graph_objects as go
 from db import get_or_backfill_manager_history, log_decision, log_squad_health, save_chip_play, save_plan
 
-st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide",
+                    initial_sidebar_state="expanded")
 
 def get_caveat_html():
     """Data-freshness note. Never raises: it is decoration on every page.
@@ -1183,6 +1185,119 @@ def _scorecard_html(card: dict, delta_xi=None) -> str:
     )
 
 
+# Colours match static/app.css's :root palette -- Plotly cannot read CSS
+# custom properties, so these are the same hex values copied over rather
+# than re-derived, to keep the chart from looking like a different app.
+_GANTT_COLOURS = {
+    "held": "#38BDF8",          # --info-2: unbroken tenure, nothing happened
+    "buy": "#00F5A0",           # --pos: entered the squad
+    "sold": "#F43F5E",          # --neg: left the squad
+    "chip_highlight": "#FBBF24",  # --warn
+    "captain": "#FBBF24",       # --warn
+    "vice_captain": "#94A3B8",  # --muted
+}
+
+
+def _transfer_gantt_figure(gantt: dict) -> "go.Figure":
+    """Render fpl_tools.build_transfer_gantt_data's output as a horizontal
+    Gantt-style tenure chart: one bar per held segment, chip weeks as
+    shaded column highlights, captain/vice-captain as markers.
+
+    A plain go.Bar(base=..., orientation="h") per segment rather than
+    px.timeline -- px.timeline expects datetime axes, and gameweeks are
+    small integers, not dates.
+    """
+    fig = go.Figure()
+    bars = gantt.get("bars", [])
+    start_gw, end_gw = gantt.get("start_gw"), gantt.get("end_gw")
+
+    # Row order: earliest-arriving player at the top reads naturally as a
+    # top-to-bottom timeline; Plotly draws categorical y-axes bottom-to-top
+    # by default, so the order is reversed to compensate.
+    row_order = list(dict.fromkeys(b["name"] for b in bars))
+    row_order.reverse()
+
+    legend_seen = set()
+    for bar in bars:
+        colour = _GANTT_COLOURS["buy"] if bar["entered_via"] == "buy" else (
+            _GANTT_COLOURS["sold"] if bar["left_via"] == "sold" else _GANTT_COLOURS["held"])
+        label = ("Transfer in" if bar["entered_via"] == "buy" else
+                 "Transferred out" if bar["left_via"] == "sold" else "Held")
+        width = bar["end_gw"] - bar["start_gw"] + 1
+        fig.add_trace(go.Bar(
+            base=[bar["start_gw"] - 0.4],
+            x=[width],
+            y=[bar["name"]],
+            orientation="h",
+            marker_color=colour,
+            name=label,
+            legendgroup=label,
+            showlegend=label not in legend_seen,
+            hovertemplate=(f"<b>{bar['name']}</b> ({bar['position']})<br>"
+                           f"GW{bar['start_gw']}–GW{bar['end_gw']}<br>{label}<extra></extra>"),
+        ))
+        legend_seen.add(label)
+
+    # Chip weeks as shaded column highlights.
+    for ev in gantt.get("chip_events", []):
+        fig.add_vrect(
+            x0=ev["gw"] - 0.5, x1=ev["gw"] + 0.5,
+            fillcolor=_GANTT_COLOURS["chip_highlight"], opacity=0.18,
+            layer="below", line_width=0,
+            annotation_text=ev["chip"], annotation_position="top",
+            annotation_font_color=_GANTT_COLOURS["chip_highlight"],
+        )
+
+    # Captain / vice-captain markers, drawn on top of the bars.
+    cap_x, cap_y, vc_x, vc_y = [], [], [], []
+    for gw, pick in gantt.get("captains", {}).items():
+        if pick.get("captain"):
+            cap_x.append(gw); cap_y.append(pick["captain"])
+        if pick.get("vice_captain"):
+            vc_x.append(gw); vc_y.append(pick["vice_captain"])
+    if cap_x:
+        fig.add_trace(go.Scatter(
+            x=cap_x, y=cap_y, mode="markers+text", text=["C"] * len(cap_x),
+            textposition="middle center", textfont=dict(color="#0B1320", size=10, weight="bold"),
+            marker=dict(symbol="circle", size=20, color=_GANTT_COLOURS["captain"],
+                       line=dict(color="#0B1320", width=1)),
+            name="Captain", hovertemplate="Captain: %{y} (GW%{x})<extra></extra>",
+        ))
+    if vc_x:
+        fig.add_trace(go.Scatter(
+            x=vc_x, y=vc_y, mode="markers+text", text=["V"] * len(vc_x),
+            textposition="middle center", textfont=dict(color="#0B1320", size=9, weight="bold"),
+            marker=dict(symbol="circle", size=16, color=_GANTT_COLOURS["vice_captain"],
+                       line=dict(color="#0B1320", width=1)),
+            name="Vice-captain", hovertemplate="Vice-captain: %{y} (GW%{x})<extra></extra>",
+        ))
+
+    n_rows = max(len(row_order), 1)
+    fig.update_layout(
+        barmode="overlay",
+        height=max(240, 34 * n_rows + 90),
+        margin=dict(l=10, r=10, t=30, b=10),
+        paper_bgcolor="#1E293B",     # --surface
+        plot_bgcolor="#0F172A",      # --surface-2
+        font=dict(color="#E2E8F0"),  # --text
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    bgcolor="rgba(0,0,0,0)"),
+        xaxis=dict(
+            title="Gameweek",
+            tickmode="linear",
+            dtick=1,
+            range=[(start_gw or 0) - 0.5, (end_gw or 0) + 0.5],
+            gridcolor="#334155",     # --line
+            zeroline=False,
+        ),
+        yaxis=dict(
+            categoryorder="array", categoryarray=row_order,
+            gridcolor="#334155", zeroline=False,
+        ),
+    )
+    return fig
+
+
 # ------------------------------------------------------------------
 # Sidebar
 # ------------------------------------------------------------------
@@ -1774,6 +1889,12 @@ with tab_planner:
 
             with col_chip:
                 if evals:
+                    st.caption(
+                        "Compares competing strategy paths (e.g., rolling a transfer, "
+                        "aggressive hits, or activating Wildcard/Free Hit) side-by-side "
+                        "across your planning horizon to show which path yields the "
+                        "highest net expected points."
+                    )
                     eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
                     st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
 
@@ -1875,6 +1996,12 @@ with tab_planner:
                         f'<div><div class="tc-meta">Ceiling</div><div style="font-weight:800;color:var(--pos-2);font-size:1.3rem;">{p95}</div></div>'
                         '</div>'
                     )
+                    st.caption(
+                        "Simulates 500 gameweek outcomes using each player's variance "
+                        "and minutes volatility. This reveals your realistic ceiling "
+                        "(95th percentile), expected baseline (median), and floor (5th "
+                        "percentile), rather than relying on a single static score."
+                    )
                     st.markdown(_card(dist_html, "🎲 How it could go"), unsafe_allow_html=True)
             except Exception:
                 pass
@@ -1898,14 +2025,38 @@ with tab_planner:
                             f'<div class="tc-meta">Transfers: {s["transfers"]}{hit} · FT after: {s["ft_after"]} · Bank: £{s["bank_after"]:.1f}m</div>'
                             f'</div></div>'
                         )
+                    st.caption(
+                        "The mathematically optimal gameweek-by-gameweek transfer "
+                        "sequence, showing when to bank free transfers, when to spend "
+                        "them, and how your squad carries forward."
+                    )
                     st.markdown(_card("".join(rows), "🗓️ The next few weeks"), unsafe_allow_html=True)
+
+                    st.markdown("##### 📊 Rolling transfer horizon")
+                    st.caption(
+                        "Who you're holding, buying and selling across the same "
+                        "gameweeks above, laid out as a timeline. Chip weeks are "
+                        "shaded; C/V mark that week's captain and vice-captain pick."
+                    )
+                    try:
+                        xp_lookup = {p["name"]: p.get("xp", 0.0) for p in ov["analysed_squad"]}
+                        gantt = fpl_tools.build_transfer_gantt_data(
+                            ov["analysed_squad"], plan, xp_lookup=xp_lookup)
+                        if gantt["bars"]:
+                            st.plotly_chart(
+                                _transfer_gantt_figure(gantt),
+                                width="stretch",
+                                config={"displayModeBar": False},
+                            )
+                    except Exception as e:
+                        st.caption(f"Timeline unavailable: {e}")
             except Exception:
                 pass
 
 
 
 
-    
+
             with st.expander("🩺 Is your squad set up right?", expanded=False):
                 try:
                     health = fpl_tools._squad_structural_health(ov["analysed_squad"], float(ov.get("bank", 0.0)))
