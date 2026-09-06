@@ -12,11 +12,24 @@ from db import get_or_backfill_manager_history, log_decision, log_squad_health, 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide")
 
 def get_caveat_html():
-    fetch_ts = fpl_tools.get_api_timestamp()
-    uk_zone = tz.gettz('Europe/London')
-    dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(uk_zone)
-    time_str = dt.strftime("%H:%M on %d %B %Y")
-    return f'<div style="font-size:0.78rem;color:#64748b;margin:6px 0 10px 0;">ℹ️ <b>Note:</b> Player values and expected points (xP) are derived from our closed-loop algorithmic simulation model, refreshed at {time_str} UK time. Prices update once daily at roughly 01:30 UK time.</div>'
+    """Data-freshness note. Never raises: it is decoration on every page.
+
+    This called get_api_timestamp() unguarded, so an FPL outage took the ENTIRE
+    page down from a footnote -- the user got a Streamlit traceback instead of a
+    squad, for want of a timestamp.
+    """
+    try:
+        fetch_ts = fpl_tools.get_api_timestamp()
+        uk_zone = tz.gettz("Europe/London")
+        dt = datetime.datetime.fromtimestamp(fetch_ts, tz=datetime.timezone.utc).astimezone(uk_zone)
+        when = f"refreshed at {dt.strftime('%H:%M on %d %B %Y')} UK time"
+    except Exception:
+        when = "last refresh time unavailable"
+    return (
+        '<div class="note">ℹ️ <b>Heads up:</b> projected points are our best '
+        f'guess, not a promise ({when}). Prices update once a day, at about '
+        '01:30 UK time.</div>'
+    )
 
 # ------------------------------------------------------------------
 # Auto-detect the upcoming gameweek straight from the FPL API
@@ -331,17 +344,17 @@ def _player_card(p, max_xp: float, role: str = None) -> str:
 
 
 def _get_fixture_context():
-    """Cached fixture lookup + upcoming gameweek for traffic-light indicators."""
-    if "fx_context" not in st.session_state:
-        try:
-            bootstrap = fpl_tools._get_bootstrap()
-            st.session_state["fx_context"] = {
-                "lookup": fpl_tools._build_fixture_lookup(bootstrap),
-                "start_event": fpl_tools._next_gameweek(bootstrap),
-            }
-        except Exception:
-            st.session_state["fx_context"] = None
-    return st.session_state["fx_context"]
+    """Fixture lookup + upcoming gameweek, as a view onto the single cache.
+
+    Was a SECOND, independent session-state cache of the same data, with no TTL
+    on either. Once populated, both were stale for the entire browser session --
+    so price changes, injury flags and new fixtures never refreshed without a
+    hard reload, and the two could disagree with each other.
+    """
+    ctx = _bootstrap_ctx()
+    if not ctx:
+        return None
+    return {"lookup": ctx["lookup"], "start_event": ctx["start"]}
 
 
 def _name_with_fixtures(p) -> str:
@@ -479,24 +492,38 @@ def clear_transfer_cache():
 # ------------------------------------------------------------------
 # Official Premier League asset helpers
 # ------------------------------------------------------------------
-@st.cache_data(ttl=86400)
-def _headshot_url(player_code: str) -> str:
-    """Return a validated CDN headshot URL, falling back to the placeholder.
+PHOTO_FALLBACK = ("https://resources.premierleague.com/premierleague/photos/"
+                  "players/110x140/Photo-Missing.png")
 
-    Uses a fast HEAD request so a broken primary image never renders as the
-    browser's default broken-image icon (Streamlit strips the HTML `onerror`
-    attribute when `unsafe_allow_html=True`).
+
+def _headshot_style(player_code: str) -> str:
+    """CSS background declaration for a player headshot, with a fallback layer.
+
+    The previous version issued a blocking `requests.head` PER PLAYER to check
+    the CDN before rendering. Cached for 24h, but a cold cache serialised up to
+    two seconds each: fifteen on the pitch, twenty-two on the radar, two per
+    transfer row. That was the single largest contributor to cold-render time.
+
+    CSS background layers replace it. Layers paint front-to-back, and a layer
+    that fails to load simply paints nothing -- so the fallback beneath shows
+    through with no request from us and no broken-image icon. (Streamlit strips
+    the `onerror` attribute under unsafe_allow_html, which is why an <img> tag
+    cannot do this.)
     """
-    fallback_url = "https://resources.premierleague.com/premierleague/photos/players/110x140/Photo-Missing.png"
     if not player_code:
-        return fallback_url
-    primary_url = f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{player_code}.png"
-    try:
-        if requests.head(primary_url, timeout=2).status_code == 200:
-            return primary_url
-    except Exception:
-        pass
-    return fallback_url
+        return f"background-image:url('{PHOTO_FALLBACK}');"
+    primary = ("https://resources.premierleague.com/premierleague/photos/"
+               f"players/250x250/p{player_code}.png")
+    return (f"background-image:url('{primary}'), url('{PHOTO_FALLBACK}');"
+            "background-size:cover;background-position:center;")
+
+
+def _headshot_url(player_code: str) -> str:
+    """Primary CDN URL. No network call: validation is the browser's job now."""
+    if not player_code:
+        return PHOTO_FALLBACK
+    return ("https://resources.premierleague.com/premierleague/photos/"
+            f"players/250x250/p{player_code}.png")
 
 
 def _photo_code(photo: str) -> str:
@@ -521,22 +548,74 @@ def _num(v, default=0.0):
         return default
 
 
+BOOTSTRAP_TTL_SECONDS = 300
+# Module-level, not session_state: the banner must render even on the very first
+# pass, and session_state is unavailable in bare/script mode.
+_DATA_ERROR = None
+_DATA_CACHE = {"ctx": None, "ts": 0.0}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _dropdown_options(bootstrap, teams, _pos_map):
+    """Player picker labels: name, club, price. No projections.
+
+    This previously ran a full _player_xp for EVERY player in the game -- ~700
+    projections, each evaluating multiple fixtures -- purely to put an xP figure
+    in a dropdown label, and it re-ran on every Streamlit rerun while the
+    midweek-transfers box was open. Typing a character in the Manager ID field
+    paid for the whole market.
+
+    Labels now carry only fields already present on the bootstrap row, and the
+    result is cached.
+    """
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+    options = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
+    for p in bootstrap.get("elements", []):
+        pos = pos_map.get(p["element_type"])
+        if not pos:
+            continue
+        initial = p["first_name"][0] + "." if p.get("first_name") else ""
+        label = (f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) "
+                 f"£{p['now_cost'] / 10:.1f}m")
+        options[pos].append((p["id"], label))
+    for pos in POS_ORDER:
+        options[pos] = [options[pos][0]] + sorted(
+            options[pos][1:], key=lambda x: x[1].split()[-2].lower() if x[1] else "")
+    return options
+
+
 def _bootstrap_ctx():
-    """Cached access to the live FPL bootstrap + fixture lookup."""
-    if "bootstrap_ctx" not in st.session_state:
-        try:
-            bootstrap = fpl_tools._get_bootstrap()
-            lookup = fpl_tools._build_fixture_lookup(bootstrap)
-            st.session_state["bootstrap_ctx"] = {
-                "bootstrap": bootstrap,
-                "lookup": lookup,
-                "players_by_id": {p["id"]: p for p in bootstrap.get("elements", [])},
-                "teams_by_id": {t["id"]: t for t in bootstrap.get("teams", [])},
-                "start": fpl_tools._next_gameweek(bootstrap),
-            }
-        except Exception:
-            st.session_state["bootstrap_ctx"] = None
-    return st.session_state["bootstrap_ctx"]
+    """The single cached view of the live FPL data. TTL'd, and honest on failure."""
+    global _DATA_ERROR
+    cached = _DATA_CACHE["ctx"]
+    if cached and (time.time() - _DATA_CACHE["ts"]) < BOOTSTRAP_TTL_SECONDS:
+        return cached
+    try:
+        bootstrap = fpl_tools._get_bootstrap()
+        lookup = fpl_tools._build_fixture_lookup(bootstrap)
+        _DATA_CACHE["ctx"] = {
+            "bootstrap": bootstrap,
+            "lookup": lookup,
+            "players_by_id": {p["id"]: p for p in bootstrap.get("elements", [])},
+            "teams_by_id": {t["id"]: t for t in bootstrap.get("teams", [])},
+            "start": fpl_tools._next_gameweek(bootstrap),
+        }
+        _DATA_CACHE["ts"] = time.time()
+        _DATA_ERROR = None
+    except Exception as exc:
+        _DATA_ERROR = str(exc) or exc.__class__.__name__
+        # Keep serving the last good data if there is any -- a stale squad beats
+        # a blank page -- but the banner will say so.
+    return _DATA_CACHE["ctx"]
+
+
+def _data_error():
+    """The last data-load failure, or None."""
+    return _DATA_ERROR
+
+
+def _data_is_stale():
+    return bool(_DATA_CACHE["ctx"])
 
 
 def _headshot_img(p) -> str:
@@ -545,7 +624,7 @@ def _headshot_img(p) -> str:
         ctx = _bootstrap_ctx()
         el = (ctx or {}).get("players_by_id", {}).get(_pid(p), {})
         photo = el.get("photo", "")
-    url = _headshot_url(_photo_code(photo))
+    style = _headshot_style(_photo_code(photo))
     badge = ""
     team_id = p.get("team_id")
     if team_id is None and isinstance(p.get("team"), int):
@@ -553,9 +632,12 @@ def _headshot_img(p) -> str:
     if team_id is not None:
         badge = _badge_img(team_id)
     overlay = f'<div class="badge-overlay">{badge}</div>' if badge else ""
+    # A div with layered backgrounds rather than an <img>: the fallback layer
+    # shows through automatically if the CDN photo 404s, with no HEAD request
+    # and no broken-image icon.
     return (
         f'<div class="photo-frame">'
-        f'<img class="headshot" src="{url}" alt="" loading="lazy">'
+        f'<div class="headshot" style="{style}"></div>'
         f'{overlay}'
         f'</div>'
     )
@@ -1155,6 +1237,31 @@ safe_banner = f'<div class="dl-warning">⚠️ <b>Pro Tip:</b> Aim to confirm yo
 # Spacer so the deadline banner doesn't touch the very top of the viewport.
 st.markdown("<div style='margin-top: 2rem;'></div>", unsafe_allow_html=True)
 
+# Data-health banner, first thing on the page.
+#
+# Without it a failed load renders a complete-looking page built on nothing:
+# _build_fixture_lookup used to return {} on error, which makes every player
+# project 0.0 as a "Blank", so the squad reads as fifteen worthless assets and
+# the engine dutifully recommends selling all of them. A total outage rendered
+# as confident advice. It now raises, and this is where the user is told.
+_bootstrap_ctx()          # attempt a load so the banner reflects reality
+_err = _data_error()
+if _err:
+    _have_stale = _data_is_stale()
+    if _have_stale:
+        st.warning(
+            "⚠️ **Can't reach the FPL API right now**, so these numbers are from "
+            "the last successful refresh. Prices, injuries and fixtures may have "
+            "moved since. Worth a reload before you commit any transfers."
+        )
+    else:
+        st.error(
+            "🔌 **Can't reach the FPL API**, so there's nothing to show yet. "
+            "This is almost always temporary — FPL takes the API down around "
+            "price changes and after matches. Try again in a few minutes.\n\n"
+            "Nothing below is real data, so don't act on it."
+        )
+
 st.markdown(
     f'<div class="deadline-hero"><div class="dl-gw">⏰ {GW_NAME} deadline</div>'
     f'<div class="dl-time">{DEADLINE_STR}</div>'
@@ -1381,37 +1488,19 @@ with tab_planner:
             if show_override:
                 st.caption("Upload a screenshot or adjust the dropdowns to match your live 15-man squad.")
                 
-                try:
-                    bootstrap = fpl_tools._get_bootstrap()
-                    fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
-                except Exception:
+                _ctx = _bootstrap_ctx()
+                if _ctx:
+                    bootstrap = _ctx["bootstrap"]
+                    fixture_lookup = _ctx["lookup"]
+                else:
                     bootstrap = {"elements": [], "teams": []}
                     fixture_lookup = {}
-    
+
                 players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
                 teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
-                pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
-    
-                surname_by_id = {p["id"]: _surname(p) for p in bootstrap.get("elements", [])}
-    
-                dropdown_options = {pos: [(None, "— Select Player —")] for pos in POS_ORDER}
-                for p in bootstrap.get("elements", []):
-                    pos = pos_map.get(p["element_type"])
-                    if pos:
-                        xp, _ = fpl_tools._player_xp(p, fixture_lookup, event=GW_ID)
-                        initial = p['first_name'][0] + "." if p.get('first_name') else ""
-                        display = f"{initial} {p['second_name']} ({teams.get(p['team'], '?')}) £{p['now_cost']/10:.1f}m | {xp} xP"
-                        dropdown_options[pos].append((p["id"], display))
-    
-                for pos in POS_ORDER:
-                    dropdown_options[pos] = [dropdown_options[pos][0]] + sorted(
-                        dropdown_options[pos][1:], key=lambda x: surname_by_id.get(x[0], "")
-                    )
-    
-                all_options = [(None, "— Select Player —")]
-                for pos in POS_ORDER:
-                    all_options.extend(dropdown_options[pos][1:])
-                all_options.sort(key=lambda x: "" if x[0] is None else surname_by_id.get(x[0], ""))
+                pos_map = fpl_tools.POS_MAP
+
+                dropdown_options = _dropdown_options(bootstrap, teams, pos_map)
     
                 squad_default = st.session_state.get("squad_preview", {}).get("squad", [])
                 uploaded_image = st.file_uploader("Upload screenshot to auto-fill midweek changes", type=["png", "jpg", "jpeg"], key="override_image")
@@ -1672,6 +1761,10 @@ with tab_planner:
             else:
                 moves = tr.get("standard_transfers", tr.get("transfers", []))
                 transfer_advice = tr.get("hit_advice", "")
+            # Remember precisely what the screen shows, so the AI critiques the
+            # plan the user is actually looking at.
+            st.session_state["displayed_moves"] = moves
+            st.session_state["displayed_chip"] = confirmed_chip
     
             # ---- Market Alert & Value Tracker (rendered above transfer recommendations) ----
             try:
@@ -2169,7 +2262,15 @@ with tab_planner:
     fb_system_prompt = None
     if fb_lineup:
         fb_tr = st.session_state.get("override_analysis", {}).get("transfers", {})
-        fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
+        # The exact moves rendered above. Previously this read
+        # fb_tr.get("transfers", ...) -- and the engine returns "transfers" and
+        # "standard_transfers" as the SAME object, with "wildcard_transfers"
+        # separate. So with a Wildcard or Free Hit confirmed the screen showed
+        # the 15-transfer chip plan while the AI was handed the standard
+        # 1-transfer plan and reviewed something the user could not see.
+        fb_moves = st.session_state.get("displayed_moves")
+        if fb_moves is None:
+            fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
         fb_hits = int(fb_tr.get("hits", 0))
         fb_hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
         fb_total_hit = fb_hits * fb_hit_cost

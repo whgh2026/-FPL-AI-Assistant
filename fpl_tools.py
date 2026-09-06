@@ -46,6 +46,15 @@ except ImportError:
 
 BASE_URL = "https://fantasy.premierleague.com/api"
 
+
+class FixtureDataUnavailable(RuntimeError):
+    """Raised when the fixture list cannot be loaded.
+
+    Its own type because the failure mode matters: without fixtures every
+    projection silently becomes 0.0, so callers must show an error rather than
+    an empty squad.
+    """
+
 # ------------------------------------------------------------------
 # Configuration / constants
 # ------------------------------------------------------------------
@@ -833,8 +842,14 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
 
     try:
         fixtures = _get_fixtures()
-    except Exception:
-        return {}
+    except Exception as exc:
+        # Raise, never return {}. An empty lookup makes _player_xp_raw report
+        # "Blank" with 0.0 xP for EVERY player in the game, which the solver
+        # then reads as a squad of worthless assets -- a total failure that
+        # renders as a plausible-looking page. The caller must decide how to
+        # degrade; it cannot do that if the failure is disguised as data.
+        raise FixtureDataUnavailable(
+            "could not load the FPL fixture list") from exc
 
     win_probs = _fetch_market_win_probs(bootstrap)
     ratings = _team_attack_def_ratings()
