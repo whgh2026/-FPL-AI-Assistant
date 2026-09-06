@@ -457,6 +457,36 @@ def load_bootstrap_snapshot(gameweek, captured_date=None):
         conn.close()
 
 
+def count_checked_predictions(model_version=None):
+    """How many predictions have been paired with a real result, for one model
+    version. Returns None when the database is unreachable -- distinct from 0,
+    which means "connected, nothing banked yet".
+
+    Drives the UI's recalibration copy. Hardcoding a gameweek there would be
+    wrong twice over: the count restarts at each model_version bump, and with
+    the active-player filter 5,000 rows is ~18 gameweeks, not the ~7 an
+    unfiltered count suggests.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            if model_version is None:
+                cur.execute("SELECT count(*) FROM fpl_predictions "
+                            "WHERE actual_points IS NOT NULL")
+            else:
+                cur.execute("SELECT count(*) FROM fpl_predictions "
+                            "WHERE actual_points IS NOT NULL AND model_version = %s",
+                            (model_version,))
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def save_plan(manager_id, gameweek, plan):
     """Persist the multi-GW transfer schedule to the fpl_plans ledger."""
     try:

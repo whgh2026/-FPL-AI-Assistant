@@ -964,6 +964,62 @@ def _render_player_inspector(squad) -> None:
     st.markdown(card, unsafe_allow_html=True)
 
 
+# Display order and plain-English labels for the objective decomposition. The
+# keys come straight from _solve_squad, so what is shown here IS what was
+# maximised -- previously the UI recomputed a naive sum(xp_in - xp_out) that
+# excluded captaincy, bench weights, CVaR, stacking, EO and tax, and could rank
+# moves differently from the solver that chose them.
+WATERFALL_ROWS = [
+    ("projected_points", "Projected points over 4 gameweeks"),
+    ("points_hit", "Points hit"),
+    ("transfer_bar", "The bar a transfer has to clear"),
+    ("banked_transfer_value", "Free transfer you'd have banked"),
+    ("chip_cost", "Cost of burning the chip"),
+    ("cash_optionality", "Money kept in the bank"),
+]
+
+
+def _waterfall_html(breakdown: dict) -> str:
+    """Render the objective decomposition, with an interaction residual.
+
+    The residual is the honest part: these components are direct deltas, not a
+    Shapley decomposition, so they need not sum exactly to the net figure. When
+    the unexplained remainder is large the move is driven by interactions
+    between components and the row-by-row story is misleading -- so the page
+    says so rather than presenting a tidy sum that hides it.
+    """
+    if not breakdown:
+        return ""
+    rows, shown = [], 0.0
+    for key, label in WATERFALL_ROWS:
+        val = float(breakdown.get(key, 0.0) or 0.0)
+        if abs(val) < 0.005:
+            continue
+        shown += val
+        colour = "var(--pos)" if val > 0 else "var(--neg)"
+        rows.append(
+            f'<div class="wf-row"><span>{label}</span>'
+            f'<span style="color:{colour};font-variant-numeric:tabular-nums;">'
+            f'{val:+.1f}</span></div>')
+    net = float(breakdown.get("net", 0.0) or 0.0)
+    residual = net - shown
+    if abs(residual) >= 0.05:
+        rows.append(
+            f'<div class="wf-row"><span>Everything else combined</span>'
+            f'<span style="color:var(--muted);font-variant-numeric:tabular-nums;">'
+            f'{residual:+.1f}</span></div>')
+    rows.append(
+        f'<div class="wf-row wf-net"><span>Net</span>'
+        f'<span style="font-variant-numeric:tabular-nums;">{net:+.1f}</span></div>')
+
+    warn = ""
+    if abs(net) > 0.01 and abs(residual) > 0.2 * abs(net):
+        warn = ('<div class="wf-warn">⚠️ A fair chunk of this move comes from how '
+                "the pieces interact rather than any single line above, so treat "
+                "the breakdown as a rough guide.</div>")
+    return f'<div class="wf">{"".join(rows)}{warn}</div>'
+
+
 def _transfer_pair_html(moves) -> str:
     html = ""
     for m in moves:
@@ -1002,7 +1058,7 @@ def _transfer_pair_html(moves) -> str:
 # Sidebar
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## ⚽ FPL Quant Manager (Proprietary In-House Engine)")
+    st.markdown("## ⚽ FPL Quant Manager")
     st.caption("Your data-driven pre-deadline quant engine")
 
     with st.expander("🧠 How the Engine Forecasts the Future", expanded=False):
@@ -1022,6 +1078,34 @@ with st.sidebar:
         '<div class="badge"><span class="g"></span> Built by Waqas Hussain</div>',
         unsafe_allow_html=True,
     )
+
+
+def _calibration_status_html() -> str:
+    """Recalibration progress, from a live row count rather than a fixed date.
+
+    The count restarts whenever MODEL_VERSION bumps (three times during this
+    rebuild), and with the active-player filter the 5,000-row threshold is about
+    eighteen gameweeks rather than the seven an unfiltered count implies. Any
+    hardcoded "recalibrating after Gameweek N" would therefore have been wrong
+    on both counts -- and the whole point of this copy pass is to stop the page
+    claiming things the engine does not do.
+    """
+    try:
+        import db as _db
+        banked = _db.count_checked_predictions(fpl_tools.MODEL_VERSION)
+        target = 5000
+    except Exception:
+        banked = None
+    if banked is None:
+        return ('<br><br><span class="note-inline">Model baseline active. '
+                "Progress unavailable — can't reach the results database.</span>")
+    if banked >= target:
+        return ('<br><br><span class="note-inline">✅ Recalibrating from banked '
+                f'results ({banked:,} checked predictions).</span>')
+    pct = int(100 * banked / target)
+    return ('<br><br><span class="note-inline">Model baseline active — '
+            f'recalibration starts at {target:,} checked predictions '
+            f'({banked:,} so far, {pct}%).</span>')
 
 
 # ------------------------------------------------------------------
@@ -1066,21 +1150,22 @@ st.markdown(
 
 st.markdown(
     '<div class="overview">'
-    '<b>📊 Your Personal FPL Quant Engine</b><br><br>'
-    'This system operates as a fully automated quantitative analyst for your Fantasy Premier League team. '
-    'It removes human bias by combining predictive modelling, mathematical optimisation, and continuous machine learning:<br><br>'
-    '• <b>The Baseline Projections:</b> It calculates Expected Points (xP) for every player by aggregating '
-    'underlying statistics, fixture difficulty ratings, and positional baselines.<br><br>'
-    '• <b>The Optimiser:</b> Our closed-loop algorithmic simulation model finds the mathematically optimal transfers, '
-    'starting XI, and captaincy — respecting your specific budget, chip strategy, and transfer constraints.<br><br>'
-    '<hr style="border:none;border-top:1px solid #c7d2fe;margin:14px 0;">'
-    '<b>🌟 The Self-Learning Quant Engine 🌟</b><br>'
-    'Most FPL tools are just static calculators. This is a living quantitative model.<br><br>'
-    '<i>Every Gameweek, our closed-loop validation engine benchmarks ex-ante projections against realised Premier '
-    'League match outcomes to assess predictive variance. The system dynamically recalibrates its underlying '
-    'statistical coefficients, ensuring continuous model refinement without exposing execution mechanics.</i><br><br>'
-    'Put simply: it learns from reality. The deeper we get into the season, the smarter and more ruthless the '
-    'algorithm becomes, giving you a compounding edge over your mini-league rivals.'
+    '<b>📊 What this thing actually does</b><br><br>'
+    'Two jobs, in order.<br><br>'
+    '• <b>It works out what every player is likely to score.</b> Who\'s going to '
+    'start, how good the opposition is, and what each player has actually been '
+    'producing — turned into a points forecast for the next four gameweeks.<br><br>'
+    '• <b>It then finds the best squad you can legally build.</b> Every valid '
+    '15, checked against your budget, your free transfers and the three-per-club '
+    'rule, and it picks the one that scores most. The reasoning is shown in full '
+    'underneath the recommendation — nothing is hidden.<br><br>'
+    '<hr style="border:none;border-top:1px solid var(--line);margin:14px 0;">'
+    '<b>🔁 It marks its own homework</b><br>'
+    'Every Friday it saves what it predicted. Every Tuesday it checks that '
+    'against what actually happened. Once enough checked predictions are banked, '
+    'it starts correcting itself — and you can watch the scorecard rather than '
+    'take our word for it.'
+    f'{_calibration_status_html()}'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -1583,15 +1668,20 @@ with tab_planner:
     
             transfer_html = (
                 '<div style="font-size:0.78rem;color:var(--muted);font-style:italic;margin:0 0 10px 0;">'
-                'Note: xP (Expected Points) is a projection from our closed-loop algorithmic simulation model — a forecast of potential performance, not a guaranteed outcome.'
+                'Projected points — our best guess, not a promise.'
                 '</div>'
                 f'<div style="color:var(--line-2);margin:4px 0 8px 0; font-weight:600;">{transfer_advice}</div>'
             )
             if moves:
                 transfer_html += _transfer_pair_html(moves)
+                transfer_html += _waterfall_html(tr.get("breakdown") or {})
             else:
-                transfer_html += '<div style="color:var(--muted-2);">No transfers recommended.</div>'
-            st.markdown(_card(transfer_html, "⚙️ Optimised Transfers"), unsafe_allow_html=True)
+                transfer_html += (
+                    '<div style="color:var(--muted);">'
+                    "Sit on your hands. Nothing on the market is worth your transfer "
+                    "this week — bank it and you'll have two next week."
+                    "</div>")
+            st.markdown(_card(transfer_html, "⚙️ The move"), unsafe_allow_html=True)
 
             # ---- Scenario Distribution (SAA floor vs ceiling) ----
             try:
@@ -1600,12 +1690,12 @@ with tab_planner:
                     p5, p50, p95 = sd.get("p5", 0.0), sd.get("p50", 0.0), sd.get("p95", 0.0)
                     dist_html = (
                         '<div style="display:flex;gap:16px;justify-content:space-between;text-align:center;">'
-                        f'<div><div class="tc-meta">FLOOR (P5)</div><div style="font-weight:800;color:var(--neg-2);font-size:1.3rem;">{p5}</div></div>'
-                        f'<div><div class="tc-meta">MEDIAN (P50)</div><div style="font-weight:800;color:var(--text);font-size:1.3rem;">{p50}</div></div>'
-                        f'<div><div class="tc-meta">CEILING (P95)</div><div style="font-weight:800;color:var(--pos-2);font-size:1.3rem;">{p95}</div></div>'
+                        f'<div><div class="tc-meta">Floor</div><div style="font-weight:800;color:var(--neg-2);font-size:1.3rem;">{p5}</div></div>'
+                        f'<div><div class="tc-meta">Expected</div><div style="font-weight:800;color:var(--text);font-size:1.3rem;">{p50}</div></div>'
+                        f'<div><div class="tc-meta">Ceiling</div><div style="font-weight:800;color:var(--pos-2);font-size:1.3rem;">{p95}</div></div>'
                         '</div>'
                     )
-                    st.markdown(_card(dist_html, "🎲 Scenario Distribution · 4-GW horizon (500 sims)"), unsafe_allow_html=True)
+                    st.markdown(_card(dist_html, "🎲 How it could go"), unsafe_allow_html=True)
             except Exception:
                 pass
 
@@ -1628,7 +1718,7 @@ with tab_planner:
                             f'<div class="tc-meta">Transfers: {s["transfers"]}{hit} · FT after: {s["ft_after"]} · Bank: £{s["bank_after"]:.1f}m</div>'
                             f'</div></div>'
                         )
-                    st.markdown(_card("".join(rows), "🗓️ Multi-Gameweek Transfer Plan (Ω(f) bundling)"), unsafe_allow_html=True)
+                    st.markdown(_card("".join(rows), "🗓️ The next few weeks"), unsafe_allow_html=True)
             except Exception:
                 pass
 
@@ -1689,7 +1779,7 @@ with tab_planner:
 
 
     
-            with st.expander("🩺 Squad Structural Health & Stranded Capital", expanded=False):
+            with st.expander("🩺 Is your squad set up right?", expanded=False):
                 try:
                     health = fpl_tools._squad_structural_health(ov["analysed_squad"], float(ov.get("bank", 0.0)))
                     try:
@@ -1710,7 +1800,7 @@ with tab_planner:
                 except Exception:
                     st.caption("Structural health unavailable.")
 
-            with st.expander("📊 EO & Rank Risk Diagnostic", expanded=False):
+            with st.expander("📊 Where you're exposed", expanded=False):
                 try:
                     eo_map = fpl_tools._eo_map()
                     _b = fpl_tools._get_bootstrap()
@@ -1739,7 +1829,7 @@ with tab_planner:
                         )
                         st.markdown(_card(html, "Rank-risk exposures"), unsafe_allow_html=True)
                     else:
-                        st.caption("No inverted exposures or leveraged shorts detected.")
+                        st.caption("Nothing daft here — your squad's exposure looks sensible.")
                 except Exception:
                     st.caption("EO diagnostic unavailable.")
 
@@ -2205,7 +2295,7 @@ with tab_insights:
         else:
             st.info("No rotation pairings found.")
 
-        st.markdown("#### 🛡️ Team Strength Index (Dixon-Coles)")
+        st.markdown("#### 🛡️ Who's actually any good")
         strengths = _team_strength_index()
         if strengths:
             grid = '<div class="grid">'
@@ -2226,7 +2316,7 @@ with tab_insights:
             grid += "</div>"
             st.markdown(_card(grid, "20 Clubs Ranked by Attack + Defence"), unsafe_allow_html=True)
 
-        st.markdown("#### 📈 Fixture Swing Score (Entry / Exit Windows)")
+        st.markdown("#### 📈 Fixtures turning good & turning bad")
         swings = fpl_tools._fixture_swing_scores(ctx["lookup"], ctx["start"], n=6)
         if swings:
             enter = [s for s in swings if s["att_slope"] > 0][:5]
@@ -2253,7 +2343,7 @@ with tab_radar:
     st.markdown("### 📡 Player Radar & Market")
     risk = risk_label.lower()
 
-    st.markdown("#### 📈 24h Ownership Momentum")
+    st.markdown("#### 📈 This week's ins and outs")
     mom = _market_momentum(limit=5)
     tr_, tf_ = st.tabs(["🔥 Risers", "🧊 Fallers"])
     with tr_:
@@ -2296,7 +2386,7 @@ with tab_radar:
     else:
         st.info("No players match this filter.")
 
-    st.markdown("#### 🧲 Regression-to-Mean Flags (SELL-HIGH / BUY-LOW)")
+    st.markdown("#### 🧲 Running hot & running cold")
     try:
         reg = fpl_tools.get_regression_candidates()
         c_sell, c_buy = st.columns(2)
