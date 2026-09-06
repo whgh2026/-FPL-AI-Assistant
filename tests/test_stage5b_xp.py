@@ -226,6 +226,106 @@ class DefconTest(unittest.TestCase):
                                fpl_tools.DEFCON_BASE_PER90[2], places=6)
 
 
+class DGWFatigueTest(unittest.TestCase):
+    """Double gameweeks were already decomposed into independent per-fixture
+    evaluations (each _xp_for_fixture call carries its own opponent, venue and
+    win-probability -- never a flat 2x of one fixture's number). What was
+    missing is fatigue: a second match inside 76 hours of the first should be
+    worth less than the same fixture played with a full week's rest, and
+    nothing discounted it. The synthetic fixture's planted GW10 double sits
+    the two kickoffs 53 hours apart -- inside the window -- so it exercises
+    the discount without needing a bespoke fixture."""
+
+    def _double_gw_target(self, bs, lookup, team=1):
+        fixtures = fpl_tools._gw_fixtures(lookup[team], 10)
+        self.assertEqual(len(fixtures), 2, "GW10 should be this team's planted double")
+        return fixtures
+
+    def test_planted_double_is_inside_the_fatigue_window(self):
+        """Sanity check on the fixture itself, so a future change to the
+        synthetic schedule that pushes the two kickoffs apart fails loudly
+        here rather than silently stopping this test from exercising anything."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            f1, f2 = sorted(self._double_gw_target(bs, lookup), key=lambda f: f["kickoff_time"])
+            mult = fpl_tools._dgw_fatigue_multiplier(f1, f2, pos_id=3)
+            self.assertLess(mult, 1.0, "the planted double's turnaround should trigger the discount")
+
+    def test_second_fixture_is_discounted_by_position(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            target = self._double_gw_target(bs, lookup)
+            for pos_id in (1, 2, 3, 4):
+                player = next(e for e in bs["elements"]
+                              if e["element_type"] == pos_id and e["team"] == 1)
+                discounted = fpl_tools._xp_dgw_sum(player, target, 90.0, pos_id)
+                f1, f2 = sorted(target, key=lambda f: f["kickoff_time"])
+                undiscounted = (fpl_tools._xp_for_fixture(player, f1, 90.0, pos_id)
+                                + fpl_tools._xp_for_fixture(player, f2, 90.0, pos_id))
+                expected = (fpl_tools._xp_for_fixture(player, f1, 90.0, pos_id)
+                            + fpl_tools._DGW_FATIGUE_DISCOUNT[pos_id]
+                            * fpl_tools._xp_for_fixture(player, f2, 90.0, pos_id))
+                self.assertAlmostEqual(discounted, expected, places=6,
+                                       msg=f"pos {pos_id}: discount not applied as expected")
+                if fpl_tools._xp_for_fixture(player, f2, 90.0, pos_id) > 0:
+                    self.assertLess(discounted, undiscounted,
+                                    f"pos {pos_id}: discounted total should be strictly lower")
+
+    def test_order_of_fixtures_in_the_lookup_does_not_matter(self):
+        """"Second fixture" must mean chronologically second, not whatever
+        order the source fixture list happens to list a double in."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            target = self._double_gw_target(bs, lookup)
+            player = next(e for e in bs["elements"] if e["element_type"] == 3 and e["team"] == 1)
+            forwards = fpl_tools._xp_dgw_sum(player, target, 90.0, 3)
+            reversed_order = fpl_tools._xp_dgw_sum(player, list(reversed(target)), 90.0, 3)
+            self.assertAlmostEqual(forwards, reversed_order, places=6)
+
+    def test_single_fixture_week_is_unaffected(self):
+        """A normal (non-double) gameweek must not pick up any discount."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            player = next(e for e in bs["elements"] if e["element_type"] == 3 and e["team"] == 1)
+            single = fpl_tools._gw_fixtures(lookup[1], EVENT)
+            self.assertEqual(len(single), 1)
+            self.assertAlmostEqual(
+                fpl_tools._xp_dgw_sum(player, single, 90.0, 3),
+                fpl_tools._xp_for_fixture(player, single[0], 90.0, 3),
+                places=6,
+            )
+
+    def test_fatigue_multiplier_boundary(self):
+        f1 = {"kickoff_time": "2026-01-01T12:00:00Z"}
+        # Exactly 76 hours later -- the threshold is a strict "under", so this
+        # must NOT be discounted.
+        f2_exact = {"kickoff_time": "2026-01-04T16:00:00Z"}
+        # One hour inside the window.
+        f2_inside = {"kickoff_time": "2026-01-04T15:00:00Z"}
+        self.assertEqual(fpl_tools._dgw_fatigue_multiplier(f1, f2_exact, pos_id=3), 1.0)
+        self.assertLess(fpl_tools._dgw_fatigue_multiplier(f1, f2_inside, pos_id=3), 1.0)
+
+    def test_every_position_has_a_discount_figure(self):
+        for pos_id in (1, 2, 3, 4):
+            self.assertIn(pos_id, fpl_tools._DGW_FATIGUE_DISCOUNT)
+            self.assertLess(fpl_tools._DGW_FATIGUE_DISCOUNT[pos_id], 1.0)
+            self.assertGreater(fpl_tools._DGW_FATIGUE_DISCOUNT[pos_id], 0.0)
+
+    def test_calibration_features_agree_with_the_production_path(self):
+        """calibration_features exists to reproduce _player_xp_raw exactly --
+        it would silently drift the moment production changed and this
+        didn't, which is precisely the C16-shaped bug this checks for."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            player = next(e for e in bs["elements"] if e["element_type"] == 3 and e["team"] == 1)
+            feats = fpl_tools.calibration_features(player, lookup, event=10)
+            target = self._double_gw_target(bs, lookup)
+            p0, p_cameo, p_full = fpl_tools._minute_distribution(player, player.get("status", "a"))
+            expected_raw = (p_full * fpl_tools._xp_dgw_sum(player, target, 90.0, 3)
+                            + p_cameo * fpl_tools._xp_dgw_sum(player, target, 30.0, 3))
+            self.assertAlmostEqual(feats["raw_total"], expected_raw, places=6)
+
+
 class ModelVersionTest(unittest.TestCase):
     def test_version_is_past_the_stage_5b_boundary(self):
         """Stage 4 -> v2, Stage 2 -> v3, Stage 5b -> v4, Stage 8 -> v5. Each

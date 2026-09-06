@@ -50,6 +50,92 @@ class SchemaCompletenessTest(unittest.TestCase):
         snap = next(s for s in db._SCHEMA if "bootstrap_snapshots (" in s)
         self.assertIn("UNIQUE (gameweek, captured_date)", snap)
 
+    def test_predictions_upsert_key_covers_model_version(self):
+        """snapshot_xp.py's UPSERT targets (player_id, gameweek,
+        model_version) -- (player_id, gameweek) alone would reject it with a
+        genuine unique-violation on the OLD constraint, quite apart from the
+        ON CONFLICT clause not matching any index."""
+        preds = next(s for s in db._SCHEMA if "fpl_predictions (" in s)
+        self.assertIn("UNIQUE (player_id, gameweek, model_version)", preds)
+
+
+class PredictionsUpsertMigrationTest(unittest.TestCase):
+    """ensure_predictions_upsert_key migrates an existing database (created
+    before this) off the two-column UNIQUE and onto the three-column one the
+    UPSERT in snapshot_xp.py depends on."""
+
+    def test_drops_the_old_two_column_constraint_by_its_deterministic_name(self):
+        """Postgres names a UNIQUE(...) declared inline in CREATE TABLE
+        `<table>_<col>_<col>_key` when no explicit name is given -- this is
+        what makes `DROP CONSTRAINT IF EXISTS` targeted rather than a guess."""
+        import inspect
+        src = inspect.getsource(db.ensure_predictions_upsert_key)
+        self.assertIn("fpl_predictions_player_id_gameweek_key", src)
+        self.assertIn("IF EXISTS", src)
+
+    def test_creates_the_three_column_unique_index_idempotently(self):
+        import inspect
+        src = inspect.getsource(db.ensure_predictions_upsert_key)
+        self.assertIn("player_id, gameweek, model_version", src)
+        self.assertIn("IF NOT EXISTS", src)
+
+    def test_returns_false_without_a_database(self):
+        self.assertIs(db.ensure_predictions_upsert_key(), False)
+
+
+class DatabaseUrlNormalisationTest(unittest.TestCase):
+    """prepare_database_url: Supabase's own dashboard-provided pooler
+    connection string includes `pgbouncer=true`, which psycopg2 rejects
+    outright at DSN-parse time (before any network call) as an unrecognised
+    URI query parameter -- a straight copy-paste into DATABASE_URL would
+    otherwise break every connection this app makes."""
+
+    def test_strips_pgbouncer_query_parameter(self):
+        url = "postgresql://u:p@aws-0-eu-west-2.pooler.supabase.com:6543/postgres?pgbouncer=true"
+        out = db.prepare_database_url(url)
+        self.assertNotIn("pgbouncer", out)
+
+    def test_adds_sslmode_require_when_missing(self):
+        url = "postgresql://u:p@db.example.supabase.co:5432/postgres"
+        out = db.prepare_database_url(url)
+        self.assertIn("sslmode=require", out)
+
+    def test_does_not_override_an_explicit_sslmode(self):
+        url = "postgresql://u:p@host:5432/postgres?sslmode=verify-full"
+        out = db.prepare_database_url(url)
+        self.assertIn("sslmode=verify-full", out)
+        self.assertNotIn("sslmode=require", out)
+
+    def test_preserves_other_query_parameters(self):
+        url = "postgresql://u:p@host:6543/postgres?pgbouncer=true&connect_timeout=5"
+        out = db.prepare_database_url(url)
+        self.assertIn("connect_timeout=5", out)
+
+    def test_falsy_input_passes_through(self):
+        self.assertIsNone(db.prepare_database_url(None))
+        self.assertEqual(db.prepare_database_url(""), "")
+
+    def test_malformed_input_never_raises(self):
+        """urlsplit itself is lenient enough that almost nothing reaches the
+        except branch -- this pins the actual contract (never raises) rather
+        than one specific return value for unparseable input."""
+        for garbage in ("not a url at all", 12345, object()):
+            try:
+                db.prepare_database_url(garbage)
+            except Exception as exc:
+                self.fail(f"prepare_database_url raised on {garbage!r}: {exc}")
+
+    @unittest.skipUnless(db._PSYCOPG2, "psycopg2 not installed")
+    def test_psycopg2_accepts_the_normalised_dsn_syntactically(self):
+        """The regression this exists to prevent: handed pgbouncer=true
+        verbatim, psycopg2 raises before attempting any network connection
+        at all. An unreachable host after normalisation must fail on
+        CONNECTION, never on DSN parsing."""
+        import psycopg2
+        url = "postgresql://u:p@127.0.0.1:1/db?pgbouncer=true"
+        with self.assertRaises(psycopg2.OperationalError):
+            psycopg2.connect(db.prepare_database_url(url), connect_timeout=1)
+
 
 class GracefulDegradationTest(unittest.TestCase):
     """With no DATABASE_URL configured, writers return False; they never raise.

@@ -1,9 +1,10 @@
 """
 Friday Snapshot: log the upcoming gameweek's 1-GW xP forecast for all active players.
 
-Expected table schema (fpl_predictions):
-  player_id INT, gameweek INT, player_name TEXT, position TEXT, team TEXT,
-  predicted_xp DOUBLE PRECISION, actual_points DOUBLE PRECISION
+Writes are an UPSERT keyed on (player_id, gameweek, model_version) -- see
+db.ensure_predictions_upsert_key() -- rather than a DELETE-then-INSERT for the
+whole gameweek, specifically so a re-run never destroys actual_points that
+ingest_actuals.py already backfilled into an existing row.
 """
 import os
 import sys
@@ -28,7 +29,12 @@ def _connect():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(url, connect_timeout=10)
+    # Strips Supabase's `pgbouncer=true` (which psycopg2 rejects outright as
+    # an unrecognised DSN parameter) and ensures sslmode=require. See
+    # db.prepare_database_url's docstring for why routing through the actual
+    # pooler host/port is a DATABASE_URL secret change, not something this
+    # can do for you.
+    return psycopg2.connect(db.prepare_database_url(url), connect_timeout=10)
 
 
 def _lookup_at_weights(weights, bootstrap):
@@ -57,6 +63,7 @@ def main() -> None:
     # following Wednesday. The migration belongs with the writer.
     db.run_migrations()
     db.ensure_calibration_columns()
+    db.ensure_predictions_upsert_key()
 
     bootstrap = fpl_tools._get_bootstrap()
     fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
@@ -114,16 +121,37 @@ def main() -> None:
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            # Safely clear any existing predictions for this specific gameweek,
-            # then insert the fresh projection (with calibration features).
-            cur.execute("DELETE FROM fpl_predictions WHERE gameweek = %s", (gw,))
-            cur.executemany(
+            # UPSERT keyed on (player_id, gameweek, model_version) rather than
+            # DELETE-then-INSERT for the whole gameweek. The delete used to
+            # destroy actual_points too: ingest_actuals.py backfills that
+            # column days after the snapshot, so a manual re-run of this
+            # script (or a MODEL_VERSION bump for a gameweek already
+            # snapshotted) wiped out results that had already been checked,
+            # with no way to recover them. An UPSERT only ever touches the
+            # PREDICTION columns -- actual_points, once set, survives.
+            #
+            # execute_batch (not executemany) batches multiple parameter sets
+            # per network round trip: ~700 single-row INSERTs became one
+            # query per commit here already, at the DB layer this is the
+            # remaining win.
+            from psycopg2.extras import execute_batch
+            execute_batch(
+                cur,
                 "INSERT INTO fpl_predictions "
                 "(player_id, gameweek, player_name, position, team, predicted_xp, "
                 "base_pts, cameo_mass, rotation_variance, dc_sensitivity, minutes_floor, "
                 "model_version, raw_total, xp_cameo, ep_w, ep_term) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (player_id, gameweek, model_version) DO UPDATE SET "
+                "player_name = EXCLUDED.player_name, position = EXCLUDED.position, "
+                "team = EXCLUDED.team, predicted_xp = EXCLUDED.predicted_xp, "
+                "base_pts = EXCLUDED.base_pts, cameo_mass = EXCLUDED.cameo_mass, "
+                "rotation_variance = EXCLUDED.rotation_variance, "
+                "dc_sensitivity = EXCLUDED.dc_sensitivity, "
+                "minutes_floor = EXCLUDED.minutes_floor, raw_total = EXCLUDED.raw_total, "
+                "xp_cameo = EXCLUDED.xp_cameo, ep_w = EXCLUDED.ep_w, ep_term = EXCLUDED.ep_term",
                 rows,
+                page_size=1000,
             )
         conn.commit()
     finally:

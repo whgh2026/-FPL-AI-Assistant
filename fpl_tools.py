@@ -1610,6 +1610,61 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
 
     return max(minutes_pts + attack_pts + cs_pts + conceded_pts + saves_pts + bonus_pts + defcon_pts + card_pts, 0.0)
 
+
+# Double-gameweek fatigue/rotation discount applied to a second fixture inside
+# 76 hours of the first. FPL's element_type only distinguishes GK/DEF/MID/FWD
+# -- there is no signal anywhere in the bootstrap data for centre-back vs
+# full-back/wing-back, so DEF uses a single blended figure: (0.93 for a
+# centre-back-shaped defender + 0.82 for an attacking full-back/wing-back) / 2.
+# A genuine per-player split would need a data source this app does not have;
+# guessing it from ICT/attacking output risked mislabelling exactly the
+# converted wing-backs and auxiliary centre-backs it would matter most for,
+# which is a worse failure than one shared, honestly-averaged number.
+DGW_FATIGUE_TURNAROUND_HOURS = 76.0
+_DGW_FATIGUE_DISCOUNT = {
+    1: 0.98,    # GK
+    2: 0.875,   # DEF (blended CB/full-back figure, see above)
+    3: 0.84,    # MID
+    4: 0.88,    # FWD
+}
+
+
+def _dgw_fatigue_multiplier(prev_fixture: Dict[str, Any], fixture: Dict[str, Any], pos_id: int) -> float:
+    """1.0 unless `fixture` follows `prev_fixture` inside the fatigue window."""
+    try:
+        prev_ko = dateutil.parser.isoparse(str(prev_fixture.get("kickoff_time")))
+        this_ko = dateutil.parser.isoparse(str(fixture.get("kickoff_time")))
+    except Exception:
+        return 1.0
+    turnaround_hours = abs((this_ko - prev_ko).total_seconds()) / 3600.0
+    if turnaround_hours >= DGW_FATIGUE_TURNAROUND_HOURS:
+        return 1.0
+    return _DGW_FATIGUE_DISCOUNT.get(pos_id, 1.0)
+
+
+def _xp_dgw_sum(p: Dict[str, Any], target: List[Dict[str, Any]], emin: float, pos_id: int) -> float:
+    """Sum of per-fixture xP across a gameweek's fixture(s), decomposing a
+    double (or, rarely, triple) gameweek into independent per-fixture
+    evaluations rather than a naive N-times multiplication -- each fixture
+    already carries its own opponent, venue and win-probability inputs via
+    _xp_for_fixture, so two very different fixtures were never actually
+    multiplied together as one. What WAS missing is fatigue: a second match
+    inside 76 hours of the first discounts that second match's contribution
+    by position, via _dgw_fatigue_multiplier.
+
+    Sorted by kickoff so "second fixture" always means chronologically
+    second, regardless of the order the source fixture list happens to list
+    a double gameweek's two matches in.
+    """
+    if not target:
+        return 0.0
+    ordered = sorted(target, key=lambda f: f.get("kickoff_time") or "")
+    total = _xp_for_fixture(p, ordered[0], emin, pos_id)
+    for i in range(1, len(ordered)):
+        total += _dgw_fatigue_multiplier(ordered[i - 1], ordered[i], pos_id) * _xp_for_fixture(p, ordered[i], emin, pos_id)
+    return total
+
+
 def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None) -> Tuple[float, str]:
     """Raw expected points for a single gameweek, before risk adjustment."""
     status = p.get("status", "a")
@@ -1654,8 +1709,8 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
     p0, p_cameo, p_full = _minute_distribution(p, status)
     minutes_played = _to_float(p.get("minutes"))
 
-    xp_full = sum(_xp_for_fixture(p, f, 90.0, pos_id) for f in target)
-    xp_cameo = sum(_xp_for_fixture(p, f, 30.0, pos_id) for f in target)
+    xp_full = _xp_dgw_sum(p, target, 90.0, pos_id)
+    xp_cameo = _xp_dgw_sum(p, target, 30.0, pos_id)
     our_total = p_full * xp_full + p_cameo * xp_cameo
 
     _w = _load_weights()
@@ -1728,8 +1783,8 @@ def calibration_features(p: Dict[str, Any],
         return zero
 
     p0, p_cameo, p_full = _minute_distribution(p, status)
-    xp_full = sum(_xp_for_fixture(p, f, 90.0, pos_id) for f in target)
-    xp_cameo = sum(_xp_for_fixture(p, f, 30.0, pos_id) for f in target)
+    xp_full = _xp_dgw_sum(p, target, 90.0, pos_id)
+    xp_cameo = _xp_dgw_sum(p, target, 30.0, pos_id)
     raw_total = p_full * xp_full + p_cameo * xp_cameo
 
     ep_next = _to_float(p.get("ep_next"))
@@ -2936,6 +2991,73 @@ def _planner_shortlist(pool, current_ids, saa_mean):
     return cur + picked
 
 
+# Big-M constants for _plan_transfers_multi_gw's conditional (chip-gated)
+# constraints. Each is sized to be safely non-binding on the "irrelevant"
+# branch: FT_BIGM absorbs up to 15 transfers in one week (a full wildcard
+# rebuild), PTS_BIGM exceeds any plausible 15-man squad's single-week total,
+# and BUDGET_BIGM exceeds any plausible 15-man squad's total price.
+_PLAN_FT_BIGM = 16.0
+_PLAN_PTS_BIGM = 1000.0
+_PLAN_BUDGET_BIGM = 1000.0
+
+
+def _ft_state_machine_constraints(prob, ft_t, ft_next, u_t, chip_t, hits_t,
+                                  big_m=_PLAN_FT_BIGM, prefix=""):
+    """Retained free-transfer state machine, linking one week's bank (ft_t)
+    and transfer count (u_t) to the next week's bank (ft_next) and this
+    week's hit count (hits_t), gated by chip_t (1 iff Wildcard or Free Hit
+    was played this week).
+
+    Factored out of _plan_transfers_multi_gw so a test can drive u_t/ft_t/
+    chip_t directly with fixed values -- solved for ft_next/hits_t only --
+    rather than depending on the horizon optimiser electing to reach a
+    particular week's state, which the test can't reliably dictate. This is
+    the ONE place the formula is written, so a future change to it cannot
+    silently drift out of sync with what the regression tests check.
+
+    Upper bounds only, deliberately -- an earlier version of this also
+    sandwiched ft_next between matching LOWER bounds, reasoning that would be
+    more robust than depending on the objective to pull ft_next up to an
+    upper bound. It was wrong, not just redundant: those lower bounds
+    targeted the UNCLAMPED ft_t - u_t + 1 (or ft_t + 1), and made the whole
+    horizon flatly INFEASIBLE the moment any perfectly ordinary week reached
+    ft_t == 5 with u_t == 0 (target 6, lower-bounded above the ft_next <= 5
+    cap) or took a hit at ft_t == 1 (target -1, lower-bounded below the
+    ft_next >= ft_t - u_t + 1 - M upper bound once hits_t is folded in --
+    see below). Caught by the isolated tests in tests/test_phased.py, which
+    is exactly why this is tested at that level rather than only end-to-end.
+
+    Upper-bound-only is both correct and simple here because `ft` appears in
+    the horizon objective ONLY positively (the terminal ft[T] bonus; nothing
+    anywhere rewards a LOWER ft), so maximisation pulls ft_next up to
+    whichever bound below is tightest -- there is never a reason for the
+    solver to leave it lower, so no separate lower bound is needed to pin it:
+
+      - chip_t == 0: settles at ft_t - u_t + 1, and the "+ hits_t" term is
+        what keeps that correct at the 1-floor with no separate floor
+        constraint -- hits_t is pinned by minimisation (a hit costs 4.0 in
+        the real objective) to exactly max(0, u_t - ft_t), so the bound
+        collapses to exactly 1 the instant a hit is taken, rather than going
+        negative.
+      - chip_t == 1: settles at ft_t + 1, as if u_t were zero -- a
+        Wildcard/Free Hit spends no banked transfers at all.
+
+    `ft_t`, `u_t` and `chip_t` may be LpVariables/expressions (the real
+    solve) or plain numbers (a test fixing them to drive a specific
+    scenario) -- PuLP accepts either on either side of a constraint. A test
+    that fixes them still needs SOME preference for a higher ft_next and a
+    lower hits_t in its own objective -- with none at all, upper bounds alone
+    leave ft_next and hits_t free to sit anywhere feasible below them, same
+    as they would without the pull of the real horizon objective.
+    """
+    prob += ft_next <= 5, f"{prefix}ft_ub_cap"
+    prob += ft_next <= ft_t + 1, f"{prefix}ft_ub_chip"
+    prob += ft_next <= (ft_t - u_t) + 1 + hits_t + big_m * chip_t, f"{prefix}ft_ub_normal"
+    # A chip week pays no hit, however many transfers it makes.
+    prob += hits_t >= u_t - ft_t - big_m * chip_t, f"{prefix}hits_lb"
+    prob += hits_t >= 0, f"{prefix}hits_nonneg"
+
+
 def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean,
                              event, n=PLAN_HORIZON, bank_cash=None):
     """Multi-GW transfer scheduler: ownership + FT + budget over N GWs (Omega(f)).
@@ -2943,6 +3065,29 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     Spans the horizon so banking FTs now can fund a coupled structural pivot in a
     later gameweek without hits; a terminal value Psi(S_t+N) stops the solver from
     strip-mining the squad in the final week.
+
+    Wildcard and Free Hit are both representable within the horizon (each at
+    most once, mirroring "one chip per set"):
+
+    * Wildcard behaves like any other week's transfers, except the FT/hits
+      bookkeeping below waives the hit cost and does not touch the banked FT
+      count -- exactly like the real chip. The squad change is permanent, so
+      it flows through the ordinary x/buy/sell ownership chain.
+    * Free Hit gets its own one-off squad (the `y` variables): a fresh 15 that
+      only has to be legal and affordable for that single week, entirely
+      decoupled from the ownership chain. `x` is frozen (buy/sell forced to 0)
+      for every player during a Free Hit week, so the PERSISTENT squad carries
+      forward unchanged and next week's schedule correctly shows the real
+      squad resuming -- not the one-off XI the chip produced. That is the
+      behaviour a naive "give this week free transfers" encoding would get
+      wrong: the temporary squad would otherwise permanently overwrite the
+      real one, one week early, in every week displayed after it.
+
+    This cannot know whether a chip has already been spent this season -- the
+    caller does not currently pass that in (eval_chips is always the full set
+    in every existing call site) -- so, like the rest of the app, this can
+    suggest a chip regardless of whether it is still available. Not a new
+    limitation: the single-GW solver has the same gap.
     """
     if not HAS_PULP:
         return []
@@ -2960,9 +3105,19 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     x = pulp.LpVariable.dicts("mx", (ids, range(T)), cat="Binary")
     buy = pulp.LpVariable.dicts("mbuy", (ids, range(T)), cat="Binary")
     sell = pulp.LpVariable.dicts("msell", (ids, range(T)), cat="Binary")
+    # The Free Hit one-off squad: a second, independent ownership indicator per
+    # week, used for that week's points/budget only when fh[t] fires.
+    y = pulp.LpVariable.dicts("mfh", (ids, range(T)), cat="Binary")
     ft = [pulp.LpVariable(f"ft_{t}", lowBound=0, upBound=5, cat="Integer") for t in range(T + 1)]
     hits = [pulp.LpVariable(f"hit_{t}", lowBound=0, cat="Integer") for t in range(T)]
     bank = [pulp.LpVariable(f"bank_{t}", lowBound=0) for t in range(T + 1)]
+    wc = pulp.LpVariable.dicts("wc", range(T), cat="Binary")
+    fh = pulp.LpVariable.dicts("fh", range(T), cat="Binary")
+    pts_t = [pulp.LpVariable(f"pts_{t}", lowBound=0) for t in range(T)]
+
+    def _prev_x(pid, t):
+        """x[pid][t-1], or the real starting squad's indicator at t == 0."""
+        return x[pid][t - 1] if t >= 1 else (1 if pid in cur_set else 0)
 
     # Ownership linkage.
     for pid in ids:
@@ -2972,14 +3127,26 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
             prob += x[pid][t] == x[pid][t - 1] + buy[pid][t] - sell[pid][t], f"own_{pid}_{t}"
         for t in range(T):
             prob += buy[pid][t] + sell[pid][t] <= 1, f"no_churn_{pid}_{t}"
+            # Free Hit freezes the persistent squad: no buy or sell against it
+            # in a week the chip is played, so next week resumes from exactly
+            # where the REAL squad was, not from the one-off Free Hit XI.
+            prob += buy[pid][t] <= 1 - fh[t], f"fh_freeze_buy_{pid}_{t}"
+            prob += sell[pid][t] <= 1 - fh[t], f"fh_freeze_sell_{pid}_{t}"
 
-    # Squad structure per GW.
+    # Squad structure per GW -- for both the persistent squad (x) and the
+    # Free Hit one-off squad (y). y's shape constraints hold unconditionally
+    # (some legal 15 always exists, e.g. y == x, so this never blocks
+    # feasibility in a week Free Hit isn't played); only the objective and
+    # budget constraints below are gated on fh[t].
     for t in range(T):
         prob += pulp.lpSum(x[pid][t] for pid in ids) == 15, f"squad_{t}"
+        prob += pulp.lpSum(y[pid][t] for pid in ids) == 15, f"fh_squad_{t}"
         for pos, cnt in POS_COUNTS.items():
             prob += pulp.lpSum(x[pid][t] for pid in ids if by_id[pid]["position"] == pos) == cnt, f"pos_{pos}_{t}"
+            prob += pulp.lpSum(y[pid][t] for pid in ids if by_id[pid]["position"] == pos) == cnt, f"fh_pos_{pos}_{t}"
         for tm in {by_id[pid]["team_id"] for pid in ids}:
             prob += pulp.lpSum(x[pid][t] for pid in ids if by_id[pid]["team_id"] == tm) <= 3, f"team_{tm}_{t}"
+            prob += pulp.lpSum(y[pid][t] for pid in ids if by_id[pid]["team_id"] == tm) <= 3, f"fh_team_{tm}_{t}"
 
     # Transfers, FT, hits, budget linkage.
     transfers = [pulp.lpSum(buy[pid][t] for pid in ids) for t in range(T)]
@@ -2994,12 +3161,26 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     # an imaginary war chest.
     prob += bank[0] == (budget if bank_cash is None else float(bank_cash)), "bank0"
     for t in range(T):
-        prob += hits[t] >= transfers[t] - ft[t], f"hits_lb_{t}"
-        prob += hits[t] <= transfers[t], f"hits_ub_{t}"
-        prob += ft[t + 1] <= ft[t] - transfers[t] + 1 + hits[t], f"ft_next_{t}"
-        prob += ft[t + 1] <= 5, f"ft_cap_{t}"
+        # At most one chip per week, and (mirroring "one chip per set") at
+        # most one Wildcard and one Free Hit across the whole horizon.
+        prob += wc[t] + fh[t] <= 1, f"chip_excl_{t}"
+        chip_t = wc[t] + fh[t]
+
+        _ft_state_machine_constraints(
+            prob, ft[t], ft[t + 1], transfers[t], chip_t, hits[t], prefix=f"gw{t}_")
+
+        # Free Hit's one-off squad must fit the value available going INTO
+        # that week -- current bank plus the persistent squad's sell value --
+        # not the persistent budget flow, which is untouched (frozen) this
+        # week. Non-binding whenever fh[t] == 0.
+        fh_budget_t = bank[t] + pulp.lpSum(_prev_x(pid, t) * by_id[pid].get("sell_price", by_id[pid]["price"]) for pid in ids)
+        prob += pulp.lpSum(y[pid][t] * by_id[pid]["price"] for pid in ids) <= fh_budget_t + _PLAN_BUDGET_BIGM * (1 - fh[t]), f"fh_budget_{t}"
+
         prob += buy_cost[t] <= bank[t] + sell_value[t], f"budget_flow_{t}"
         prob += bank[t + 1] == bank[t] + sell_value[t] - buy_cost[t], f"bank_next_{t}"
+
+    prob += pulp.lpSum(wc[t] for t in range(T)) <= 1, "wc_once"
+    prob += pulp.lpSum(fh[t] for t in range(T)) <= 1, "fh_once"
 
     # Precompute per-player per-GW SAA xP.
     saa_xp = {}
@@ -3014,27 +3195,56 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     obj = 0.0
     for t in range(T):
         gw_w = PLAN_WEIGHTS[t] if t < len(PLAN_WEIGHTS) else 0.0
-        pts = pulp.lpSum(x[pid][t] * saa_xp[pid][t] for pid in ids)
-        obj += gw_w * (pts - 4.0 * hits[t])
+        pts_x = pulp.lpSum(x[pid][t] * saa_xp[pid][t] for pid in ids)
+        pts_y = pulp.lpSum(y[pid][t] * saa_xp[pid][t] for pid in ids)
+        # pts_t[t] is the week's SCORED points: the persistent squad's, unless
+        # Free Hit is active, in which case the one-off squad's. Maximisation
+        # settles pts_t at whichever bound is tight -- the other is relaxed
+        # by _PLAN_PTS_BIGM and so never binds.
+        prob += pts_t[t] <= pts_x + _PLAN_PTS_BIGM * fh[t], f"pts_sel_x_{t}"
+        prob += pts_t[t] <= pts_y + _PLAN_PTS_BIGM * (1 - fh[t]), f"pts_sel_y_{t}"
+        obj += gw_w * (pts_t[t] - 4.0 * hits[t])
 
     term_equity = pulp.lpSum(x[pid][T - 1] * by_id[pid].get("sell_price", by_id[pid]["price"]) for pid in ids)
     dead = pulp.lpSum(x[pid][T - 1] * (1.0 if (by_id[pid].get("status") in _NON_PLAYING_NOTES or by_id[pid].get("xp", 0.0) <= 0.1) else 0.0) for pid in ids)
     obj += lam_eq * term_equity + lam_ft * ft[T] - lam_dead * dead
 
     prob.setObjective(obj)
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    prob.solve(_make_solver())
     if pulp.LpStatus[prob.status] != "Optimal":
         return []
 
     schedule = []
     for t in range(T):
-        buys = [by_id[pid]["name"] for pid in ids if buy[pid][t].varValue and buy[pid][t].varValue > 0.5]
-        sells = [by_id[pid]["name"] for pid in ids if sell[pid][t].varValue and sell[pid][t].varValue > 0.5]
+        chip_played = ("Wildcard" if (wc[t].varValue or 0) > 0.5
+                       else "Free Hit" if (fh[t].varValue or 0) > 0.5 else None)
+        if chip_played == "Free Hit":
+            # The persistent chain is frozen this week (buy/sell forced to 0),
+            # so the one-off `y` squad against the PRE-chip squad is what
+            # actually changed on the pitch -- that is what the schedule must
+            # show, not the (empty) frozen buy/sell pair. _prev_x returns
+            # either an LpVariable (t >= 1) or a plain int (t == 0); normalise
+            # both to a "currently owned" id set.
+            prev_ids = set()
+            for pid in ids:
+                prev = _prev_x(pid, t)
+                owned = prev.varValue if hasattr(prev, "varValue") else prev
+                if owned and owned > 0.5:
+                    prev_ids.add(pid)
+            fh_ids = {pid for pid in ids if y[pid][t].varValue and y[pid][t].varValue > 0.5}
+            buys = [by_id[pid]["name"] for pid in fh_ids - prev_ids]
+            sells = [by_id[pid]["name"] for pid in prev_ids - fh_ids]
+            n_transfers = 0   # Free Hit: unlimited and free, not a transfer count.
+        else:
+            buys = [by_id[pid]["name"] for pid in ids if buy[pid][t].varValue and buy[pid][t].varValue > 0.5]
+            sells = [by_id[pid]["name"] for pid in ids if sell[pid][t].varValue and sell[pid][t].varValue > 0.5]
+            n_transfers = int(round(transfers[t].value() or 0.0))
         schedule.append({
             "gw": event + t,
             "buys": buys,
             "sells": sells,
-            "transfers": int(round(transfers[t].value() or 0.0)),
+            "chip": chip_played,
+            "transfers": n_transfers,
             "hits": int(round(hits[t].value() or 0.0)),
             "ft_after": int(round(ft[t + 1].value() or 0.0)),
             "bank_after": round(bank[t + 1].value() or 0.0, 1),
