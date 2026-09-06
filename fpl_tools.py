@@ -33,6 +33,13 @@ except ImportError:
     _np = None
     HAS_NUMPY = False
 
+try:
+    from scipy.optimize import brentq as _brentq
+    HAS_SCIPY = True
+except ImportError:
+    _brentq = None
+    HAS_SCIPY = False
+
 # Decaying transfer tax (anti-whipsaw). Lives in db.py (persistent ledger); fall
 # back to a no-op if the module is unavailable so the solver stays importable.
 try:
@@ -803,6 +810,72 @@ def _canonical_club(name: str, bootstrap: Optional[Dict[str, Any]] = None) -> Op
     return None
 
 
+DEVIG_POWER_BRACKET_LOW = 1.0
+DEVIG_POWER_BRACKET_HIGH = 5.0
+
+
+def _devig_power(implied_probs: List[float]) -> List[float]:
+    r"""De-vig bookmaker-implied probabilities via the power method.
+
+    Each outcome's raw implied probability is p_i = 1/O_i for decimal odds
+    O_i; because the bookmaker builds in a margin, the raw probabilities sum
+    to an overround S = sum(p_i) > 1.0 rather than to 1.0. The simplest fix,
+    proportional normalisation (p_i* = p_i / S), spreads that margin evenly
+    across every outcome -- but real bookmaker margin is NOT distributed
+    evenly. It concentrates disproportionately on long shots (the well
+    documented "favourite-longshot bias"), so proportional normalisation
+    systematically overstates a longshot's true chance and understates a
+    strong favourite's.
+
+    The power method instead solves for a single exponent k such that
+
+        sum_i (p_i)^k = 1.0
+
+    and reports p_i* = (p_i)^k as the de-vigged probability. Because each
+    p_i lies in (0, 1), (p_i)^k is strictly decreasing in k -- raising a
+    fraction to an ever higher power shrinks it -- so f(k) = sum((p_i)^k) - 1
+    is strictly decreasing too, meaning it has at most one root and brentq's
+    bracketed search is exactly the right tool: k=1 always overshoots
+    (f(1) = S - 1 > 0, since a real market always carries an overround) and
+    k=5 comfortably undershoots for any realistic football market's margin,
+    so [1, 5] reliably brackets the root.
+
+    Falls back to plain proportional normalisation if brentq cannot bracket
+    a root in [DEVIG_POWER_BRACKET_LOW, DEVIG_POWER_BRACKET_HIGH] (a same-
+    signed bracket -- an already-fair "market" with zero overround, or a
+    pathological one with a negative or inverted margin) or if scipy is not
+    installed.
+
+    Works for any number of outcomes (two-way or three-way markets alike).
+    """
+    if not implied_probs:
+        return []
+    total = sum(implied_probs)
+    if total <= 0:
+        return list(implied_probs)
+    if any(p <= 0 for p in implied_probs):
+        # A zero or negative implied probability breaks p^k for non-integer k
+        # (0^k is fine, but a negative price should never reach here) --
+        # proportional normalisation degrades gracefully instead.
+        return [p / total for p in implied_probs]
+
+    def _root(k: float) -> float:
+        return sum(p ** k for p in implied_probs) - 1.0
+
+    if HAS_SCIPY:
+        try:
+            f_low = _root(DEVIG_POWER_BRACKET_LOW)
+            f_high = _root(DEVIG_POWER_BRACKET_HIGH)
+            if f_low == 0.0:
+                return list(implied_probs)          # already a fair market, k=1
+            if f_low * f_high <= 0:
+                k = _brentq(_root, DEVIG_POWER_BRACKET_LOW, DEVIG_POWER_BRACKET_HIGH)
+                return [p ** k for p in implied_probs]
+        except Exception:
+            pass
+    return [p / total for p in implied_probs]
+
+
 def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[int, Dict[int, float]]:
     """Return {team_id: {opponent_id: implied win probability}} for upcoming fixtures.
 
@@ -882,11 +955,13 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
         h_imp = 1.0 / (sum(h_prices) / len(h_prices))
         a_imp = 1.0 / (sum(a_prices) / len(a_prices))
         d_imp = 1.0 / (sum(d_prices) / len(d_prices))
-        total = h_imp + a_imp + d_imp
-        if total <= 0:
-            continue
-        result.setdefault(h_id, {})[a_id] = h_imp / total
-        result.setdefault(a_id, {})[h_id] = a_imp / total
+        # Power-method de-vig rather than flat proportional normalisation --
+        # see _devig_power's docstring for why an even split of the margin
+        # (the flat p_i/S this replaces) overstates the longshot side of a
+        # market and understates the favourite.
+        h_true, a_true, d_true = _devig_power([h_imp, a_imp, d_imp])
+        result.setdefault(h_id, {})[a_id] = h_true
+        result.setdefault(a_id, {})[h_id] = a_true
 
     _ODDS_CACHE["data"] = result
     _ODDS_CACHE["ts"] = now
@@ -3250,6 +3325,122 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
             "bank_after": round(bank[t + 1].value() or 0.0, 1),
         })
     return schedule
+
+
+def build_transfer_gantt_data(
+    initial_squad: List[Dict[str, Any]],
+    schedule: List[Dict[str, Any]],
+    xp_lookup: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """Reshape _plan_transfers_multi_gw's week-by-week buy/sell diff list into
+    per-player tenure bars a Gantt chart can plot directly, plus chip-
+    activation markers and a simple captain/vice-captain call per gameweek.
+
+    Pure and Streamlit/Plotly-independent on purpose, so the transform itself
+    is unit-testable without rendering anything -- app.py's job is only to
+    hand this its inputs and draw the result.
+
+    `initial_squad` is the persistent squad BEFORE schedule[0]'s gameweek:
+    [{"name": str, "position": str}, ...] (position is cosmetic -- used only
+    to colour/group bars; "?" if omitted). `schedule` is exactly what
+    _plan_transfers_multi_gw returns. `xp_lookup` is an optional {name: xp}
+    map for choosing captain/vice-captain; omit it and every week's captain
+    call is simply None rather than a guess.
+
+    Returns:
+      {
+        "start_gw": int, "end_gw": int,
+        "bars": [{"name", "position", "start_gw", "end_gw",
+                  "entered_via": "initial"|"buy", "left_via": "sold"|"horizon_end"}],
+        "chip_events": [{"gw", "chip"}],
+        "captains": {gw: {"captain": name_or_None, "vice_captain": name_or_None}},
+      }
+
+    A player transferred out and later bought back within the same horizon
+    gets two separate bar segments, not one that pauses -- each with its own
+    start_gw/end_gw, exactly like a real Gantt chart shows a resource that
+    leaves and returns.
+
+    Free Hit freezes the persistent squad for that one week -- exactly as
+    _plan_transfers_multi_gw's own solve does -- so its buys/sells describe a
+    one-off XI, never a change to who is held going forward; tenure bars do
+    not react to them, but that week's captain/vice-captain IS drawn from the
+    one-off squad, since that is who is actually selected to play.
+    """
+    xp_lookup = xp_lookup or {}
+    if not schedule:
+        return {"start_gw": None, "end_gw": None, "bars": [], "chip_events": [], "captains": {}}
+
+    start_gw = schedule[0]["gw"]
+    end_gw = schedule[-1]["gw"]
+
+    position_by_name: Dict[str, str] = {}
+    open_bars: Dict[str, Dict[str, Any]] = {}
+    for p in initial_squad:
+        name = p.get("name")
+        if not name:
+            continue
+        position_by_name[name] = p.get("position", "?")
+        open_bars[name] = {"start_gw": start_gw, "entered_via": "initial"}
+    held = set(open_bars)
+
+    bars: List[Dict[str, Any]] = []
+    chip_events: List[Dict[str, Any]] = []
+    captains: Dict[int, Dict[str, Optional[str]]] = {}
+
+    def _close_bar(name: str, end: int, left_via: str) -> None:
+        seg = open_bars.pop(name)
+        bars.append({
+            "name": name,
+            "position": position_by_name.get(name, "?"),
+            "start_gw": seg["start_gw"],
+            "end_gw": end,
+            "entered_via": seg["entered_via"],
+            "left_via": left_via,
+        })
+
+    for week in schedule:
+        gw = week["gw"]
+        chip = week.get("chip")
+        if chip:
+            chip_events.append({"gw": gw, "chip": chip})
+
+        if chip != "Free Hit":
+            for name in week.get("sells", []):
+                if name in held:
+                    held.discard(name)
+                    _close_bar(name, gw - 1, "sold")
+            for name in week.get("buys", []):
+                if name not in held:
+                    held.add(name)
+                    position_by_name.setdefault(name, "?")
+                    open_bars[name] = {"start_gw": gw, "entered_via": "buy"}
+            pool_this_week = held
+        else:
+            # Free Hit's one-off XI: the persistent squad minus this week's
+            # (temporary) sells, plus this week's (temporary) buys -- `held`
+            # itself is untouched above, so it still reflects the squad going
+            # INTO this week.
+            pool_this_week = (held - set(week.get("sells", []))) | set(week.get("buys", []))
+
+        ranked = sorted((n for n in pool_this_week if n in xp_lookup),
+                        key=lambda n: xp_lookup[n], reverse=True)
+        captains[gw] = {
+            "captain": ranked[0] if ranked else None,
+            "vice_captain": ranked[1] if len(ranked) > 1 else None,
+        }
+
+    for name in list(held):
+        _close_bar(name, end_gw, "horizon_end")
+
+    bars.sort(key=lambda b: (b["start_gw"], b["name"]))
+    return {
+        "start_gw": start_gw,
+        "end_gw": end_gw,
+        "bars": bars,
+        "chip_events": chip_events,
+        "captains": captains,
+    }
 
 
 @st.cache_data(ttl=300, show_spinner=False)

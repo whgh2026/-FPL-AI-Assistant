@@ -112,6 +112,22 @@
 .stApp {background: var(--bg);}
 [data-testid="stSidebar"] {background: var(--surface-2); border-right: 1px solid var(--line);}
 [data-testid="stSidebar"] * {color: var(--text);}
+
+/* Pin the sidebar open on desktop -- Streamlit's own collapse control (the
+   "<<" arrow) let a desktop user accidentally hide the Strategy & Chip
+   controls with one misclick, with no obvious way back short of finding the
+   arrow again. Scoped to >=992px so mobile/tablet keep Streamlit's own
+   collapse-to-hamburger behaviour, which is exactly where a narrow viewport
+   needs the screen space back. */
+@media (min-width: 992px) {
+    [data-testid="stSidebarCollapseButton"] {display: none !important;}
+    [data-testid="stSidebar"] {
+        min-width: 300px !important;
+        max-width: 320px !important;
+        transform: none !important;
+        visibility: visible !important;
+    }
+}
 [data-testid="stHeader"] {background: rgba(11,19,32,0.5);}
 .headshot {width: 44px; height: 56px; object-fit: cover; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--line);}
 .pitch {background: linear-gradient(180deg, var(--pos-bg-2) 0%, var(--pos-bg-3) 100%); border: 2px solid var(--line); border-radius: 16px; padding: 20px 16px; margin-bottom: 14px;}
