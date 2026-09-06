@@ -170,7 +170,16 @@
 /* Player Inspector */ .inspector-card {background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
 .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted var(--line);}
 .insp-fixture:last-child {border-bottom: none;}
-.signal-grid {display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;}
+/* Was repeat(5, 1fr): a hard 5-column grid with no minmax floor, so on a
+   phone each track was forced below what a 132px label plus a bar plus a
+   value can hold -- and a fixed track count has nowhere to reflow to, so it
+   just overflowed, cutting off MID/FWD/Bench and truncating their text.
+   auto-fit/minmax is the same idiom already used for .grid, .scorecard and
+   .mh-grid elsewhere in this file: 200px keeps 5 across on a normal desktop
+   width (5*200 + 4 gaps fits inside the .card's ~1136px content width) while
+   wrapping to fewer columns, then one full-width column, as the viewport
+   narrows -- no separate media query needed. */
+.signal-grid {display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;}
 .signal-card {background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;}
 .signal-head {display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-weight: 700; color: var(--text);}
 .signal-score {margin-left: auto; font-size: 1.15rem; font-weight: 800; color: var(--pos);}

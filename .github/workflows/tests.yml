@@ -17,8 +17,18 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Installs from requirements.txt rather than a hand-maintained package
+      # list. The list used to be typed out here directly (requests pulp numpy
+      # python-dateutil pytest) and never included streamlit -- so every test
+      # that actually executes app.py (render_app.py, probe_ui.py; both
+      # `import streamlit` at module scope) failed with ModuleNotFoundError on
+      # every push since this workflow existed. It never surfaced locally
+      # because streamlit was already installed in the dev environment, and
+      # nobody had looked at the Actions tab. requirements.txt is the pinned
+      # single source of truth (Stage 8a); reading from it means this list
+      # cannot drift out of sync with the app's real dependencies again.
       - name: Install Dependencies
-        run: pip install requests pulp numpy python-dateutil pytest
+        run: pip install -r requirements.txt pytest
 
       # Scope split. 20 squads x 4 solve paths is 80 MILP solves, and the
       # deterministic profile allows each up to 60s -- a worst case no one wants

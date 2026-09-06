@@ -295,23 +295,29 @@ class MethodologyLeakTest(unittest.TestCase):
 class RankExposureCopyTest(unittest.TestCase):
     """'Where you're exposed' is the one place EO turns into a signed number a
     manager has to interpret unaided -- Short and Inverted mean opposite things
-    and look similar on the page."""
+    and look similar on the page.
 
-    def test_short_and_inverted_are_both_explained_before_the_list(self):
+    A first pass added a two-paragraph glossary above the list explaining each
+    flag in full. That duplicated what each row's own subtitle already says,
+    which is the wrong place to carry the detail twice: the intro should orient
+    the reader in one line, and each row should be self-explanatory on its own
+    without needing the caption re-opened above it.
+    """
+
+    def test_intro_is_one_concise_sentence(self):
+        """Not a glossary -- one sentence pointing at the rows, which carry the
+        specifics. A caption that re-grew into paragraphs would be the same
+        duplication this pass removed, just re-added."""
         src = _app_source()
         start = src.index('"📊 Where you\'re exposed"')
-        block = src[start:start + 1400]
-        self.assertIn("**Inverted**", block)
-        self.assertIn("**Short**", block)
-
-    def test_short_explainer_states_the_deficit_widens(self):
-        """The specific claim asked for: a Short exposure costs nothing
-        directly, but every point the player scores widens the gap to the
-        managers who own him."""
-        src = _app_source()
-        start = src.index('"📊 Where you\'re exposed"')
-        block = src[start:start + 1400]
-        self.assertIn("widens the gap", block)
+        nearby = src[start:start + 500]
+        self.assertIn("rival's big week could shift your rank", nearby)
+        self.assertIn("see each row for exactly how", nearby)
+        self.assertNotIn("**Inverted**", nearby,
+                         "the per-term glossary is back in the intro")
+        self.assertNotIn("**Short**", nearby,
+                         "the per-term glossary is back in the intro")
+        self.assertNotIn("\\n\\n", nearby, "the intro is back to multiple paragraphs")
 
     def test_short_row_detail_carries_its_own_inline_explainer(self):
         """Mirrors the Inverted row's existing '(rank drops when they score)'
@@ -386,6 +392,21 @@ class StylesheetTest(unittest.TestCase):
             m = re.search(re.escape(cls) + r"\s*\{[^}]*\}", css)
             self.assertIsNotNone(m, f"{cls} rule not found")
             self.assertIn("text-overflow: ellipsis", m.group(0))
+
+    def test_positional_diagnostic_grid_can_reflow(self):
+        """Was grid-template-columns: repeat(5, 1fr) -- a fixed column count
+        with no minmax floor, so on a phone each of the five GK-through-Bench
+        cards was forced narrower than its own 132px label plus a bar plus a
+        value can hold. A fixed track count has nowhere to reflow to, so it
+        overflowed instead: MID/FWD/Bench cut off, text truncated."""
+        css = self._css()
+        m = re.search(r"\.signal-grid\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, ".signal-grid rule not found")
+        rule = m.group(0)
+        self.assertNotRegex(rule, r"repeat\(\s*5\s*,",
+                            "still a fixed 5-column grid with nowhere to reflow to")
+        self.assertIn("auto-fit", rule)
+        self.assertIn("minmax(", rule)
 
 
 class ModelHealthDataTest(unittest.TestCase):

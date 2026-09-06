@@ -1877,16 +1877,8 @@ with tab_planner:
 
             with st.expander("📊 Where you're exposed", expanded=False):
                 st.caption(
-                    "**Inverted** — you own him, but you're not his captain, and "
-                    "a big chunk of the field is. When he hauls, it lifts the "
-                    "rest of the field's rank more than it lifts yours.\n\n"
-                    "**Short** — you don't own him at all, and plenty of the "
-                    "field does. He costs you nothing directly, but every point "
-                    "he scores widens the gap between you and the managers who "
-                    "backed him. The pts/point number below is exactly that gap "
-                    "— e.g. -0.89 means an 89%-owned player, so a big haul from "
-                    "him is a real rank drop for you, even though you never "
-                    "picked him."
+                    "Flags where a rival's big week could shift your rank, for "
+                    "better or worse — see each row for exactly how."
                 )
                 try:
                     eo_map = fpl_tools._eo_map()
@@ -1905,7 +1897,7 @@ with tab_planner:
                     for pid, eo_d in eo_map.items():
                         if eo_d.get("eo", 0.0) > 80.0 and pid not in squad_ids:
                             per_pt = fpl_tools._rank_exposure(0, eo_d.get("eo", 0.0), 1.0)
-                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (you don't own him — a haul widens your gap to the field)"))
+                            rows.append(("🔻 Short", names.get(pid, str(pid)), f"EO {eo_d.get('eo', 0.0):.0f}% · {per_pt:+.2f} pts/point (unowned — a haul widens your gap to the field)"))
                     if rows:
                         html = "".join(
                             f'<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #1e293b;">'
