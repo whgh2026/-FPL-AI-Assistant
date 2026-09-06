@@ -273,6 +273,48 @@ class StylesheetTest(unittest.TestCase):
                 offenders.append(f"{n}: {line.strip()}")
         self.assertEqual(offenders, [], "hardcoded hex outside :root")
 
+    def _css(self):
+        return open(os.path.join(ROOT, "static", "app.css"), encoding="utf-8").read()
+
+    def test_the_page_itself_cannot_scroll_sideways(self):
+        """Only one media query existed before this, scoped to the pitch view
+        alone -- everything else that ran wide on a phone had nothing to stop
+        it pushing the whole page frame sideways, which is what "content cut
+        off outside the frame" actually was: real content shoved past the
+        viewport edge with no scrollbar to reach it."""
+        css = self._css()
+        m = re.search(r"\.block-container\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, ".block-container rule not found")
+        self.assertIn("overflow-x: hidden", m.group(0))
+
+    def test_wide_tables_scroll_within_themselves(self):
+        """The objective waterfall and the Model Health week-by-week table
+        share .wf-row: a label plus three fixed min-width numeric columns that
+        can exceed a phone's content width on their own. Clipped by the page
+        safety net alone, the right-hand columns (bias, rank correlation)
+        would simply vanish; scrollable, they stay reachable."""
+        css = self._css()
+        m = re.search(r"\.wf\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, ".wf rule not found")
+        self.assertIn("overflow-x:auto", m.group(0).replace(" ", ""))
+
+    def test_transfer_pair_cards_can_shrink_below_their_text(self):
+        """flex:1 alone does not let a flex item shrink below its CONTENT's
+        natural width -- min-width:0 is what permits that, and without it two
+        name+meta cards plus an arrow plus a fixed xP/cost block had nothing
+        left to give on a narrow screen."""
+        css = self._css()
+        m = re.search(r"\.transfer-card\s*\{[^}]*\}", css)
+        self.assertIsNotNone(m, ".transfer-card rule not found")
+        self.assertIn("min-width: 0", m.group(0))
+
+    def test_transfer_pair_text_ellipsises_instead_of_forcing_width(self):
+        css = self._css()
+        for cls in (".tc-name", ".tc-meta"):
+            m = re.search(re.escape(cls) + r"\s*\{[^}]*\}", css)
+            self.assertIsNotNone(m, f"{cls} rule not found")
+            self.assertIn("text-overflow: ellipsis", m.group(0))
+
 
 class ModelHealthDataTest(unittest.TestCase):
     def test_accuracy_query_returns_empty_rather_than_raising(self):

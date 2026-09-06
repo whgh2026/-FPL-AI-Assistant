@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import streamlit as st
 import fpl_tools
@@ -299,17 +300,22 @@ def _headshot_style(player_code: str) -> str:
     two seconds each: fifteen on the pitch, twenty-two on the radar, two per
     transfer row. That was the single largest contributor to cold-render time.
 
-    CSS background layers replace it. Layers paint front-to-back, and a layer
-    that fails to load simply paints nothing -- so the fallback beneath shows
-    through with no request from us and no broken-image icon. (Streamlit strips
-    the `onerror` attribute under unsafe_allow_html, which is why an <img> tag
-    cannot do this.)
+    A single background-image layer replaces it, over the `.headshot` class's
+    own solid background-color -- NOT a two-image stack. An earlier version
+    layered `url(primary), url(PHOTO_FALLBACK)`, reasoning that "a layer that
+    fails to load paints nothing, so the fallback beneath shows through". True
+    for an outright 404, but CSS paints background-image layers front-to-back
+    in listed order, and the official PL headshots are transparent-cutout
+    PNGs -- so wherever a REAL, successfully-loaded photo has transparent
+    pixels, the silhouette layered directly behind it showed straight through,
+    composited under the player's own photo. One image layer cannot bleed
+    through itself, so a plain-tile fallback beats a doubled-up one.
     """
     if not player_code:
-        return f"background-image:url('{PHOTO_FALLBACK}');"
+        return "background-image:none;"
     primary = ("https://resources.premierleague.com/premierleague/photos/"
                f"players/250x250/p{player_code}.png")
-    return (f"background-image:url('{primary}'), url('{PHOTO_FALLBACK}');"
+    return (f"background-image:url('{primary}');"
             "background-size:cover;background-position:center;")
 
 
@@ -2603,6 +2609,23 @@ with tab_players:
             st.markdown(get_caveat_html(), unsafe_allow_html=True)
 
 
+def _public_model_label(version: str) -> str:
+    """A generic build label for the one place the internal model-version
+    string was shown verbatim to every visitor.
+
+    fpl_tools.MODEL_VERSION carries a descriptive slug (e.g. "v7-minutes-
+    recency") on purpose -- auto_tune and the version-boundary tests need
+    exactly that specificity, since it says precisely which forecast change
+    the stamp marks. Showing that same slug on a public page hands anyone who
+    loads it a dated log of what the last algorithmic change was, for free.
+    A manager gets nothing from the codename; a competitor gets a changelog.
+    Only the DISPLAY is generic -- fpl_tools.MODEL_VERSION itself, and every
+    internal consumer of it, is untouched.
+    """
+    m = re.match(r"^v(\d+)-", version or "")
+    return f"Model build {m.group(1)}" if m else "Model baseline"
+
+
 # ------------------------------------------------------------------
 # Model Health -- marking our own homework, in public
 # ------------------------------------------------------------------
@@ -2659,7 +2682,7 @@ with tab_health:
                 f'<div class="mh-bar"><div style="width:{pct}%;"></div></div>'
                 f'<div class="sc-sub">{pct}% of the way there</div></div>'
                 f'<div class="sc-tile"><div class="sc-label">Model in use</div>'
-                f'<div class="sc-value" style="font-size:1.05rem;">{fpl_tools.MODEL_VERSION}</div>'
+                f'<div class="sc-value" style="font-size:1.05rem;">{_public_model_label(fpl_tools.MODEL_VERSION)}</div>'
                 f'<div class="sc-sub">the count restarts whenever this changes</div></div>'
                 '</div>',
                 "📦 Where we're up to",

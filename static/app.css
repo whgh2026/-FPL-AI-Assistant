@@ -51,7 +51,16 @@
 }
 
 #MainMenu, footer {visibility: hidden;}
-.block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1240px; color: var(--text);}
+/* Safety net: the page itself must never scroll sideways. Only one narrow
+   media query (max-width:768px) existed before this, scoped to the pitch
+   view alone -- every other wide row (the Model Health table's fixed-width
+   stat columns, the transfer-pair layout) had nothing stopping it pushing
+   past a phone's viewport, which is what "cut off outside the frame" is:
+   content shoved past the right edge with no scrollbar to reach it. This
+   clips that possibility at the root; the specific offenders below also get
+   their own overflow-x:auto so their content stays reachable by a contained
+   swipe rather than merely being hidden. */
+.block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1240px; color: var(--text); overflow-x: hidden;}
 .deadline-hero {background: var(--surface); border: 1px solid var(--text); border-left: 6px solid var(--info); border-radius: 14px; padding: 18px 22px; margin-bottom: 16px; box-shadow: none; border-color: var(--line); border-left-color: var(--pos);}
 .dl-gw {font-size: 0.78rem; font-weight: 800; letter-spacing: 0.14em; color: var(--pos); text-transform: uppercase;}
 .dl-time {font-size: 1.9rem; font-weight: 800; color: var(--text); line-height: 1.15; margin-top: 2px;}
@@ -114,12 +123,17 @@
 .dugout {background: var(--surface-2); border: 1px dashed var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px;}
 .dugout-title {font-size: 0.62rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--muted-2); margin-bottom: 10px;}
 .transfer-pair {display: flex; align-items: center; gap: 10px; margin-bottom: 10px;}
-.transfer-card {flex: 1; border-radius: 12px; padding: 12px 14px; border: 1px solid var(--line); background: var(--surface-2);}
+/* min-width:0 is load-bearing: without it a flex:1 child still refuses to
+   shrink below its CONTENT's natural width (a long name plus "MID · Newcastle
+   United · £6.5m" easily runs 180px+), so two of these plus the arrow plus the
+   fixed xP/cost block genuinely could not fit a phone's content width and had
+   nothing to give -- the row just overflowed the page. */
+.transfer-card {flex: 1; min-width: 0; border-radius: 12px; padding: 12px 14px; border: 1px solid var(--line); background: var(--surface-2);}
 .transfer-card.tc-out {border-left: 4px solid var(--neg);}
 .transfer-card.tc-in {border-left: 4px solid var(--pos);}
-.transfer-arrow {font-size: 1.4rem; color: var(--pos); font-weight: 800;}
-.tc-name {font-weight: 700; font-size: 0.9rem; color: var(--text);}
-.tc-meta {font-size: 0.72rem; color: var(--muted);}
+.transfer-arrow {font-size: 1.4rem; color: var(--pos); font-weight: 800; flex-shrink: 0;}
+.tc-name {font-weight: 700; font-size: 0.9rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
+.tc-meta {font-size: 0.72rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
 .rot-card {background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 14px;}
 .rot-score {font-size: 1.1rem; font-weight: 800; color: var(--pos); min-width: 54px;}
 .fdr-strip {display: flex; gap: 4px; margin-top: 8px;}
@@ -147,6 +161,12 @@
 .pitch-row-label {flex: 0 0 34px; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em; text-align: center; text-transform: uppercase;}
 .pitch-row-cards {flex: 1; display: flex; justify-content: space-around; align-items: center; gap: 8px;}
 .tc-head {display: flex; align-items: center; gap: 8px;}
+/* The headshot must never shrink; the name/meta column next to it must be
+   ALLOWED to, or .tc-name/.tc-meta's ellipsis rules have no narrower box to
+   ellipsis into -- text-overflow only fires once the box itself is already
+   constrained below the text's natural width. */
+.tc-head .photo-frame {flex-shrink: 0;}
+.tc-head > div:last-child {min-width: 0; overflow: hidden;}
 /* Player Inspector */ .inspector-card {background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
 .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted var(--line);}
 .insp-fixture:last-child {border-bottom: none;}
@@ -177,10 +197,17 @@
 .note{font-size:0.78rem;color:var(--muted-2);margin:6px 0 10px 0;}
 .note-inline{font-size:0.8rem;color:var(--muted);}
 
-/* Objective waterfall: the decomposition the solver actually maximised. */
-.wf{margin:10px 0 4px 0;border-top:1px solid var(--line);padding-top:8px;}
+/* Objective waterfall: the decomposition the solver actually maximised. Also
+   the Model Health week-by-week table -- same row shape, same fixed-width
+   numeric columns. Three min-width columns plus a label routinely exceed a
+   phone's content width (label ~130px + 3x70-80px + gaps easily tops 380px
+   against ~340px of actual room), so this scrolls within itself on a narrow
+   screen rather than pushing the page or losing its right-hand columns to
+   the page-level overflow clip. */
+.wf{margin:10px 0 4px 0;border-top:1px solid var(--line);padding-top:8px;
+    overflow-x:auto;}
 .wf-row{display:flex;justify-content:space-between;gap:12px;padding:3px 0;
-        font-size:0.82rem;color:var(--text-2);}
+        font-size:0.82rem;color:var(--text-2);width:max-content;min-width:100%;}
 .wf-net{border-top:1px solid var(--line);margin-top:6px;padding-top:6px;
         font-weight:700;color:var(--text);}
 .wf-warn{margin-top:8px;font-size:0.78rem;color:var(--warn-fg);

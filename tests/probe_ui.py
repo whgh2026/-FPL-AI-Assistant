@@ -114,6 +114,43 @@ def main():
     check("bench_band_rich", verdict(18.0) == "a bit rich", verdict(18.0))
     check("bench_band_dead", verdict(22.0) == "dead money", verdict(22.0))
 
+    # ---- headshot compositing: one image layer, never two -----------------
+    # The official PL headshots are transparent-cutout PNGs. Layering a second
+    # full image (the silhouette fallback) directly behind one paints that
+    # silhouette straight through every transparent pixel of a photo that
+    # loaded FINE -- the real photo visibly composited over its own fallback.
+    # One layer cannot bleed through itself, so the fix is having only one.
+    with_photo = app._headshot_style("12345")
+    check("headshot_single_layer",
+          with_photo.count("background-image:url(") == 1,
+          f"{with_photo!r} -- a second image layer can bleed through a "
+          "transparent real photo")
+    check("headshot_no_silhouette_layered_behind",
+          "Photo-Missing" not in with_photo,
+          "the silhouette fallback is layered behind the real photo")
+
+    no_photo = app._headshot_style("")
+    check("headshot_missing_code_no_stacked_image",
+          "url(" not in no_photo,
+          f"{no_photo!r} -- with no code there is nothing to composite under, "
+          "so the card surface (not a second image) must be the fallback")
+
+    # ---- public model label: display only, never the internal slug --------
+    label = app._public_model_label("v7-minutes-recency")
+    check("public_label_hides_the_descriptive_slug",
+          "minutes-recency" not in label and "recency" not in label,
+          f"{label!r} -- the internal changelog slug is still visible publicly")
+    check("public_label_keeps_the_build_number",
+          "7" in label,
+          f"{label!r} -- lost the number the self-correction copy points at")
+    check("public_label_handles_a_malformed_version",
+          app._public_model_label("") and app._public_model_label(None),
+          "an unversioned string crashed the label rather than degrading")
+    check("model_version_itself_is_unchanged",
+          app.fpl_tools.MODEL_VERSION.startswith("v") and "-" in app.fpl_tools.MODEL_VERSION,
+          "the internal constant lost its descriptive-slug shape -- auto_tune "
+          "and the version-boundary tests key off exactly that shape")
+
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) failed:")
         for f in FAILURES:
