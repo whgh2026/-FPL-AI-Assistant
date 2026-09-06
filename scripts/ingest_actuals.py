@@ -35,7 +35,10 @@ def _connect():
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(url, connect_timeout=10)
+    # See db.prepare_database_url's docstring: strips Supabase's
+    # `pgbouncer=true` (psycopg2 rejects it outright as an unrecognised DSN
+    # parameter) and ensures sslmode=require.
+    return psycopg2.connect(db.prepare_database_url(url), connect_timeout=10)
 
 
 def _fetch_played(gw):

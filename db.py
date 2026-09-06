@@ -3,6 +3,7 @@ import math
 import os
 import json
 import sys
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 try:
     import streamlit as st
@@ -82,15 +83,61 @@ def _log_db_error(kind, exc):
     print(f"[db] {kind} failed: {detail}", file=sys.stderr, flush=True)
 
 
+def prepare_database_url(url):
+    """Normalise a DATABASE_URL for psycopg2 -- in particular, for Supabase's
+    Supavisor/PgBouncer transaction pooler (port 6543), which this app should
+    be pointed at rather than the direct session port (5432): Railway (and
+    most autoscaled/ephemeral hosts) can open many short-lived connections
+    across container restarts and Streamlit reruns, and Supabase's direct
+    Postgres port has a low connection ceiling a fleet of such clients can
+    exhaust, while the pooler exists precisely for that traffic shape.
+
+    This does NOT choose the host or port. Supabase's pooler is not the same
+    host on a different port -- it is a separate, region-specific hostname
+    (aws-0-<region>.pooler.supabase.com) with its own username format
+    (postgres.<project-ref> rather than postgres), neither of which is
+    derivable from a direct-connection URL. Routing through the pooler is a
+    DATABASE_URL secret change made in the Supabase dashboard (Project
+    Settings -> Database -> Connection Pooling -> Transaction mode) and then
+    in Railway's environment variables -- not something this function can
+    safely invent.
+
+    What this DOES do, on whatever URL it is handed:
+
+    1. Strips a `pgbouncer=true` query parameter if present. Supabase's own
+       dashboard includes it in the pooler connection string it hands out --
+       it is a convention some ORMs read to disable prepared-statement
+       caching, not a real libpq parameter, and psycopg2 raises at DSN-parse
+       time on an unrecognised one ("invalid URI query parameter: pgbouncer")
+       *before any network call is attempted*. Handed to psycopg2 verbatim,
+       Supabase's own copy-pasted pooler string breaks every connection this
+       app makes. Silently stripping it is what makes copy-pasting that
+       string here safe.
+    2. Ensures sslmode=require is set (Supabase requires TLS; some pooler
+       strings omit the parameter and rely on it being the client default,
+       which it is not for a bare psycopg2 connection).
+    """
+    if not url:
+        return url
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return url
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.pop("pgbouncer", None)
+    query.setdefault("sslmode", "require")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
 def _database_url():
     if st is not None:
         try:
             url = st.secrets.get("DATABASE_URL")
             if url:
-                return url
+                return prepare_database_url(url)
         except Exception:
             pass
-    return os.getenv("DATABASE_URL")
+    return prepare_database_url(os.getenv("DATABASE_URL"))
 
 
 class _PooledConnection:
@@ -221,7 +268,12 @@ _SCHEMA = (
         minutes_floor DOUBLE PRECISION,
         model_version TEXT DEFAULT 'v1',
         created_at TIMESTAMPTZ DEFAULT NOW(),
-        UNIQUE (player_id, gameweek))
+        -- Three columns, not two: a fresh database should start with the key
+        -- ensure_predictions_upsert_key() migrates existing ones onto, so a
+        -- snapshot can UPSERT per model_version instead of colliding across
+        -- one. (player_id, gameweek) alone would reject a re-snapshot of an
+        -- already-snapshotted gameweek taken under a bumped MODEL_VERSION.
+        UNIQUE (player_id, gameweek, model_version))
     """,
     "CREATE INDEX IF NOT EXISTS fpl_predictions_gw_idx ON fpl_predictions (gameweek)",
     # Ledger: establishes true purchase price, and therefore selling price, per
@@ -484,6 +536,43 @@ def ensure_calibration_columns():
             cur = conn.cursor()
             for name, typ in cols:
                 cur.execute(f"ALTER TABLE fpl_predictions ADD COLUMN IF NOT EXISTS {name} {typ}")
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def ensure_predictions_upsert_key():
+    """Move fpl_predictions' identity from (player_id, gameweek) to
+    (player_id, gameweek, model_version), so a re-snapshot can UPSERT on
+    conflict instead of the previous DELETE-then-INSERT.
+
+    The original UNIQUE(player_id, gameweek) constraint (declared inline in
+    the CREATE TABLE, hence Postgres's deterministic auto-generated name
+    below) has never actually blocked anything in production -- a gameweek is
+    only ever snapshotted once, before it happens, so it was never hit even
+    across a MODEL_VERSION bump -- but it WOULD reject an UPSERT targeting
+    the three-column key with a genuine unique-constraint violation, on top
+    of the ON CONFLICT clause simply not matching any index at all. Both
+    statements are idempotent (DROP ... IF EXISTS, CREATE ... IF NOT EXISTS),
+    safe to call on every boot alongside the rest of the migrations.
+    """
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "ALTER TABLE fpl_predictions DROP CONSTRAINT "
+                "IF EXISTS fpl_predictions_player_id_gameweek_key"
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS fpl_predictions_upsert_key "
+                "ON fpl_predictions (player_id, gameweek, model_version)"
+            )
             conn.commit()
             return True
         finally:
