@@ -61,6 +61,21 @@
    their own overflow-x:auto so their content stays reachable by a contained
    swipe rather than merely being hidden. */
 .block-container {padding-top: 1.4rem; padding-bottom: 4rem; max-width: 1240px; color: var(--text); overflow-x: hidden;}
+
+/* Safety net: no card should ever grow its OWN vertical scrollbar. Streamlit
+   gives several of its own container primitives a default max-height once
+   their content is tall enough (a bordered container, an expander body, a
+   metric row sitting inside one) -- which reads as a second, nested scroll
+   region inside a page that already scrolls, e.g. under "How your squad
+   stacks up" in Step 4. The page itself is the one place that should ever
+   scroll vertically; every card sizes to its content instead. */
+[data-testid="stVerticalBlock"] > div:has(div[data-testid="stMetric"]),
+.stCard,
+div[data-testid="stExpander"],
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    overflow-y: visible !important;
+    max-height: none !important;
+}
 .deadline-hero {background: var(--surface); border: 1px solid var(--text); border-left: 6px solid var(--info); border-radius: 14px; padding: 18px 22px; margin-bottom: 16px; box-shadow: none; border-color: var(--line); border-left-color: var(--pos);}
 .dl-gw {font-size: 0.78rem; font-weight: 800; letter-spacing: 0.14em; color: var(--pos); text-transform: uppercase;}
 .dl-time {font-size: 1.9rem; font-weight: 800; color: var(--text); line-height: 1.15; margin-top: 2px;}
@@ -183,6 +198,16 @@
    constrained below the text's natural width. */
 .tc-head .photo-frame {flex-shrink: 0;}
 .tc-head > div:last-child {min-width: 0; overflow: hidden;}
+/* Fixture-run track under each "The move" player card: 4 fixtures, one
+   circular FDR badge + opponent/venue + that gameweek's xP per cell. Sits
+   inside .transfer-card, so the two tracks are already flex siblings via
+   .transfer-pair and line up side-by-side automatically. */
+.fx-run {display: flex; gap: 4px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);}
+.fx-run-cell {flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 2px;}
+.fx-run-badge {width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.68rem; font-weight: 800; color: var(--bg); flex-shrink: 0;}
+.fx-run-badge.fx-run-blank {background: var(--surface-2); color: var(--muted); border: 1px dashed var(--line);}
+.fx-run-opp {font-size: 0.6rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;}
+.fx-run-xp {font-size: 0.66rem; color: var(--text); font-weight: 700; white-space: nowrap;}
 /* Player Inspector */ .inspector-card {background: var(--surface-2); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin-top: 4px;}
 .insp-fixture {display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px dotted var(--line);}
 .insp-fixture:last-child {border-bottom: none;}
