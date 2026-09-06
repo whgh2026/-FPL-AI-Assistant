@@ -133,8 +133,10 @@ RED_CARD_PTS = 3.0
 # has to adjudicate whether a change was "big enough". v6 is not small: bonus
 # and cards stop being positional constants, so two players at the same
 # position who previously carried identical values for both terms now differ by
-# up to ~0.33 points of bonus and ~0.4 of card charge.
-MODEL_VERSION = "v6-bonus-and-cards"
+# up to ~0.33 points of bonus and ~0.4 of card charge. Nor is v7: minutes are
+# exponentially weighted toward recent matches and doubt now shifts a player
+# from starting toward a cameo, and minutes multiply every other component.
+MODEL_VERSION = "v7-minutes-recency"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -1042,6 +1044,156 @@ def _team_played_map() -> Dict[int, int]:
     return _TEAM_PLAYED
 
 
+# ----------------------------------------------------------------------------
+# C10b -- minutes recency
+#
+# A season-long starts/games rate has no memory of WHEN the starts happened. A
+# player benched for the opening ten matches and nailed for the last five reads
+# as 0.33 -- a rotation risk -- when he is a certain starter, and the mirror
+# case reads as nailed when he has lost his place. Minutes multiply every other
+# component of the projection, so that is not a 5% edge, it is a systematically
+# wrong recommendation: sell the nailed player, buy the one who has been dropped.
+#
+# The rate is therefore exponentially weighted over per-match history from
+# element-summary, half-life RECENT_HALF_LIFE matches.
+#
+# That history is one HTTP call PER PLAYER, so it is never fetched from the
+# projection path. The cache is populated deliberately, by a caller that knows
+# which players it actually cares about (a squad plus a shortlist is ~50-150,
+# not the ~700 in the game), and _minute_distribution simply consults whatever
+# happens to be there. Missing history is normal and falls back to the season
+# rate, so the engine works exactly as before with an empty cache.
+# ----------------------------------------------------------------------------
+# Off under the test harness: there is no FPL API in the build environment, so
+# leaving it on would mean a few hundred doomed HTTP attempts per solve for a
+# result that is meant to be optional. The consequence is stated plainly rather
+# than hidden -- the suite exercises the SEASON path by default, and the
+# recency path is tested by populating the cache directly.
+RECENT_MINUTES_ENABLED = True
+
+RECENT_HALF_LIFE = 3.0        # matches
+# Only the most recent matches are considered at all. Exponential weighting
+# alone is not enough: each match four months old carries ~9% weight, but there
+# are a lot of them, and in aggregate they outvote the recent form the weighting
+# exists to surface. Measured on a benched-ten-then-started-five history, an
+# unbounded window read 0.63 -- still a rotation risk -- where the same player
+# over a 12-match window reads 0.73.
+RECENT_WINDOW = 12            # matches
+RECENT_TTL_SECONDS = 3600.0
+RECENT_MAX_FETCH = 160        # per prefetch call, so the cost can never surprise
+RECENT_MIN_MATCHES = 3.0      # below this the season rate is the better estimate
+
+# A substitute appearance averages well under a half. The 30.0 here was an
+# assumption that every cameo is exactly 30 minutes, used to invert total
+# minutes back into an appearance count; ~22 is closer to the real distribution
+# of Premier League sub appearances, and it only matters when per-match history
+# is unavailable -- with history the appearances are simply counted.
+AVG_SUB_MINUTES = 22.0
+
+# How far doubt shifts a player from starting toward a cameo. A 50%-doubtful
+# player who does feature is more likely to be eased in than to play the full
+# 90; the old model scaled p_full and p_cameo by the SAME factor, which keeps
+# the full/cameo split identical no matter how doubtful the player is.
+DOUBT_CAMEO_SHIFT = 0.5
+
+_RECENT_CACHE: Dict[int, Dict[str, float]] = {}
+_RECENT_CACHE_TS: Dict[int, float] = {}
+
+
+def _element_summary(player_id: int) -> Optional[List[Dict[str, Any]]]:
+    """Per-match history for one player, or None if it cannot be fetched."""
+    try:
+        data = _cached_json(f"{BASE_URL}/element-summary/{int(player_id)}/",
+                            ttl=int(RECENT_TTL_SECONDS))
+        history = data.get("history")
+        return history if isinstance(history, list) else None
+    except Exception:
+        return None
+
+
+def _summarise_recent(history: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """Exponentially-weighted start and cameo rates from per-match history.
+
+    Weights halve every RECENT_HALF_LIFE matches counting back from the most
+    recent, so a changed role is reflected in weeks rather than being averaged
+    against a whole season. Returns the effective sample size alongside the
+    rates, because the caller needs to know how much evidence it is holding.
+    """
+    rows = [h for h in history if h.get("minutes") is not None]
+    if not rows:
+        return None
+    # element-summary is chronological, so the last row is the most recent.
+    rows = rows[-RECENT_WINDOW:]
+    n = len(rows)
+    w_sum = starts_w = cameo_w = 0.0
+    for i, h in enumerate(rows):
+        age = n - 1 - i
+        w = 0.5 ** (age / RECENT_HALF_LIFE)
+        mins = _to_float(h.get("minutes"))
+        started = 1.0 if _to_float(h.get("starts")) > 0 else (1.0 if mins >= 60 else 0.0)
+        w_sum += w
+        if started:
+            starts_w += w
+        elif mins > 0:
+            cameo_w += w
+    if w_sum <= 0:
+        return None
+    return {"start_rate": starts_w / w_sum,
+            "sub_rate": cameo_w / w_sum,
+            "n_eff": w_sum,
+            "matches": float(n)}
+
+
+def prefetch_recent_minutes(player_ids, limit: int = RECENT_MAX_FETCH) -> int:
+    """Populate the recency cache for the players a caller actually cares about.
+
+    One HTTP call per uncached player, bounded by `limit`, so the cost of a page
+    render is a number you can state rather than a surprise. Returns how many
+    were fetched. Failures are silent by design: a missing history degrades to
+    the season rate, which is the behaviour that shipped before this existed.
+    """
+    now = time.time()
+    fetched = 0
+    for pid in player_ids:
+        if fetched >= limit:
+            break
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        # Keyed on the TIMESTAMP, not on cache membership. A player whose
+        # history could not be fetched records a time but no entry, and keying
+        # on membership meant those were retried on every single render -- the
+        # players who cost a doomed request each time were exactly the ones
+        # already known to fail.
+        if (now - _RECENT_CACHE_TS.get(pid, 0.0)) < RECENT_TTL_SECONDS:
+            continue
+        try:
+            history = _element_summary(pid)
+        except Exception:
+            history = None
+        fetched += 1
+        summary = _summarise_recent(history) if history else None
+        if summary:
+            _RECENT_CACHE[pid] = summary
+        _RECENT_CACHE_TS[pid] = now
+    return fetched
+
+
+def _recent_minutes(player_id: Any) -> Optional[Dict[str, float]]:
+    """Cached recency summary for one player, or None. Never fetches."""
+    try:
+        pid = int(player_id)
+    except (TypeError, ValueError):
+        return None
+    if (time.time() - _RECENT_CACHE_TS.get(pid, 0.0)) >= RECENT_TTL_SECONDS:
+        return None
+    got = _RECENT_CACHE.get(pid)
+    if got and got.get("matches", 0.0) >= RECENT_MIN_MATCHES:
+        return got
+    return None
+
+
 def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, float]:
     """Tri-state minutes distribution (P(M=0), P(1<=M<=59), P(M>=60)).
 
@@ -1060,10 +1212,25 @@ def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, 
     minutes = _to_float(p.get("minutes"))
     games = max(starts, float(_team_played_map().get(p.get("team"), 0)), 1.0)
 
+    recent = _recent_minutes(p.get("id"))
+
     if is_gk:
-        start_rate = min(1.0, starts / games) if starts > 0 else (1.0 if minutes >= 60 else 0.0)
-        p_full = avail * start_rate
-        p_cameo = 0.0
+        if recent:
+            start_rate = min(1.0, (recent["start_rate"] * recent["n_eff"] + PRIOR_STARTS)
+                             / (recent["n_eff"] + PRIOR_GAMES))
+        else:
+            start_rate = min(1.0, starts / games) if starts > 0 else (1.0 if minutes >= 60 else 0.0)
+        base_full, base_sub = start_rate, 0.0
+    elif recent:
+        # Recency path (C10b). The same Beta prior as the season path, applied
+        # to the EXPONENTIALLY WEIGHTED counts, so a player whose role changed
+        # is reflected in weeks rather than averaged across the whole season.
+        # Cameo appearances are counted here rather than inferred by dividing
+        # leftover minutes by an assumed cameo length.
+        n_eff = recent["n_eff"]
+        base_full = min(1.0, (recent["start_rate"] * n_eff + PRIOR_STARTS)
+                        / (n_eff + PRIOR_GAMES))
+        base_sub = min(recent["sub_rate"], max(0.0, 1.0 - base_full))
     else:
         if starts > 0:
             # Shrunk toward "probably a starter". Unlike the attacking rates,
@@ -1071,20 +1238,30 @@ def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, 
             # so at GW4, with games = 4, a single rest swung a nailed starter
             # from 1.00 to 0.75 and the whole projection with it, because minutes
             # multiply every other component.
-            #
-            # This is the small-sample half of the minutes problem. The staleness
-            # half -- a season-long rate that lags a player whose role changed --
-            # needs per-match history from element-summary and is Tranche 2.
-            start_rate = min(1.0, (starts + PRIOR_STARTS) / (games + PRIOR_GAMES))
+            base_full = min(1.0, (starts + PRIOR_STARTS) / (games + PRIOR_GAMES))
         else:
             # Starts unreported: infer from minutes (treat as full-game starts) so a
             # 1000-minute player is a nailed starter, not a 100% cameo sub.
-            start_rate = min(1.0, (minutes / 90.0) / games) if minutes > 0 else 0.0
-        sub_minutes = max(0.0, minutes - start_rate * games * 90.0)
-        sub_apps = sub_minutes / 30.0
-        sub_rate = min(sub_apps / games, max(0.0, 1.0 - start_rate))
-        p_full = avail * start_rate
-        p_cameo = avail * sub_rate
+            base_full = min(1.0, (minutes / 90.0) / games) if minutes > 0 else 0.0
+        sub_minutes = max(0.0, minutes - base_full * games * 90.0)
+        sub_apps = sub_minutes / AVG_SUB_MINUTES
+        base_sub = min(sub_apps / games, max(0.0, 1.0 - base_full))
+
+    # Doubt shifts mass from starting into a cameo; it does not merely scale
+    # both down. A 50%-doubtful player who does feature is more likely to be
+    # eased in off the bench than to play the full 90, and the old model kept
+    # the full/cameo SPLIT identical however doubtful the player was.
+    p_features = avail * (base_full + base_sub)
+    if p_features > 0:
+        full_share = base_full / (base_full + base_sub)
+        full_share *= 1.0 - DOUBT_CAMEO_SHIFT * (1.0 - avail)
+        p_full = p_features * full_share
+        p_cameo = p_features * (1.0 - full_share)
+    else:
+        p_full = p_cameo = 0.0
+    if is_gk:
+        # Keepers never register cameos: it is all or nothing between the sticks.
+        p_full, p_cameo = p_full + p_cameo, 0.0
 
     p0 = 1.0 - p_full - p_cameo
     total = p_full + p_cameo + p0
@@ -2907,6 +3084,25 @@ def suggest_transfers_for_custom_squad(
         sell_by_id[p["player_id"]] = sp if sp is not None else _selling_price(
             p.get("purchase_price", p.get("price", 0.0)), p.get("price", 0.0)
         )
+    # Minutes recency (C10b), fetched BEFORE any projection is computed so the
+    # squad and the market are estimated on the same footing. Asymmetry would be
+    # its own bias: accurate minutes for the fifteen you own and season averages
+    # for everyone else systematically tilts every buy/sell comparison in one
+    # direction, which is not obviously better than being wrong about both.
+    #
+    # One HTTP call per uncached player, bounded, cached for an hour, and the
+    # whole thing degrades to the season rate if the network is unavailable.
+    # It sits here rather than in _minute_distribution because this is the one
+    # place that knows the full set of players about to be evaluated.
+    if RECENT_MINUTES_ENABLED:
+        try:
+            prefetch_recent_minutes(
+                list(current_ids)
+                + [e["id"] for e in elements_by_id.values()
+                   if _to_float(e.get("minutes")) > 0][:RECENT_MAX_FETCH])
+        except Exception:
+            pass
+
     pool = []
     seen = set()
 

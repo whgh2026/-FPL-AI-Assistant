@@ -33,6 +33,8 @@ _CACHE_RESET = {
     "_DC_RAW": dict,
     "_FIXTURE_LOOKUP_CACHE": lambda: None,
     "_FIXTURE_LOOKUP_TS": float,
+    "_RECENT_CACHE": dict,
+    "_RECENT_CACHE_TS": dict,
     "_EO_CACHE": dict,
     "_EO_CACHE_TS": float,
     "_LIVE_CACHE": dict,
@@ -56,6 +58,12 @@ def reset_caches():
         if hasattr(fpl_tools, name):
             setattr(fpl_tools, name, factory())
     fpl_tools._ODDS_CACHE = {"ts": 0.0, "data": None}
+    # No FPL API in the build environment, so leaving the recency prefetch on
+    # would mean a few hundred doomed HTTP attempts per solve. The suite
+    # therefore exercises the SEASON minutes path; the recency path is tested by
+    # populating _RECENT_CACHE directly, which is also the only way to control
+    # what history a player has.
+    fpl_tools.RECENT_MINUTES_ENABLED = False
 
 
 @contextlib.contextmanager
