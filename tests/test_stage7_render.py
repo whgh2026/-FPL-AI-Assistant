@@ -791,6 +791,72 @@ class StylesheetTest(unittest.TestCase):
                       "without min-width:0 four cells plus a headshot header "
                       "cannot shrink to fit a phone-width transfer card")
 
+    def _media_block(self, css, max_width_px):
+        m = re.search(r"@media \(max-width:\s*" + str(max_width_px) + r"px\)\s*\{(.*?)\n\}",
+                      css, re.DOTALL)
+        self.assertIsNotNone(m, f"no max-width:{max_width_px}px media query found")
+        return m.group(1)
+
+    def test_narrow_phone_media_query_exists_and_follows_the_768px_block(self):
+        """Both match below 600px and both use !important on shared
+        selectors -- the 600px block must come AFTER the 768px one in the
+        file so its rules win the tie by source order."""
+        css = self._css()
+        idx_768 = css.index("@media (max-width: 768px)")
+        idx_600 = css.index("@media (max-width: 600px)")
+        self.assertLess(idx_768, idx_600)
+
+    def test_pitch_row_cards_wrap_into_a_staggered_layout_below_600px(self):
+        block = self._media_block(self._css(), 600)
+        m = re.search(r"\.pitch-row-cards\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(m, ".pitch-row-cards rule not found in the 600px block")
+        rule = m.group(1)
+        self.assertIn("flex-wrap: wrap", rule)
+        self.assertIn("justify-content: center", rule)
+        self.assertIn("gap: 6px 4px", rule)
+
+    def test_pitch_player_gets_a_bounded_surface_below_600px(self):
+        block = self._media_block(self._css(), 600)
+        m = re.search(r"\.pitch-player\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(m, ".pitch-player rule not found in the 600px block")
+        rule = m.group(1)
+        self.assertIn("rgba(15, 23, 42, 0.7)", rule)
+        self.assertIn("rgba(255, 255, 255, 0.08)", rule)
+        self.assertIn("border-radius: 6px", rule)
+
+    def test_pitch_player_text_is_tuned_down_below_600px(self):
+        block = self._media_block(self._css(), 600)
+        nm = re.search(r"\.pitch-player \.nm\s*\{([^}]*)\}", block)
+        meta = re.search(r"\.pitch-player \.meta\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(nm, ".pitch-player .nm rule not found in the 600px block")
+        self.assertIsNotNone(meta, ".pitch-player .meta rule not found in the 600px block")
+        self.assertIn("0.70rem", nm.group(1))
+        self.assertIn("0.65rem", meta.group(1))
+
+    def test_fixture_dots_are_scaled_down_below_600px(self):
+        """.fx-dots is emoji text, not a sized element -- width/height do not
+        apply to inline text, so the scale-down has to be font-size, not the
+        literal width/height a naive reading of the spec would reach for."""
+        block = self._media_block(self._css(), 600)
+        m = re.search(r"\.pitch-player \.fx-dots\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(m, ".pitch-player .fx-dots rule not found in the 600px block")
+        rule = m.group(1)
+        self.assertIn("font-size", rule)
+        self.assertNotIn("width:", rule.replace("min-width:", "").replace("max-width:", ""))
+
+    def test_desktop_pitch_player_rule_is_unreachable_below_600px_only(self):
+        """Requirement 4: >=600px must be untouched. The base (non-media)
+        .pitch-player rule -- the one desktop actually renders under -- must
+        not itself be edited to carry the new mobile-only styling; that
+        styling must live only inside the 600px (or narrower) media query."""
+        css = self._css()
+        base_rule_end = css.index("@media (max-width: 768px)")
+        base_css = css[:base_rule_end]
+        # The desktop-scoped .pitch-player rule(s) must not carry the new
+        # bounded-card background -- that would leak onto every viewport.
+        for m in re.finditer(r"\.pitch-player\s*\{([^}]*)\}", base_css):
+            self.assertNotIn("rgba(15, 23, 42, 0.7)", m.group(1))
+
 
 class ModelHealthDataTest(unittest.TestCase):
     def test_accuracy_query_returns_empty_rather_than_raising(self):

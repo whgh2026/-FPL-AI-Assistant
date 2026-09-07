@@ -140,6 +140,231 @@ class HurdleTest(unittest.TestCase):
             self.assertGreater(max(sigmas.values()), 0.0)
 
 
+def _toy_candidate(pid, pos, xp, team_id):
+    """A prospective signing for the toy pool below. xp_gw is pinned to the
+    ORIGINAL (pre-swap) baseline value rather than left to default to the
+    boosted horizon xp -- _solve_squad values the captain armband at xp_gw,
+    so an unpinned candidate with a big horizon xp bump would also grab the
+    captaincy and double-count its own gain, confounding the very hurdle
+    effect these tests exist to isolate."""
+    return {"id": pid, "position": pos, "price": 5.0, "xp": xp, "xp_gw": 4.0,
+           "team_id": team_id, "sigma": 0.0}
+
+
+def _toy_squad_pool():
+    """A hand-built, fully controlled 15-man pool (2 GK/5 DEF/5 MID/3 FWD),
+    every player on its own club (so the <=3-per-club constraint never
+    binds), identically priced (so a swap never touches budget either), and
+    with xp_gw pinned equal to xp (so captaincy -- valued at xp_gw, doubling
+    one starter's score -- stays a tie among the untouched originals rather
+    than swinging onto whichever candidate happens to carry the highest
+    horizon xp). The only thing left that can make a swap profitable or not
+    is xp minus the positional hurdle. Used by PositionalHurdleEndToEndTest
+    and GKLockTest.
+    """
+    pool = []
+    team = [1]
+
+    def add(pid, pos, xp):
+        pool.append({"id": pid, "position": pos, "price": 5.0, "sell_price": 5.0,
+                    "xp": xp, "xp_gw": xp, "team_id": team[0], "sigma": 0.0})
+        team[0] += 1
+
+    add("gk1", "GK", 4.0)
+    add("gk2", "GK", 3.0)
+    for i in range(5):
+        add(f"def{i}", "DEF", 4.0)
+    for i in range(5):
+        add(f"mid{i}", "MID", 4.0)
+    for i in range(3):
+        add(f"fwd{i}", "FWD", 4.0)
+    return pool
+
+
+class PositionalHurdleTest(unittest.TestCase):
+    """Task: GKP/DEF must pay a materially bigger search-brake bar than
+    MID/FWD, who must be left exactly where they were -- ceiling-capped
+    positions need a stronger case before the solver will make the swap."""
+
+    def test_multipliers_match_the_spec(self):
+        m = fpl_tools.POSITIONAL_HURDLE_MULTIPLIER
+        self.assertEqual(m["GK"], 1.75)
+        self.assertEqual(m["DEF"], 1.25)
+        self.assertEqual(m["MID"], 1.0)
+        self.assertEqual(m["FWD"], 1.0)
+
+    def test_gkp_swap_level_hurdle_lands_in_the_specified_band(self):
+        """Two legs (sell + buy), both GKP, at zero outcome volatility."""
+        total = 2 * fpl_tools._transfer_hurdle_bar("GK", sigma=0.0)
+        self.assertGreaterEqual(total, 7.5)
+        self.assertLessEqual(total, 8.0)
+
+    def test_mid_and_fwd_are_bit_for_bit_unchanged(self):
+        """Multiplier 1.0 must mean the ORIGINAL HURDLE_BASE, not
+        POSITIONAL_HURDLE_BASE_XP * 1.0 -- those are different numbers, and
+        substituting the wrong one would silently retune every MID/FWD
+        transfer decision this feature was never meant to touch."""
+        for pos in ("MID", "FWD"):
+            bar = fpl_tools._transfer_hurdle_bar(pos, sigma=0.3)
+            expected = fpl_tools.HURDLE_BASE / 2.0 + fpl_tools.HURDLE_SIGMA_WEIGHT * 0.3
+            self.assertAlmostEqual(bar, expected, places=9)
+
+    def test_def_sits_strictly_between_mid_and_gkp(self):
+        mid_bar = fpl_tools._transfer_hurdle_bar("MID", sigma=0.0)
+        def_bar = fpl_tools._transfer_hurdle_bar("DEF", sigma=0.0)
+        gk_bar = fpl_tools._transfer_hurdle_bar("GK", sigma=0.0)
+        self.assertLess(mid_bar, def_bar)
+        self.assertLess(def_bar, gk_bar)
+
+    def test_sigma_still_adds_on_top_for_every_position(self):
+        """The positional floor is not a REPLACEMENT for the volatility
+        signal -- a volatile candidate still faces a correspondingly higher
+        real bar than the position's floor, same as before this feature."""
+        for pos in ("GK", "DEF", "MID", "FWD"):
+            low = fpl_tools._transfer_hurdle_bar(pos, sigma=0.0)
+            high = fpl_tools._transfer_hurdle_bar(pos, sigma=1.0)
+            self.assertGreater(high, low)
+
+    def test_hurdle_scale_still_zeroes_the_positional_bar_too(self):
+        """Wildcard/Free Hit pass hurdle_scale=0.0 -- the positional
+        multiplier must not reintroduce a tax the chip solves are meant to
+        be free of."""
+        for pos in ("GK", "DEF", "MID", "FWD"):
+            self.assertEqual(
+                fpl_tools._transfer_hurdle_bar(pos, sigma=0.7, hurdle_scale=0.0), 0.0)
+
+
+class PositionalHurdleEndToEndTest(unittest.TestCase):
+    """Same raw xp gain (+5.0), same price, no hit cost in play -- the only
+    variable between the two solves is which position the swap happens in.
+    MID clears its small bar; GKP does not clear its much larger one."""
+
+    def _solve_with_one_candidate(self, candidate):
+        pool = _toy_squad_pool()
+        held_ids = {e["id"] for e in pool}
+        pool = pool + [candidate]
+        budget = sum(e["price"] for e in pool if e["id"] in held_ids)
+        selected, _obj, _parts = fpl_tools._solve_squad(
+            pool, budget=budget, must_include_ids=held_ids,
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15})
+        return selected
+
+    def test_gkp_swap_with_a_5xp_gain_is_declined(self):
+        candidate = _toy_candidate("gk_alt", "GK", 4.0 + 5.0, team_id=999)
+        selected = self._solve_with_one_candidate(candidate)
+        self.assertNotIn("gk_alt", selected,
+                         "a +5.0 xP gain must not clear the ~7.7 GKP hurdle")
+        self.assertIn("gk1", selected)
+
+    def test_mid_swap_with_the_same_5xp_gain_is_taken(self):
+        candidate = _toy_candidate("mid_alt", "MID", 4.0 + 5.0, team_id=999)
+        selected = self._solve_with_one_candidate(candidate)
+        self.assertIn("mid_alt", selected,
+                      "a +5.0 xP gain comfortably clears the ~0.8 MID hurdle")
+        # The five original MIDs are economically identical (same xp, same
+        # price), so which one the solver drops to make room is arbitrary --
+        # only that exactly one of them is gone is meaningful here.
+        original_mids = {f"mid{i}" for i in range(5)}
+        self.assertEqual(len(original_mids & set(selected)), 4,
+                         "exactly one original MID should have been dropped for mid_alt")
+
+
+class GKLockTest(unittest.TestCase):
+    """Task 1.3: the Active GK Lock -- a pure-function test of the
+    eligibility check (_locked_starting_gk) plus an end-to-end test that the
+    hard constraint actually holds inside _solve_squad, even against a gain
+    that would otherwise clear the (much higher, but still soft) GKP
+    hurdle on its own."""
+
+    def _elements(self, **overrides):
+        base = {
+            1: {"id": 1, "status": "a", "chance_of_playing_next_round": None},
+            2: {"id": 2, "status": "a", "chance_of_playing_next_round": None},
+        }
+        for pid, patch in overrides.items():
+            base[pid].update(patch)
+        return base
+
+    def _pool(self, **overrides):
+        base = {
+            1: {"id": 1, "position": "GK", "minutes_floor": 1.0, "xp": 4.0},
+            2: {"id": 2, "position": "GK", "minutes_floor": 0.1, "xp": 1.0},
+        }
+        for pid, patch in overrides.items():
+            base[pid].update(patch)
+        return base
+
+    def test_locks_the_healthy_nailed_starter(self):
+        self.assertEqual(
+            fpl_tools._locked_starting_gk([1, 2], self._elements(), self._pool()), 1)
+
+    def test_never_locks_the_backup(self):
+        """pid 2's own minutes_floor (0.1) never clears
+        GK_LOCK_MIN_MINUTES_FLOOR, so it is never a candidate at all,
+        healthy or not."""
+        self.assertNotEqual(
+            fpl_tools._locked_starting_gk([1, 2], self._elements(), self._pool()), 2)
+
+    def test_injury_flag_lifts_the_lock(self):
+        elements = self._elements()
+        elements[1]["status"] = "i"
+        self.assertIsNone(fpl_tools._locked_starting_gk([1, 2], elements, self._pool()))
+
+    def test_doubtful_chance_lifts_the_lock(self):
+        elements = self._elements()
+        elements[1]["chance_of_playing_next_round"] = 75
+        self.assertIsNone(fpl_tools._locked_starting_gk([1, 2], elements, self._pool()))
+
+    def test_low_minutes_floor_lifts_the_lock(self):
+        pool = self._pool()
+        pool[1]["minutes_floor"] = 0.5   # < 60/90
+        self.assertIsNone(fpl_tools._locked_starting_gk([1, 2], self._elements(), pool))
+
+    def test_condition_a_a_market_alternative_already_clearing_the_hurdle_lifts_the_lock(self):
+        elements = self._elements()
+        elements[3] = {"id": 3, "status": "a", "chance_of_playing_next_round": None}
+        pool = self._pool()
+        pool[3] = {"id": 3, "position": "GK", "minutes_floor": 1.0,
+                  "xp": pool[1]["xp"] + fpl_tools.GKP_TRANSFER_HURDLE_XP}
+        self.assertIsNone(fpl_tools._locked_starting_gk([1, 2], elements, pool))
+
+    def test_condition_b_a_gk_no_longer_in_current_ids_has_nothing_to_lock(self):
+        """Step 2's override removing the GK from the squad IS the flag --
+        no separate signal is needed."""
+        self.assertIsNone(
+            fpl_tools._locked_starting_gk([2], self._elements(), self._pool()))
+
+    def test_empty_squad_is_safe(self):
+        self.assertIsNone(fpl_tools._locked_starting_gk([], {}, {}))
+
+    def test_hard_lock_holds_even_against_a_gain_that_would_otherwise_clear_the_hurdle(self):
+        pool = _toy_squad_pool()
+        held_ids = {e["id"] for e in pool}
+        big_alt = _toy_candidate(
+            "gk_alt", "GK", 4.0 + fpl_tools.GKP_TRANSFER_HURDLE_XP + 5.0,  # comfortably clears 7.7
+            team_id=999)
+        pool_with_alt = pool + [big_alt]
+        budget = sum(e["price"] for e in pool)
+
+        unlocked, _o1, _p1 = fpl_tools._solve_squad(
+            pool_with_alt, budget=budget, must_include_ids=held_ids,
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15})
+        self.assertIn("gk_alt", unlocked,
+                      "sanity check: this gain should clear the soft hurdle when unlocked")
+
+        # Only gk1 is locked -- gk2 (the backup) is free to be swapped for
+        # gk_alt on its own merits, and legitimately is (its own gain clears
+        # its own leg of the hurdle too). That is correct and not what this
+        # test is about: the claim under test is specifically that gk1 --
+        # the protected player -- survives regardless.
+        locked, _o2, _p2 = fpl_tools._solve_squad(
+            pool_with_alt, budget=budget, must_include_ids=held_ids,
+            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15},
+            locked_ids={"gk1"})
+        self.assertIn("gk1", locked,
+                      "the hard lock must hold even though the gain clears the soft hurdle")
+
+
 class MovePairingTest(unittest.TestCase):
     def test_pairs_by_price_distance(self):
         """The MIP picks a SET; the old code sorted both sides by xP and zipped

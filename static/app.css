@@ -244,6 +244,40 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
     .dugout { padding: 10px 8px !important; }
     .dugout > div:last-child { gap: 4px !important; justify-content: space-evenly !important; }
   }
+
+/* Below 768px, forcing every row into one strict line (max-width:20% per
+   card, all five in the widest MID/DEF rows squeezed side by side) is what
+   overcrowded and truncated the cards on a genuinely narrow phone: a 5-man
+   line got ~70px per player -- not enough for a name, price/xP AND a row of
+   fixture dots without them running into the neighbouring card. Below
+   600px, cards wrap into a staggered layout instead (three per row, so a
+   5-man line reads as 3+2 and a back-4 gets real width on its own three-per-
+   row grid), each gets an explicit bounded surface so it is visually
+   obvious which name/price/dots belong together, and text/dots are tuned
+   down to fit that surface. This block is additive to the 768px one above
+   and must come after it in the file -- both match below 600px, and later
+   !important rules win the tie on shared selectors. Desktop (>=600px) is
+   untouched: nothing here is reachable above this breakpoint. */
+@media (max-width: 600px) {
+    .pitch-row-cards { flex-wrap: wrap !important; justify-content: center !important; gap: 6px 4px !important; }
+    .pitch-player {
+        flex: 0 1 30% !important;
+        max-width: 30% !important;
+        background: rgba(15, 23, 42, 0.7) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 6px !important;
+        padding: 4px 3px !important;
+    }
+    .pitch-player .nm { font-size: 0.70rem !important; }
+    .pitch-player .meta { font-size: 0.65rem !important; }
+    /* .fx-dots is emoji text (already-colored circular glyphs), not a sized
+       element -- width/height do not apply to inline text, so "scale the
+       badges down" is expressed the same way the 768px block already scales
+       them: font-size and letter-spacing, just tighter again for this
+       narrower breakpoint. */
+    .pitch-player .fx-dots { font-size: 0.5rem !important; letter-spacing: 0 !important; margin: 1px 0 0 0 !important; }
+    .dugout > div:last-child { justify-content: center !important; }
+}
 .note{font-size:0.78rem;color:var(--muted-2);margin:6px 0 10px 0;}
 .note-inline{font-size:0.8rem;color:var(--muted);}
 

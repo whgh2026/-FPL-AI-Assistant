@@ -91,6 +91,46 @@ PRIOR_GAMES = 3.0
 WILDCARD_SCARCITY_COST = 55.0
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
+# Positional "routes to points" transfer hurdle -- an ADDITIONAL, position-
+# scaled bar layered on top of the generic HURDLE_BASE/HURDLE_SIGMA_WEIGHT
+# search brake below, for positions whose ceiling is structurally capped.
+# MID and FWD have several independent, largely continuous routes to points
+# (goals, assists, open-play xG, BPS upside), so at multiplier 1.0 their bar
+# is untouched -- bit-for-bit what HURDLE_BASE already produced. GKP returns
+# are almost purely binary clean-sheet dependence, hard-capped around 6-8
+# points a match, and carry the highest opportunity cost of the four squad
+# slots, so a GKP transfer must clear a materially larger net gain before the
+# solver will make it; DEF sits between the two.
+#
+# POSITIONAL_HURDLE_BASE_XP is NOT derived from HURDLE_BASE (a much smaller
+# noise-damping constant, ~1-2 points per swap) -- it is calibrated directly
+# against the requested GKP band: 4.4 * 1.75 = 7.7, inside the specified
+# 7.5-8.0 xP minimum net gain. Outcome volatility (sigma) still adds on top
+# per player exactly as it already does for every other position, so a
+# volatile candidate faces a correspondingly higher real bar than this floor.
+POSITIONAL_HURDLE_BASE_XP = 4.4
+POSITIONAL_HURDLE_MULTIPLIER = {"GK": 1.75, "DEF": 1.25, "MID": 1.0, "FWD": 1.0}
+# The elevated GKP bar, exposed on its own: this is "the elevated 1.75x GKP
+# hurdle" the Active GK Lock below checks a prospective transfer against.
+GKP_TRANSFER_HURDLE_XP = POSITIONAL_HURDLE_BASE_XP * POSITIONAL_HURDLE_MULTIPLIER["GK"]
+
+# Variance dampener on a PROSPECTIVE goalkeeper signing's own clean-sheet xP
+# (xCS * 4.0 pts * this dampener): a clean sheet is wiped out by a single
+# added-time concession, so the raw P(CS) overstates how reliable that
+# return actually is for a decision being made about to buy it. Applied only
+# when evaluating a candidate as a transfer IN (suggest_transfers_for_
+# custom_squad's incoming-candidate pool, and the multi-GW planner's SAA
+# scenarios for the same candidates) -- never to a GK already owned, since
+# discounting an owned player's own displayed xP would move numbers shown
+# all over the app (My Plan, Model Health, the live tracker) for a decision
+# this feature is not about.
+GK_TRANSFER_IN_CS_DAMPENER = 0.85
+
+# "60 projected minutes" for the Active GK Lock, expressed the same way the
+# rest of the engine already measures playing time -- _expected_playing_
+# fraction, not a raw minutes count FPL doesn't publish as a projection.
+GK_LOCK_MIN_MINUTES_FLOOR = 60.0 / 90.0
+
 # Phase C — game theory, effective ownership, and two-set chip scheduling.
 CHIP_SET1_EXPIRY_GW = 19        # Set 1 chips expire at the GW19 deadline (2 Jan 2027 13:30 GMT)
 CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
@@ -1573,7 +1613,8 @@ def _load_weights() -> Dict[str, float]:
     return weights
 
 
-def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: int) -> float:
+def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: int,
+                    gk_cs_dampener: float = 1.0) -> float:
     avg = _league_averages().get(POS_MAP.get(pos_id, "MID"), {"xg": 0.3, "xa": 0.2, "xgc": 1.3, "saves": 0.5})
     minutes = _to_float(p.get("minutes"))
 
@@ -1639,6 +1680,14 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     p_cs_team = math.exp(-lam_against) if lam_against < 10 else 0.0
     plays_60 = 1.0 if emin >= 60 else 0.0
     cs_pts = CS_PTS.get(pos_id, 0) * p_cs_team * plays_60 * _w["clean_sheet_confidence"]
+    # GK Transfer-In Fragility Discount: a goalkeeper's clean sheet is undone
+    # by a single added-time concession, so raw P(CS) overstates how reliable
+    # that return is for a player being newly evaluated as a signing. Never
+    # touches DEF, whose clean-sheet points share the same CS_PTS entry --
+    # this is specifically the GK's own binary, all-or-nothing dependence on
+    # it (a DEF still banks tackles/interceptions/attacking returns besides).
+    if pos_id == 1:
+        cs_pts *= gk_cs_dampener
 
     # Goals conceded is a per-appearance deduction, so it scales with the share
     # of the match played rather than being a whole-match event.
@@ -1724,7 +1773,8 @@ def _dgw_fatigue_multiplier(prev_fixture: Dict[str, Any], fixture: Dict[str, Any
     return _DGW_FATIGUE_DISCOUNT.get(pos_id, 1.0)
 
 
-def _xp_dgw_sum(p: Dict[str, Any], target: List[Dict[str, Any]], emin: float, pos_id: int) -> float:
+def _xp_dgw_sum(p: Dict[str, Any], target: List[Dict[str, Any]], emin: float, pos_id: int,
+                gk_cs_dampener: float = 1.0) -> float:
     """Sum of per-fixture xP across a gameweek's fixture(s), decomposing a
     double (or, rarely, triple) gameweek into independent per-fixture
     evaluations rather than a naive N-times multiplication -- each fixture
@@ -1741,13 +1791,14 @@ def _xp_dgw_sum(p: Dict[str, Any], target: List[Dict[str, Any]], emin: float, po
     if not target:
         return 0.0
     ordered = sorted(target, key=lambda f: f.get("kickoff_time") or "")
-    total = _xp_for_fixture(p, ordered[0], emin, pos_id)
+    total = _xp_for_fixture(p, ordered[0], emin, pos_id, gk_cs_dampener)
     for i in range(1, len(ordered)):
-        total += _dgw_fatigue_multiplier(ordered[i - 1], ordered[i], pos_id) * _xp_for_fixture(p, ordered[i], emin, pos_id)
+        total += _dgw_fatigue_multiplier(ordered[i - 1], ordered[i], pos_id) * _xp_for_fixture(p, ordered[i], emin, pos_id, gk_cs_dampener)
     return total
 
 
-def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None) -> Tuple[float, str]:
+def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None,
+                   gk_cs_dampener: float = 1.0) -> Tuple[float, str]:
     """Raw expected points for a single gameweek, before risk adjustment."""
     status = p.get("status", "a")
     chance_val = p.get("chance_of_playing_next_round")
@@ -1791,8 +1842,8 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
     p0, p_cameo, p_full = _minute_distribution(p, status)
     minutes_played = _to_float(p.get("minutes"))
 
-    xp_full = _xp_dgw_sum(p, target, 90.0, pos_id)
-    xp_cameo = _xp_dgw_sum(p, target, 30.0, pos_id)
+    xp_full = _xp_dgw_sum(p, target, 90.0, pos_id, gk_cs_dampener)
+    xp_cameo = _xp_dgw_sum(p, target, 30.0, pos_id, gk_cs_dampener)
     our_total = p_full * xp_full + p_cameo * xp_cameo
 
     _w = _load_weights()
@@ -1887,13 +1938,14 @@ def calibration_features(p: Dict[str, Any],
     }
 
 
-def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None) -> Tuple[float, str]:
+def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None,
+              gk_cs_dampener: float = 1.0) -> Tuple[float, str]:
     """Single-gameweek expected points. A pure forecast.
 
     Takes no `risk` argument by design: strategy must not reach the projection.
     See the Layer 1 note on _player_xp_raw.
     """
-    raw, note = _player_xp_raw(p, fixture_lookup, event)
+    raw, note = _player_xp_raw(p, fixture_lookup, event, gk_cs_dampener)
     gmod = _load_weights()["global_xP_modifier"]
     return round(max(raw, 0.0) * gmod, 2), note
 
@@ -1951,7 +2003,8 @@ def _is_on_tightrope(p: Dict[str, Any], event: Optional[int] = None) -> bool:
     return False
 
 
-def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> Tuple[float, str]:
+def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4,
+                       gk_cs_dampener: float = 1.0) -> Tuple[float, str]:
     """Multi-gameweek expected points with geometric decay over the horizon.
 
     xP_horizon = 1.0*xP(GW) + 0.85*xP(GW+1) + 0.70*xP(GW+2) + 0.55*xP(GW+3).
@@ -1978,7 +2031,7 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
     weights = HORIZON_WEIGHTS[:n] if n <= len(HORIZON_WEIGHTS) else HORIZON_WEIGHTS
     total = 0.0
     for i, w in enumerate(weights):
-        raw, _ = _player_xp_raw(p, fixture_lookup, start_event + i)
+        raw, _ = _player_xp_raw(p, fixture_lookup, start_event + i, gk_cs_dampener)
         total += w * raw
 
     # Proactive suspension tightrope: a player one yellow card away from a ban
@@ -2262,6 +2315,85 @@ def _pool_entry(e: Dict[str, Any], teams_by_id: Dict[int, str], xp: float, note:
         entry["eo"] = eo
     return entry
 
+
+def _transfer_hurdle_bar(position: str, sigma: float, hurdle_scale: float = 1.0) -> float:
+    """The per-leg objective penalty a single player (sell OR buy side of a
+    transfer) contributes to the in-objective search hurdle -- a pure
+    function so the positional scaling can be tested directly, independent
+    of building and solving a full MILP.
+
+    MID/FWD (multiplier 1.0) get bit-for-bit the pre-existing HURDLE_BASE.
+    GKP and DEF substitute the explicit, much larger POSITIONAL_HURDLE_
+    BASE_XP scaled by their own multiplier -- see that constant's docstring
+    for why it is not simply HURDLE_BASE * multiplier. `base` is split across
+    the two legs so a full swap costs `base` in total; sigma is charged per
+    leg because each side carries its own outcome volatility.
+    """
+    pos_mult = POSITIONAL_HURDLE_MULTIPLIER.get(position, 1.0)
+    base = POSITIONAL_HURDLE_BASE_XP * pos_mult if pos_mult != 1.0 else HURDLE_BASE
+    return hurdle_scale * (base / 2.0 + HURDLE_SIGMA_WEIGHT * sigma)
+
+
+def _locked_starting_gk(current_ids: List[Any], elements_by_id: Dict[Any, Dict[str, Any]],
+                        pool_by_id: Dict[Any, Dict[str, Any]],
+                        gk_hurdle_xp: float = GKP_TRANSFER_HURDLE_XP) -> Optional[Any]:
+    """The currently-owned goalkeeper the standard transfer solve must not
+    remove, or None if there is nothing to protect.
+
+    "Current starting GK" (Task 1.3): an owned GK with no injury/suspension/
+    doubt flag (raw status == 'a'), a fully-reported 100% chance of playing
+    (or no doubt reported at all), and >=60 projected minutes -- via the same
+    expected-minutes-fraction (`minutes_floor`, from _expected_playing_
+    fraction) the rest of the engine already uses to gate minutes-sensitive
+    decisions, since FPL does not publish a raw "projected minutes" field to
+    threshold against directly. A squad carries two GKs; at most one of them
+    is normally expected to actually start, so this never locks a backup.
+
+    Returns None (nothing to lock) when:
+      - no owned GK clears that health/certainty bar, e.g. the squad's
+        "starter" is himself injured or rotation risk this week; or
+      - the best alternative GK anywhere in the pool already clears the
+        elevated GKP hurdle on its own -- condition (a) from the spec: the
+        transfer is justified by the numbers even without a lock, so the
+        lock has nothing left to add and the (already-elevated) in-objective
+        hurdle is left to decide normally; or
+      - the player was never a candidate at all, e.g. current_ids is empty
+        or contains no GK -- condition (b) needs no separate override flag:
+        a player the user has already removed via Step 2's override is
+        simply not present in current_ids for this solve, so there is
+        nothing here to protect.
+    """
+    candidates = []
+    for pid in current_ids:
+        e = elements_by_id.get(pid)
+        entry = pool_by_id.get(pid)
+        if not e or not entry or entry.get("position") != "GK":
+            continue
+        if e.get("status") != "a":
+            continue
+        chance = e.get("chance_of_playing_next_round")
+        if chance is not None and chance < 100:
+            continue
+        if entry.get("minutes_floor", 0.0) < GK_LOCK_MIN_MINUTES_FLOOR:
+            continue
+        candidates.append(pid)
+    if not candidates:
+        return None
+    # The expected case is exactly one qualifying starter; if more than one
+    # somehow clears the bar, protect whichever projects the most minutes.
+    protected = max(candidates, key=lambda pid: pool_by_id[pid].get("minutes_floor", 0.0))
+
+    current_xp = pool_by_id[protected].get("xp", 0.0)
+    owned_gk_ids = {pid for pid in current_ids if pool_by_id.get(pid, {}).get("position") == "GK"}
+    best_alt = max(
+        (entry.get("xp", 0.0) for pid, entry in pool_by_id.items()
+         if entry.get("position") == "GK" and pid not in owned_gk_ids),
+        default=0.0)
+    if best_alt - current_xp >= gk_hurdle_xp:
+        return None
+    return protected
+
+
 def _solve_squad(
     pool: List[Dict[str, Any]],
     budget: float,
@@ -2277,6 +2409,7 @@ def _solve_squad(
     rival_ids: Optional[set] = None,
     cvar_scenarios: Optional[Dict[int, List[float]]] = None,
     bench_cap: Optional[float] = None,
+    locked_ids: Optional[set] = None,
 ) -> Tuple[Optional[List[int]], Optional[float], Dict[str, float]]:
     if not HAS_PULP:
         return None, None, {}
@@ -2304,6 +2437,21 @@ def _solve_squad(
 
     for t in {by_id[pid]["team_id"] for pid in ids}:
         prob += pulp.lpSum(x[pid] for pid in ids if by_id[pid]["team_id"] == t) <= 3, f"team_{t}"
+
+    # Active GK Lock: a hard veto on removing a specific, caller-identified
+    # player (a healthy, nailed starting goalkeeper), on top of -- not instead
+    # of -- the positional hurdle above. The caller (_locked_starting_gk) has
+    # already checked both escape hatches before passing this in: it returns
+    # nothing to lock when the best market alternative already clears the
+    # elevated GKP hurdle on its own, or when the player in question is not in
+    # this solve's must_include_ids at all (the user removed them via Step 2's
+    # own override, which needs no separate flag -- they are simply no longer
+    # part of the input). Not applied on Wildcard/Free Hit/unlimited solves,
+    # which are deliberate full rebuilds -- see the call site.
+    if locked_ids:
+        for pid in locked_ids:
+            if pid in by_id:
+                prob += x[pid] == 1, f"gk_lock_{pid}"
 
     # Objective. Back-up players are discounted to their autosub activation
     # probability: the reserve keeper ~5% (never comes on for partial cameos) and
@@ -2516,10 +2664,7 @@ def _solve_squad(
         hurdle_expr = 0.0
         for pid in ids if hurdle_scale > 0 else []:
             sigma = float(by_id[pid].get("sigma", 0.0) or 0.0)
-            # Base is split across the two legs so a swap costs HURDLE_BASE in
-            # total; sigma is charged per leg because each side carries its own
-            # outcome volatility.
-            bar = hurdle_scale * (HURDLE_BASE / 2.0 + HURDLE_SIGMA_WEIGHT * sigma)
+            bar = _transfer_hurdle_bar(by_id[pid]["position"], sigma, hurdle_scale)
             if pid in must_include_ids:
                 hurdle_expr = hurdle_expr + bar * (1 - x[pid])   # selling
             else:
@@ -2910,11 +3055,19 @@ def get_played_chips(manager_id: str) -> List[str]:
 
 
 def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
-                        n=PLAN_HORIZON, S=SAA_SCENARIOS, seed=7):
+                        n=PLAN_HORIZON, S=SAA_SCENARIOS, seed=7,
+                        gk_transfer_in_ids: Optional[set] = None):
     """Correlated SAA scenarios -> (saa_mean, matrix).
 
     Outcomes are coupled through shared team attack/defence latent shocks and a
     shared rotation-crisis minutes shock (never independent player draws).
+
+    `gk_transfer_in_ids`: player ids to evaluate as prospective transfers IN
+    for the GK Transfer-In Fragility Discount (Task 1.2) -- the multi-GW
+    planner (_plan_transfers_multi_gw) shares this same scenario base, so the
+    discount has to be threaded in here too, not just in the single-GW pool
+    build. A no-op for anyone not at GK; see GK_TRANSFER_IN_CS_DAMPENER.
+
     Returns:
       saa_mean: {pid: [mean xP over GW t=0..n-1]}
       matrix:   {pid: ndarray of shape (S, n)} -- SAMPLES down the rows,
@@ -2927,6 +3080,7 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
     bootstrap = _get_bootstrap()
     elements = {e["id"]: e for e in bootstrap.get("elements", [])}
     ids = [pid for pid in player_ids if pid in elements]
+    gk_transfer_in_ids = gk_transfer_in_ids or set()
 
     base = {}
     p0 = {}
@@ -2934,9 +3088,10 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
     pos_of = {}
     for pid in ids:
         e = elements[pid]
+        dampener = GK_TRANSFER_IN_CS_DAMPENER if pid in gk_transfer_in_ids else 1.0
         row = []
         for t in range(n):
-            xp, _ = _player_xp(e, fixture_lookup, event=event + t)
+            xp, _ = _player_xp(e, fixture_lookup, event=event + t, gk_cs_dampener=dampener)
             row.append(xp)
         base[pid] = row
         _p0, _pc, _pf = _minute_distribution(e, e.get("status", "a"))
@@ -3602,14 +3757,20 @@ def suggest_transfers_for_custom_squad(
         pos = POS_MAP.get(e["element_type"])
         if not pos:
             continue
-        xp, note = _player_xp_horizon(e, fixture_lookup, event)
+        # GK Transfer-In Fragility Discount (Task 1.2): applied only here, to
+        # players NOT already in the squad -- this loop IS "evaluating
+        # prospective transfers in". A no-op for every other position; see
+        # GK_TRANSFER_IN_CS_DAMPENER's docstring.
+        dampener = GK_TRANSFER_IN_CS_DAMPENER if pos == "GK" else 1.0
+        xp, note = _player_xp_horizon(e, fixture_lookup, event, gk_cs_dampener=dampener)
         if note in ("OUT", "Blank", "Injured", "Suspended", "Unavailable", "No minutes"):
             continue
         incoming_by_pos[pos].append((xp, note, e))
     for pos, entries in incoming_by_pos.items():
         entries.sort(key=lambda t: t[0], reverse=True)
+        dampener = GK_TRANSFER_IN_CS_DAMPENER if pos == "GK" else 1.0
         for xp, note, e in entries[:POOL_SHORTLIST.get(pos, 30)]:
-            xp_gw, _ = _player_xp(e, fixture_lookup, event=event)
+            xp_gw, _ = _player_xp(e, fixture_lookup, event=event, gk_cs_dampener=dampener)
             fdr = _player_fdr_list(e, fixture_lookup, event)
             pool.append(_pool_entry(e, teams_by_id, xp, note, pos, xp_gw=xp_gw, fdr=fdr, event=event,
                                     holding_map=holding_map,
@@ -3631,7 +3792,12 @@ def suggest_transfers_for_custom_squad(
     multi_gw_plan = []
     try:
         pool_ids = [p["id"] for p in pool]
-        saa_mean, scenario_matrix = _generate_scenarios(pool_ids, fixture_lookup, event, risk=risk)
+        # Everyone in the pool who is not currently owned is, by definition, a
+        # prospective transfer in -- gk_transfer_in_ids only actually changes
+        # anything for the GK ones (see _generate_scenarios).
+        gk_transfer_in_ids = set(pool_ids) - set(current_ids)
+        saa_mean, scenario_matrix = _generate_scenarios(
+            pool_ids, fixture_lookup, event, risk=risk, gk_transfer_in_ids=gk_transfer_in_ids)
         stress_scenarios = _select_stress_scenarios(scenario_matrix, selected_ids=current_ids)
         # Per-player outcome volatility for the Stage 3 search hurdle. Read
         # straight off the (S, n) matrix -- deliberately NOT via
@@ -3721,6 +3887,13 @@ def suggest_transfers_for_custom_squad(
     # ==============================================================
     # 1. Universe A: Standard Transfers Optimization (Takes Hit Penalty)
     # ==============================================================
+    # Active GK Lock (Task 1.3): only on the standard, limited-transfer
+    # solve. Never on the chip solves below -- Wildcard, Free Hit and a
+    # Bench Boost rebuild are deliberate full reshapes the user has
+    # explicitly asked for, where locking one player back in would be a
+    # surprising and unwanted constraint on a chip whose entire point is
+    # reconsidering the whole 15.
+    locked_gk_id = _locked_starting_gk(current_ids, elements_by_id, pool_by_id)
     std_selected, _std_obj, std_parts = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_charge, "max_transfers": max_transfers},
@@ -3736,6 +3909,7 @@ def suggest_transfers_for_custom_squad(
         holding_map=holding_map, current_gw=current_gw,
         eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
         cvar_scenarios=stress_scenarios,
+        locked_ids=({locked_gk_id} if locked_gk_id else None),
     )
     std_moves, std_hits, std_net, std_cost, std_breakdown = _get_moves(std_selected, False, std_parts)
     # The two post-solve vetoes were removed here.
