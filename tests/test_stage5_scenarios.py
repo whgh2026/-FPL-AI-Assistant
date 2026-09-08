@@ -169,6 +169,47 @@ class DoubleGameweekConsumersTest(unittest.TestCase):
             self.assertIn("🔵", lights, "a double must be visibly distinct")
 
 
+class FixtureTrafficLightBandsTest(unittest.TestCase):
+    """_fixture_traffic_light_bands: the structured banding data the mobile
+    UI overhaul renders as real circular badges instead of emoji glyphs (see
+    _pitch_fixture_dots_html). One source of truth -- _fixture_traffic_lights
+    must build its emoji string from exactly these bands, never a separately
+    computed banding, or the two renderers could silently disagree about
+    what a given fixture rates."""
+
+    def test_always_exactly_n_entries(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            bands = fpl_tools._fixture_traffic_light_bands(1, lookup, 1, n=4)
+            self.assertEqual(len(bands), 4)
+
+    def test_bands_are_one_of_the_known_values(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            for tid in lookup:
+                for band in fpl_tools._fixture_traffic_light_bands(tid, lookup, 1, n=4):
+                    self.assertIn(band, ("green", "amber", "red", "double", "blank"))
+
+    def test_blank_and_double_detected_structurally(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            blanker = next(tid for tid in lookup
+                           if not fpl_tools._gw_fixtures(lookup[tid], 9))
+            bands = fpl_tools._fixture_traffic_light_bands(blanker, lookup, 9, n=2)
+            self.assertIn("blank", bands)
+            self.assertIn("double", bands)
+
+    def test_emoji_string_is_built_from_exactly_these_bands(self):
+        """The two renderers (text emoji, real circular badges) must never
+        be able to silently disagree about a fixture's rating."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            bands = fpl_tools._fixture_traffic_light_bands(1, lookup, 1, n=4)
+            emoji = fpl_tools._fixture_traffic_lights(1, lookup, 1, n=4)
+            expected = "[" + " ".join(fpl_tools._TRAFFIC_LIGHT_EMOJI[b] for b in bands) + "]"
+            self.assertEqual(emoji, expected)
+
+
 class LiveCacheTest(unittest.TestCase):
     def test_cache_key_includes_the_gameweek(self):
         """Two gameweeks requested inside 60s used to return the first one's

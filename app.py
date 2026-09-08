@@ -472,14 +472,35 @@ def _headshot_tile(photo: str) -> str:
     return f'<div class="headshot" style="{_headshot_style(_photo_code(photo))}"></div>'
 
 
+def _badge_style(team_code) -> str:
+    """CSS background declaration for a club crest -- one background-image
+    layer over the class's own solid fallback surface, mirroring
+    _headshot_style's reasoning exactly: Streamlit strips onerror under
+    unsafe_allow_html, so there is no reliable way to detect a failed load
+    and swap in different content, and a SECOND layer (e.g. text sitting
+    behind the crest) risks bleeding through wherever a successfully-loaded,
+    transparent-background crest doesn't cover it. One layer cannot bleed
+    through itself."""
+    if not team_code:
+        return "background-image:none;"
+    return (f"background-image:url('{_badge_url(team_code)}');"
+            "background-size:contain;background-repeat:no-repeat;background-position:center;")
+
+
 def _badge_img(team_id, large: bool = False) -> str:
     ctx = _bootstrap_ctx()
     t = (ctx or {}).get("teams_by_id", {}).get(team_id, {})
     code = t.get("code")
-    if not code:
-        return ""
     cls = "badge-lg" if large else "badge-img"
-    return f'<img class="{cls}" src="{_badge_url(code)}" alt="">'
+    if not code:
+        # No crest mapped at all (an unmapped or missing team) previously
+        # rendered nothing -- a silent gap where a team identifier should
+        # be. This case can render a genuine, permanent text fallback: there
+        # is no image being attempted here at all, so no risk of the
+        # initials bleeding through a real crest that loads fine.
+        initials = (t.get("short_name") or "?")[:3].upper()
+        return f'<div class="badge-crest {cls}">{initials}</div>'
+    return f'<div class="badge-crest {cls}" style="{_badge_style(code)}"></div>'
 
 
 def _web_name(p) -> str:
@@ -678,12 +699,26 @@ def _radar_shortlists(kind: str, limit: int = 12):
 # ------------------------------------------------------------------
 # Football pitch view + side-by-side transfer cards
 # ------------------------------------------------------------------
+def _pitch_fixture_dots_html(team_id) -> str:
+    """Real, precisely-sized circular fixture-difficulty dots for a pitch
+    card -- a sized <span> per gameweek rather than an emoji glyph, so
+    mobile CSS can actually control width/height (an emoji's rendered size
+    is set by font-size and a platform's own emoji font, not by CSS
+    width/height). Same banding _fixture_traffic_lights already shows as
+    text elsewhere (the dropdown labels, the Fixtures tab), read
+    structurally via _fixture_traffic_light_bands so the two can never
+    silently disagree about what a given fixture rates."""
+    if team_id is None:
+        return '<div class="fx-dots"></div>'
+    ctx = _get_fixture_context()
+    if not ctx:
+        return '<div class="fx-dots"></div>'
+    bands = fpl_tools._fixture_traffic_light_bands(team_id, ctx["lookup"], ctx["start_event"])
+    dots = "".join(f'<span class="fx-dot fx-dot-{b}"></span>' for b in bands)
+    return f'<div class="fx-dots">{dots}</div>'
+
+
 def _pitch_player_html(p, role: str = None) -> str:
-    lights = ""
-    if p.get("team_id") is not None:
-        ctx = _get_fixture_context()
-        if ctx:
-            lights = fpl_tools._fixture_traffic_lights(p["team_id"], ctx["lookup"], ctx["start_event"]).strip("[]")
     role_html = ""
     if role == "C":
         role_html = '<span class="cap-pill">C</span>'
@@ -695,7 +730,7 @@ def _pitch_player_html(p, role: str = None) -> str:
         f'{_headshot_img(p)}'
         f'<div class="nm">{name} {role_html}</div>'
         f'<div class="meta">£{p.get("price", 0):.1f}m · {p.get("xp", 0):.2f} xP</div>'
-        f'<div class="fx-dots">{lights}</div>'
+        f'{_pitch_fixture_dots_html(p.get("team_id"))}'
         f'</div>'
     )
 
@@ -1134,7 +1169,7 @@ def _transfer_pair_html(moves) -> str:
             f'{in_tightrope}</div></div>'
             f'{_player_fixture_run_html(inn)}'
             f'</div>'
-            f'<div style="min-width:110px;text-align:right;">'
+            f'<div class="tc-score" style="min-width:110px;text-align:right;">'
             f'<div class="rot-score">+{m.get("xp_gain", 0)}</div>'
             f'<div class="tc-meta">xP · £{m.get("cost", 0):+.1f}m</div>'
             f'</div></div>'
@@ -2833,15 +2868,15 @@ with tab_players:
         for r in rows:
             lights = fpl_tools._fixture_traffic_lights(r["team"], lookup, start).strip("[]")
             grid += (
-                f'<div class="radar-card">'
-                f'<div style="display:flex;gap:8px;align-items:flex-start;">'
-                f'{_headshot_tile(r["photo"])}'
-                f'<div style="flex:1;min-width:0;">'
+                f'<div class="radar-card pmc">'
+                f'<div class="pmc-photo">{_headshot_tile(r["photo"])}</div>'
+                f'<div class="pmc-info">'
                 f'<div class="nm">{r["name"]}</div>'
                 f'<div class="meta">{r["pos"]} · {_badge_img(r["team"])} · £{r["price"]:.1f}m</div>'
                 f'<div class="meta">Owned {r["ownership"]:.1f}% · {lights}</div>'
-                f'<div style="font-weight:800;color:var(--pos);margin-top:4px;">{r["xp"]} xP</div>'
-                f'</div></div></div>'
+                f'</div>'
+                f'<div class="pmc-xp">{r["xp"]} xP</div>'
+                f'</div>'
             )
         grid += "</div>"
         sort_label = "xP per £1m" if kind == "Best Value" else "4-GW xP"

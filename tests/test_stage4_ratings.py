@@ -160,6 +160,75 @@ class PlayerFixtureRunTest(unittest.TestCase):
             self.assertTrue(all(r["is_blank"] for r in run))
 
 
+class GKTransferInDampenerTest(unittest.TestCase):
+    """Task 1.2: xCS * 4.0 * 0.85 -- a variance dampener on a prospective
+    goalkeeper signing's own clean-sheet xP, since a clean sheet is undone
+    by a single added-time concession. Applied only to a candidate being
+    evaluated as a transfer IN, never to a GK already owned."""
+
+    def test_dampener_strictly_reduces_a_gks_projected_xp(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            gk = next(e for e in bs["elements"] if e["element_type"] == 1 and e["team"] == 1)
+            undamped, _ = fpl_tools._player_xp(gk, lookup, event=EVENT)
+            damped, _ = fpl_tools._player_xp(
+                gk, lookup, event=EVENT, gk_cs_dampener=fpl_tools.GK_TRANSFER_IN_CS_DAMPENER)
+            self.assertLess(damped, undamped,
+                            "the dampener must strictly reduce a real GK's projection "
+                            "-- clean sheets are a nonzero share of its xP")
+            # Bounded: it discounts ONE component (clean sheets), not the
+            # whole projection, so the floor is the fully-dampened extreme.
+            self.assertGreater(damped, undamped * fpl_tools.GK_TRANSFER_IN_CS_DAMPENER)
+
+    def test_dampener_never_touches_a_defenders_xp(self):
+        """DEF shares the same CS_PTS entry (4 points for a clean sheet) as
+        GK -- the dampener must gate on the GK position specifically, not on
+        'anyone who scores for a clean sheet'."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            defender = next(e for e in bs["elements"] if e["element_type"] == 2 and e["team"] == 1)
+            undamped, _ = fpl_tools._player_xp(defender, lookup, event=EVENT)
+            damped, _ = fpl_tools._player_xp(defender, lookup, event=EVENT, gk_cs_dampener=0.85)
+            self.assertEqual(damped, undamped)
+
+    def test_default_dampener_is_a_no_op(self):
+        """Every existing call site across the codebase omits this argument
+        entirely -- it must be indistinguishable from passing 1.0."""
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            gk = next(e for e in bs["elements"] if e["element_type"] == 1)
+            default, _ = fpl_tools._player_xp(gk, lookup, event=EVENT)
+            explicit, _ = fpl_tools._player_xp(gk, lookup, event=EVENT, gk_cs_dampener=1.0)
+            self.assertEqual(default, explicit)
+
+    def test_horizon_projection_also_carries_the_dampener(self):
+        with harness.synthetic_world() as (bs, _fx):
+            lookup = fpl_tools._build_fixture_lookup(bs)
+            gk = next(e for e in bs["elements"] if e["element_type"] == 1 and e["team"] == 1)
+            undamped, _ = fpl_tools._player_xp_horizon(gk, lookup, EVENT)
+            damped, _ = fpl_tools._player_xp_horizon(
+                gk, lookup, EVENT, gk_cs_dampener=fpl_tools.GK_TRANSFER_IN_CS_DAMPENER)
+            self.assertLess(damped, undamped)
+
+    def test_wired_only_into_the_incoming_candidate_loop_not_the_owned_squad(self):
+        """suggest_transfers_for_custom_squad builds two separate pool loops
+        -- the manager's current 15, then the market shortlist. Only the
+        second is 'evaluating a prospective transfer in', so only its
+        _player_xp_horizon/_player_xp calls may pass gk_cs_dampener."""
+        src = open(os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "fpl_tools.py"), encoding="utf-8").read()
+        start = src.index("def suggest_transfers_for_custom_squad(")
+        owned_loop_start = src.index("for pid in current_ids:", start)
+        candidate_loop_start = src.index("incoming_by_pos = {", start)
+        candidate_loop_end = src.index("# Total purchasing power", candidate_loop_start)
+        owned_block = src[owned_loop_start:candidate_loop_start]
+        candidate_block = src[candidate_loop_start:candidate_loop_end]
+        self.assertNotIn("gk_cs_dampener", owned_block,
+                         "the owned squad's own xP must never be dampened")
+        self.assertIn("gk_cs_dampener", candidate_block,
+                      "the incoming-candidate loop must apply the dampener")
+
+
 class IdentificationTest(unittest.TestCase):
     """mu owns the scoring level; att and def are both centred."""
 

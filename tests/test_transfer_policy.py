@@ -28,9 +28,9 @@ def _run(squad, horizon, gwxp, notes, free_transfers, allow_hits=False, elements
     bootstrap = {"elements": elements,
                  "teams": [{"id": t, "name": "T%d" % t, "short_name": "T%d" % t} for t in range(1, 7)],
                  "events": [{"id": GW, "is_next": True, "finished": False}]}
-    def h(e, fl, ev, risk="balanced", n=4):
+    def h(e, fl, ev, risk="balanced", n=4, gk_cs_dampener=1.0):
         return horizon.get(e["id"], 12.0), notes.get(e["id"], "Available")
-    def g(e, fl, event=None, risk="balanced"):
+    def g(e, fl, event=None, risk="balanced", gk_cs_dampener=1.0):
         return gwxp.get(e["id"], 3.0), notes.get(e["id"], "Available")
     with mock.patch.object(fpl_tools, "_get_bootstrap", return_value=bootstrap), \
          mock.patch.object(fpl_tools, "_build_fixture_lookup", return_value={}), \

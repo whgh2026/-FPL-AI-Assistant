@@ -180,14 +180,48 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 .radar-card {background: var(--surface-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;}
 .radar-card .nm {font-weight: 700; font-size: 0.85rem; color: var(--text);}
 .radar-card .meta {color: var(--muted); font-size: 0.7rem;}
+/* Player-market card (.pmc): a unified grid so name/position-price/fixture-
+   dots and xP never drift relative to each other. Built with CSS Grid even
+   on desktop -- photo spans both rows on the left, info stacks in row 1,
+   xP sits under it in row 2 -- specifically so it reproduces today's exact
+   visual arrangement (this is not a new desktop look, just the old flex
+   layout expressed as grid), which makes the mobile-only re-flow to a
+   single 48px/1fr/auto row (see the 600px block) a pure grid-template
+   change with no markup difference between breakpoints. */
+.pmc {display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto auto; column-gap: 8px;}
+.pmc-photo {grid-column: 1; grid-row: 1 / 3; flex-shrink: 0;}
+.pmc-info {grid-column: 2; grid-row: 1; min-width: 0;}
+.pmc-xp {grid-column: 2; grid-row: 2; font-weight: 800; color: var(--pos); margin-top: 4px;}
 .cap-pill {background: var(--pos); color: var(--bg); font-weight: 800; font-size: 0.6rem; padding: 1px 5px; border-radius: 4px;}
 .photo-frame {position: relative; display: inline-block; line-height: 0;}
 .photo-frame .badge-overlay {position: absolute; right: -3px; bottom: -3px; line-height: 0;}
 .photo-frame .badge-overlay .badge-img {width: 18px; height: 18px; border-radius: 50%; background: var(--bg); border: 1px solid var(--bg);}
+/* Club crest fallback: a styled div (background-image), never a bare <img>
+   -- same reasoning as .headshot. An unmapped team (no `code` at all) has
+   no image attempt to fail, so it renders its short-name initials as a
+   genuine, permanent fallback rather than the silent gap this used to
+   leave; a real crest that 404s at runtime falls back to this class's own
+   solid surface colour, same as every other image on the page. */
+.badge-crest {display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background-color: var(--surface-2); color: var(--muted); font-weight: 800; vertical-align: middle; flex-shrink: 0;}
+.badge-crest.badge-img {width: 16px; height: 16px; font-size: 0.5rem;}
+.badge-crest.badge-lg {width: 28px; height: 28px; font-size: 0.62rem;}
 /* Pitch player cards: strict fixed dimensions so a 404 fallback never collapses the grid. */ .pitch-player {display: flex; flex-direction: column; align-items: center; gap: 3px; text-align: center; width: 96px;}
 .pitch-player .photo-frame {width: 65px; height: 85px; display: flex; align-items: center; justify-content: center;}
 .pitch-player .headshot {width: 65px; height: 85px; object-fit: cover; border-radius: 8px; display: block;}
-.pitch-player .fx-dots {font-size: 0.74rem; letter-spacing: 1.5px; white-space: nowrap;}
+/* Fixture-difficulty dots: real, precisely-sized circular elements, not
+   emoji glyphs -- an emoji's rendered size follows font-size and the
+   platform's own emoji font, which CSS width/height cannot touch, so on a
+   crowded mobile pitch card there was no reliable way to shrink or bound
+   them. A dedicated flex container keeps all four bound to their own
+   player's card and centred, so they can never visually collide into a
+   neighbouring card. */
+.fx-dots {display: flex; justify-content: center; align-items: center; gap: 3px; margin-top: 2px;}
+.fx-dot {display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--muted-2); flex-shrink: 0;}
+.fx-dot-green {background: var(--pos);}
+.fx-dot-amber {background: var(--warn);}
+.fx-dot-red {background: var(--neg);}
+.fx-dot-double {background: var(--info-2);}
+.fx-dot-blank {background: var(--muted-2); opacity: 0.5;}
 /* Pitch row position labels */ .pitch-row {display: flex; align-items: center; gap: 10px; margin: 14px 0;}
 .pitch-row-label {flex: 0 0 34px; font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em; text-align: center; text-transform: uppercase;}
 .pitch-row-cards {flex: 1; display: flex; justify-content: space-around; align-items: center; gap: 8px;}
@@ -202,7 +236,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
    circular FDR badge + opponent/venue + that gameweek's xP per cell. Sits
    inside .transfer-card, so the two tracks are already flex siblings via
    .transfer-pair and line up side-by-side automatically. */
-.fx-run {display: flex; gap: 4px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);}
+.fx-run {display: flex; flex-direction: row; justify-content: space-between; gap: 4px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line);}
 .fx-run-cell {flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 2px;}
 .fx-run-badge {width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.68rem; font-weight: 800; color: var(--bg); flex-shrink: 0;}
 .fx-run-badge.fx-run-blank {background: var(--surface-2); color: var(--muted); border: 1px dashed var(--line);}
@@ -240,10 +274,66 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
     .pitch-player .photo-frame, .pitch-player .headshot { display: none !important; }
     .pitch-player .nm { font-size: 0.65rem !important; }
     .pitch-player .meta { font-size: 0.58rem !important; }
-    .pitch-player .fx-dots { font-size: 0.62rem !important; letter-spacing: 0.5px !important; }
+    .pitch-player .fx-dot { width: 8px !important; height: 8px !important; }
     .dugout { padding: 10px 8px !important; }
     .dugout > div:last-child { gap: 4px !important; justify-content: space-evenly !important; }
   }
+
+/* Below 768px, forcing every row into one strict line (max-width:20% per
+   card, all five in the widest MID/DEF rows squeezed side by side) is what
+   overcrowded and truncated the cards on a genuinely narrow phone: a 5-man
+   line got ~70px per player -- not enough for a name, price/xP AND a row of
+   fixture dots without them running into the neighbouring card. Below
+   600px, cards wrap into a staggered layout instead (three per row, so a
+   5-man line reads as 3+2 and a back-4 gets real width on its own three-per-
+   row grid), each gets an explicit bounded surface so it is visually
+   obvious which name/price/dots belong together, and text/dots are tuned
+   down to fit that surface. This block also covers the two other narrow-
+   viewport fixes bundled with the same pass: "The move" card's transfer
+   pair stacking vertically instead of squeezing two cards side by side, and
+   the player-market card grid re-flowing to a single 48px/1fr/auto row.
+   All of it additive to the 768px block above and must come after it in
+   the file -- both match below 600px, and later !important rules win the
+   tie on shared selectors. Desktop (>=600px) is untouched: nothing here is
+   reachable above this breakpoint. */
+@media (max-width: 600px) {
+    .pitch-row-cards { flex-wrap: wrap !important; justify-content: center !important; gap: 6px 4px !important; }
+    .pitch-player {
+        flex: 0 1 30% !important;
+        max-width: 30% !important;
+        background: rgba(15, 23, 42, 0.7) !important;
+        border: 1px solid rgba(255, 255, 255, 0.08) !important;
+        border-radius: 6px !important;
+        padding: 4px 3px !important;
+    }
+    .pitch-player .nm { font-size: 0.70rem !important; line-height: 1.1 !important; text-overflow: ellipsis !important; }
+    .pitch-player .meta { font-size: 0.65rem !important; }
+    .pitch-player .fx-dot { width: 7px !important; height: 7px !important; margin: 0 1px !important; }
+    .dugout > div:last-child { justify-content: center !important; }
+
+    /* "The move" card (Step 3): side-by-side Transfer Out/In no longer fits
+       below 600px without truncating names and colliding the two 4-fixture
+       tracks -- stacked full-width, each card gets real room and the
+       fixture badges (below) have no neighbouring card left to collide
+       into. */
+    .transfer-pair { flex-direction: column !important; align-items: stretch !important; gap: 8px !important; }
+    .transfer-card { width: 100% !important; max-width: 100% !important; }
+    .transfer-arrow { align-self: center !important; transform: rotate(90deg) !important; }
+    .tc-score { min-width: 0 !important; width: 100% !important; text-align: center !important; display: flex !important; align-items: center !important; justify-content: center !important; gap: 8px !important; }
+
+    /* The fixture track was already flex/row/space-between with each cell
+       flex:1;min-width:0 (see .fx-run-cell) -- a full-width stacked card
+       gives that row enough room on its own; nothing further needed here. */
+
+    /* Player-market cards (.pmc: Radar Shortlists): re-flow the same three
+       pieces (photo/info/xp) from the two-row desktop grid into the
+       requested single-row 48px/1fr/auto -- no markup difference between
+       breakpoints, only which grid cells they're placed in. */
+    .pmc { grid-template-columns: 48px 1fr auto !important; grid-template-rows: auto !important; column-gap: 8px !important; align-items: center !important; }
+    .pmc-photo { grid-row: 1 !important; grid-column: 1 !important; }
+    .pmc-info { grid-row: 1 !important; grid-column: 2 !important; }
+    .pmc-xp { grid-row: 1 !important; grid-column: 3 !important; margin-top: 0 !important; white-space: nowrap; }
+}
 .note{font-size:0.78rem;color:var(--muted-2);margin:6px 0 10px 0;}
 .note-inline{font-size:0.8rem;color:var(--muted);}
 
