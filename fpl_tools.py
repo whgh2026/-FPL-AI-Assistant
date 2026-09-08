@@ -1129,30 +1129,46 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
     return lookup
 
 
-def _fixture_traffic_lights(team_id: int, fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> str:
-    """Return a 4-GW traffic-light string, e.g. '[🟢 🟡 🔴 🟢]'.
+_TRAFFIC_LIGHT_EMOJI = {"green": "🟢", "amber": "🟡", "red": "🔴", "double": "🔵", "blank": "⚪"}
+
+
+def _fixture_traffic_light_bands(team_id: int, fixture_lookup: Dict[int, List[Dict[str, Any]]],
+                                 start_event: int, n: int = 4) -> List[str]:
+    """The traffic-light band per gameweek ("green"/"amber"/"red"/"double"/
+    "blank"), always exactly n entries -- the data _fixture_traffic_lights
+    renders as emoji text and the pitch-view fixture badges render as sized
+    circular elements. One source of truth for the banding logic so the two
+    renderers can never silently disagree about what a given fixture rates.
 
     Uses market-implied win probability when available, falling back to FDR.
     """
     fixtures = fixture_lookup.get(team_id, [])
-    lights: List[str] = []
+    bands: List[str] = []
     for i in range(n):
         fxs = _gw_fixtures(fixtures, start_event + i)
         if not fxs:
-            lights.append("⚪")           # blank gameweek
+            bands.append("blank")
             continue
         # A double gets its own marker rather than being shown as whichever
         # single fixture happened to come first in the list.
-        double = len(fxs) > 1
+        if len(fxs) > 1:
+            bands.append("double")
+            continue
         wps = [f.get("win_prob") for f in fxs if f.get("win_prob") is not None]
         if wps:
             wp = sum(wps) / len(wps)
-            light = "🟢" if wp > 0.5 else ("🟡" if wp >= 0.3 else "🔴")
+            band = "green" if wp > 0.5 else ("amber" if wp >= 0.3 else "red")
         else:
             opp_def = sum(_to_float(f.get("opp_strength_def") or 3) for f in fxs) / len(fxs)
-            light = "🟢" if opp_def <= 2.0 else ("🟡" if opp_def <= 3.2 else "🔴")
-        lights.append("🔵" if double else light)
-    return "[" + " ".join(lights) + "]"
+            band = "green" if opp_def <= 2.0 else ("amber" if opp_def <= 3.2 else "red")
+        bands.append(band)
+    return bands
+
+
+def _fixture_traffic_lights(team_id: int, fixture_lookup: Dict[int, List[Dict[str, Any]]], start_event: int, n: int = 4) -> str:
+    """Return a 4-GW traffic-light string, e.g. '[🟢 🟡 🔴 🟢]'."""
+    bands = _fixture_traffic_light_bands(team_id, fixture_lookup, start_event, n)
+    return "[" + " ".join(_TRAFFIC_LIGHT_EMOJI[b] for b in bands) + "]"
 
 # NOTE (C28): _expected_minute_fraction was deleted here.
 #

@@ -643,6 +643,59 @@ class FixtureRunTest(unittest.TestCase):
         self.assertIn("specific fixture.", block)
 
 
+class MobileOverhaulStructureTest(unittest.TestCase):
+    """Source-level wiring checks for the mobile-first overhaul: the parts
+    that aren't expressible as a pure CSS regex (which function renders
+    what, which markup carries which class)."""
+
+    def test_pitch_player_uses_the_real_dot_renderer_not_the_emoji_string(self):
+        src = _app_source()
+        start = src.index("def _pitch_player_html(")
+        end = src.index("\ndef ", start + 1)
+        block = src[start:end]
+        self.assertIn("_pitch_fixture_dots_html(", block)
+        self.assertNotIn("_fixture_traffic_lights(", block,
+                         "the pitch card must render real circular badges, "
+                         "not the emoji string meant for text contexts")
+
+    def test_badge_img_never_emits_a_bare_img_tag(self):
+        """Same reasoning as _headshot_tile: a bare <img> has no CSS-only
+        fallback under unsafe_allow_html (Streamlit strips onerror), so a
+        404 or an unmapped team must fail onto a styled div, never a raw
+        <img src=...> the browser can paint a broken-image icon for."""
+        src = _app_source()
+        start = src.index("def _badge_img(")
+        end = src.index("\ndef ", start + 1)
+        block = src[start:end]
+        self.assertNotIn("<img", block)
+        self.assertIn("badge-crest", block)
+
+    def test_badge_img_falls_back_to_initials_when_no_crest_is_mapped(self):
+        src = _app_source()
+        start = src.index("def _badge_img(")
+        end = src.index("\ndef ", start + 1)
+        block = src[start:end]
+        self.assertIn("short_name", block,
+                      "the no-code branch must derive initials from the team's short_name")
+
+    def test_transfer_pair_score_block_carries_the_mobile_hook_class(self):
+        src = _app_source()
+        start = src.index("def _transfer_pair_html(")
+        end = src.index("\ndef ", start + 1)
+        block = src[start:end]
+        self.assertIn('class="tc-score"', block)
+
+    def test_radar_shortlists_card_uses_the_pmc_grid(self):
+        src = _app_source()
+        start = src.index("Player Radar Shortlists")
+        end = src.index("st.markdown(_card(grid,", start)
+        block = src[start:end]
+        self.assertIn('class="radar-card pmc"', block)
+        self.assertIn('class="pmc-photo"', block)
+        self.assertIn('class="pmc-info"', block)
+        self.assertIn('class="pmc-xp"', block)
+
+
 class StylesheetTest(unittest.TestCase):
     def test_no_hardcoded_hex_outside_root(self):
         """The Stage 7 gate. One #fff had survived on .pc .pos."""
@@ -834,15 +887,17 @@ class StylesheetTest(unittest.TestCase):
         self.assertIn("0.65rem", meta.group(1))
 
     def test_fixture_dots_are_scaled_down_below_600px(self):
-        """.fx-dots is emoji text, not a sized element -- width/height do not
-        apply to inline text, so the scale-down has to be font-size, not the
-        literal width/height a naive reading of the spec would reach for."""
+        """The pitch card's fixture indicator is now real circular <span>
+        elements (fx-dot), not emoji glyphs -- rendered via
+        _pitch_fixture_dots_html so mobile CSS can size them directly with
+        width/height, exactly as requested (7px x 7px, margin: 0 1px)."""
         block = self._media_block(self._css(), 600)
-        m = re.search(r"\.pitch-player \.fx-dots\s*\{([^}]*)\}", block)
-        self.assertIsNotNone(m, ".pitch-player .fx-dots rule not found in the 600px block")
+        m = re.search(r"\.pitch-player \.fx-dot\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(m, ".pitch-player .fx-dot rule not found in the 600px block")
         rule = m.group(1)
-        self.assertIn("font-size", rule)
-        self.assertNotIn("width:", rule.replace("min-width:", "").replace("max-width:", ""))
+        self.assertIn("width: 7px", rule)
+        self.assertIn("height: 7px", rule)
+        self.assertIn("margin: 0 1px", rule)
 
     def test_desktop_pitch_player_rule_is_unreachable_below_600px_only(self):
         """Requirement 4: >=600px must be untouched. The base (non-media)
@@ -856,6 +911,74 @@ class StylesheetTest(unittest.TestCase):
         # bounded-card background -- that would leak onto every viewport.
         for m in re.finditer(r"\.pitch-player\s*\{([^}]*)\}", base_css):
             self.assertNotIn("rgba(15, 23, 42, 0.7)", m.group(1))
+
+    def test_transfer_pair_stacks_vertically_below_600px(self):
+        block = self._media_block(self._css(), 600)
+        pair = re.search(r"\.transfer-pair\s*\{([^}]*)\}", block)
+        card = re.search(r"\.transfer-card\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(pair, ".transfer-pair rule not found in the 600px block")
+        self.assertIsNotNone(card, ".transfer-card rule not found in the 600px block")
+        self.assertIn("flex-direction: column", pair.group(1))
+        self.assertIn("width: 100%", card.group(1))
+
+    def test_transfer_score_block_goes_full_width_and_centres_below_600px(self):
+        """The trailing +xP/cost block is right-aligned at a fixed min-width
+        on desktop (it sits at the end of a horizontal row) -- stacked
+        below the two cards it has to drop that and centre itself instead,
+        or it reads as oddly pinned to the right of an otherwise full-width
+        column."""
+        block = self._media_block(self._css(), 600)
+        m = re.search(r"\.tc-score\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(m, ".tc-score rule not found in the 600px block")
+        rule = m.group(1)
+        self.assertIn("width: 100%", rule)
+        self.assertIn("text-align: center", rule)
+
+    def test_fixture_run_row_is_explicit_row_with_space_between(self):
+        """Belt-and-suspenders on top of the existing flex:1 cells -- the
+        literal layout requested for the 4-fixture track."""
+        css = self._css()
+        m = re.search(r"\.fx-run\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(m, ".fx-run rule not found")
+        rule = m.group(0)
+        self.assertIn("flex-direction: row", rule)
+        self.assertIn("justify-content: space-between", rule)
+
+    def test_player_market_card_grid_exists_and_reflows_on_mobile(self):
+        """.pmc: the unified grid for player-market/list cards (Radar
+        Shortlists). Desktop keeps today's visual arrangement (photo
+        spanning two rows, info/xP stacked beside it) expressed as grid;
+        mobile re-flows the SAME three pieces into the requested single-row
+        48px/1fr/auto, with no markup difference between breakpoints."""
+        css = self._css()
+        base = re.search(r"(?<!\.)\.pmc\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(base, "base .pmc grid rule not found")
+        self.assertIn("display: grid", base.group(1))
+        block = self._media_block(css, 600)
+        mobile = re.search(r"\.pmc\s*\{([^}]*)\}", block)
+        self.assertIsNotNone(mobile, ".pmc rule not found in the 600px block")
+        rule = mobile.group(1)
+        self.assertIn("48px", rule)
+        self.assertIn("1fr", rule)
+        self.assertIn("auto", rule)
+
+    def test_badge_crest_fallback_is_circular(self):
+        css = self._css()
+        m = re.search(r"\.badge-crest\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(m, ".badge-crest rule not found")
+        self.assertIn("border-radius: 50%", m.group(1))
+
+    def test_fx_dot_is_a_real_sized_circle_by_default(self):
+        """The base (desktop) rule must exist too, not just the mobile
+        override -- .fx-dot has to be a real element at every breakpoint
+        for the mobile rule to have anything to resize."""
+        css = self._css()
+        base_rule_end = css.index("@media (max-width: 768px)")
+        m = re.search(r"(?<!-)\.fx-dot\s*\{([^}]*)\}", css[:base_rule_end])
+        self.assertIsNotNone(m, "base .fx-dot rule not found before the first media query")
+        rule = m.group(1)
+        self.assertIn("border-radius: 50%", rule)
+        self.assertIn("width:", rule)
 
 
 class ModelHealthDataTest(unittest.TestCase):

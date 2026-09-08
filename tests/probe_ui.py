@@ -250,6 +250,34 @@ def main():
           fx_run_count == 2,
           f"expected 2 fixture tracks (out + in), found {fx_run_count}")
 
+    # ---- pitch-view fixture dots: real circular elements, not emoji ------
+    dots_html = app._pitch_fixture_dots_html(any_team_id)
+    check("pitch_fixture_dots_renders_four_real_dots",
+          dots_html.count('class="fx-dot ') == 4, dots_html)
+    import re as _re
+    band_classes = _re.findall(r'fx-dot fx-dot-(\w+)', dots_html)
+    check("pitch_fixture_dots_uses_known_band_classes",
+          len(band_classes) == 4 and
+          all(b in ("green", "amber", "red", "double", "blank") for b in band_classes),
+          f"{band_classes!r} from {dots_html!r}")
+    check("pitch_fixture_dots_no_emoji_leaks_through",
+          not any(e in dots_html for e in ("🟢", "🟡", "🔴", "🔵", "⚪")),
+          dots_html)
+    check("pitch_fixture_dots_handles_missing_team_id",
+          app._pitch_fixture_dots_html(None) == '<div class="fx-dots"></div>')
+
+    # ---- club-crest fallback: styled div, initials when no code mapped ----
+    crest_html = app._badge_img(any_team_id)
+    check("badge_img_is_not_a_bare_img_tag", "<img" not in crest_html, crest_html)
+    check("badge_img_carries_the_crest_class", "badge-crest" in crest_html, crest_html)
+
+    fake_team_id = "no-such-team-id"
+    fallback_html = app._badge_img(fake_team_id)
+    check("badge_img_falls_back_to_something_for_an_unmapped_team",
+          fallback_html != "", "an unmapped team must not render nothing")
+    check("badge_img_fallback_is_still_the_crest_class",
+          "badge-crest" in fallback_html, fallback_html)
+
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) failed:")
         for f in FAILURES:
