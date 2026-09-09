@@ -524,12 +524,23 @@ class SectionCaptionTest(unittest.TestCase):
         self.assertIn("highest net expected points", block)
 
     def test_rolling_transfer_plan_caption(self):
+        """D6 honesty repair: the interactive solver profile returns a
+        time-limited incumbent with no proven bound (see the audit's own
+        'Honesty repairs' section, which already fixed the identical
+        overclaim once elsewhere in this file), so this caption must not
+        claim the schedule is 'mathematically optimal' either."""
         src = _app_source()
         start = src.index('"🗓️ The next few weeks"')
         block = src[max(0, start - 400):start]
-        self.assertIn("mathematically optimal gameweek-by-gameweek transfer", block)
-        self.assertIn("bank free transfers", block)
-        self.assertIn("carries forward", block)
+        self.assertIn("gameweek-by-gameweek transfer trajectory", block)
+        self.assertIn("bank timing", block)
+        # Adjacent string literals in app.py -- "squad " and "carryover..."
+        # are separate fragments, so checked separately (same convention as
+        # ChipCopyTest.test_new_chip_header_and_caption_present above).
+        self.assertIn("and squad ", block)
+        self.assertIn("carryover within your solve horizon", block)
+        self.assertNotIn("mathematically optimal", block,
+                         "the optimality overclaim this test used to pin survived the D6 copy pass")
 
     def test_bookies_signal_description_is_plain_english(self):
         """Step 1's Gaffer's Positional Diagnostic legend, 'Bookies' column --

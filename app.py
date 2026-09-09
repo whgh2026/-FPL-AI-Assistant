@@ -2224,9 +2224,9 @@ with tab_planner:
                         "mandatory moves."
                     )
                     st.caption(
-                        "The mathematically optimal gameweek-by-gameweek transfer "
-                        "sequence, showing when to bank free transfers, when to spend "
-                        "them, and how your squad carries forward."
+                        "Projected gameweek-by-gameweek transfer trajectory, "
+                        "illustrating bank timing, spend sequence, and squad "
+                        "carryover within your solve horizon."
                     )
                     st.markdown(_card("".join(rows), "🗓️ The next few weeks"), unsafe_allow_html=True)
                     # The same schedule, laid out as a Gantt-style timeline, now
