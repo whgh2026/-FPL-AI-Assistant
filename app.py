@@ -2195,15 +2195,31 @@ with tab_planner:
                         buys = ", ".join(s["buys"]) or "—"
                         sells = ", ".join(s["sells"]) or "—"
                         hit = f" (-{4 * s['hits']})" if s.get("hits") else ""
+                        # Surface Wildcard/Free Hit weeks in the title itself --
+                        # without this, a chip solve (0-hit multi-transfer burst)
+                        # reads as an unexplained anomaly rather than the chip
+                        # play it actually is.
+                        chip = s.get("chip")
+                        badge = (f' <span style="color:var(--warn);font-weight:800;'
+                                 f'white-space:nowrap;">[{chip} Active]</span>') if chip else ""
+                        gw_flex = "flex:0 0 auto;" if chip else "flex:0 0 52px;"
                         rows.append(
                             f'<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid #1e293b;align-items:flex-start;">'
-                            f'<div style="flex:0 0 52px;font-weight:800;color:var(--info);">GW{s["gw"]}</div>'
+                            f'<div style="{gw_flex}font-weight:800;color:var(--info);white-space:nowrap;">GW{s["gw"]}{badge}</div>'
                             f'<div style="flex:1;min-width:0;">'
                             f'<div class="tc-meta">Sell: {sells}</div>'
                             f'<div class="tc-meta">Buy: {buys}</div>'
                             f'<div class="tc-meta">Transfers: {s["transfers"]}{hit} · FT after: {s["ft_after"]} · Bank: £{s["bank_after"]:.1f}m</div>'
                             f'</div></div>'
                         )
+                    st.markdown(
+                        "> **Strategic Advisory:** This multi-gameweek roadmap illustrates "
+                        "an unconstrained mathematical trajectory. Elite managers frequently "
+                        "roll free transfers early in the season to build flexibility (up to "
+                        "the 5-FT cap). Treat multi-transfer sequences and early chip "
+                        "activations as optional scenarios to stress-test your squad, not "
+                        "mandatory moves."
+                    )
                     st.caption(
                         "The mathematically optimal gameweek-by-gameweek transfer "
                         "sequence, showing when to bank free transfers, when to spend "

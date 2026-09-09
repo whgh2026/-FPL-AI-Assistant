@@ -4,6 +4,7 @@ from unittest import mock
 import pulp
 
 import fpl_tools
+from tests import harness
 
 
 def _element(pid, team, pos_id, ow=20.0, minutes=1000, starts=10):
@@ -173,6 +174,160 @@ class PlannerTest(unittest.TestCase):
                              f"the week after Free Hit must show no changes "
                              f"to the persistent squad: {following}")
             self.assertIsNone(following["chip"])
+
+    def _pool_tempting_a_rebuy(self):
+        """Two MID candidates share a scarce club slot (team 9 already holds
+        two DEF fillers, so the <=3-per-club cap leaves room for only one of
+        them at a time) and their xp curves cross twice: 'mid_swing' is best
+        in weeks 1, 2 and 4 but worst in week 3, 'alt_swing' is the mirror
+        image. Taken at face value week by week, the highest-xp path sells
+        mid_swing for alt_swing in week 3 and buys mid_swing straight back in
+        week 4 -- a real sell-then-rebuy of the identical player, not a
+        different player filling the same slot. Confirmed by disabling the
+        no_rebuy_* constraints: the unconstrained solver reaches for exactly
+        that flip-flop on this fixture."""
+        pid = [0]
+
+        def entry(pos, team, price, xp):
+            pid[0] += 1
+            return {"id": pid[0], "name": f"P{pid[0]}", "team_id": team, "team": f"T{team}",
+                    "position": pos, "price": price, "xp": xp, "status": "Available",
+                    "on_yellow_card_tightrope": False, "minutes_floor": 1.0, "sell_price": price}
+
+        filler9a = entry("DEF", 9, 4.0, 3.0)
+        filler9b = entry("DEF", 9, 4.0, 3.0)
+        current = ([entry("GK", 1, 4.0, 3.0), entry("GK", 2, 4.0, 3.0)]
+                   + [entry("DEF", 3, 4.0, 3.0), entry("DEF", 4, 4.0, 3.0), entry("DEF", 5, 4.0, 3.0),
+                      filler9a, filler9b]
+                   + [entry("MID", 6, 4.5, 3.0), entry("MID", 7, 4.5, 3.0), entry("MID", 8, 4.5, 3.0),
+                      entry("MID", 10, 4.5, 3.0), entry("MID", 14, 4.5, 3.0)]
+                   + [entry("FWD", 11, 4.5, 3.0), entry("FWD", 12, 4.5, 3.0), entry("FWD", 13, 4.5, 3.0)])
+        # Both candidates sit on team 9 alongside the two DEF fillers already
+        # in the squad, so holding both at once would need four team-9 slots
+        # -- one more than the <=3-per-club cap allows.
+        mid_swing = entry("MID", 9, 5.0, 3.0)
+        alt_swing = entry("MID", 9, 5.0, 3.0)
+        pool = current + [mid_swing, alt_swing]
+        saa_mean = {p["id"]: [p["xp"]] * 4 for p in pool}
+        saa_mean[mid_swing["id"]] = [9.0, 9.0, 1.0, 9.0]
+        saa_mean[alt_swing["id"]] = [3.0, 3.0, 7.0, 3.0]
+        return pool, {p["id"] for p in current}, saa_mean, mid_swing["name"], alt_swing["name"]
+
+    def test_no_immediate_rebuy_after_a_sale(self):
+        """The reported defect: the planner sold a player one week and bought
+        the same player back a couple of weeks later for a real hit, netting
+        no squad change but paying transfer cost twice. Both chips are
+        blocked for the whole horizon so this isolates the persistent
+        ownership chain (a chip's one-off Free Hit squad legitimately may
+        re-select a previously-sold player at no extra cost -- that is not
+        the churn being guarded against here)."""
+        saved_profile = fpl_tools.get_solver_profile()
+        fpl_tools.set_solver_profile("deterministic")
+        try:
+            pool, current_ids, saa_mean, mid_swing_name, _alt_swing_name = self._pool_tempting_a_rebuy()
+            chip_ledger = fpl_tools.ChipLedger.from_history([("Wildcard", 5), ("Free Hit", 5)])
+            schedule = fpl_tools._plan_transfers_multi_gw(
+                pool, 100.0, 5, current_ids, saa_mean, event=10, n=4, chip_ledger=chip_ledger)
+        finally:
+            fpl_tools.set_solver_profile(saved_profile)
+
+        # buys/sells hold player *names* (see _plan_transfers_multi_gw), not ids.
+        sold_by = {}
+        for t, s in enumerate(schedule):
+            for name in s["sells"]:
+                sold_by.setdefault(name, t)
+            for name in s["buys"]:
+                self.assertNotIn(
+                    name, sold_by,
+                    f"player {name!r} was sold at week {sold_by.get(name)} and "
+                    f"bought back at week {t} -- a churn re-buy: {schedule}")
+        # The scenario is only a real test of the guard if the tempting flip
+        # actually appears as a sale at some point -- otherwise this would
+        # pass trivially because nothing relevant happened. (Confirmed
+        # separately: with the no_rebuy_* constraints disabled, this exact
+        # fixture sells mid_swing in week 3 and buys it straight back in
+        # week 4.)
+        self.assertIn(mid_swing_name, sold_by,
+                      f"fixture never sold mid_swing; scenario doesn't exercise the guard: {schedule}")
+
+
+EVENT = 4
+
+
+class BankCashWiringTest(unittest.TestCase):
+    """_plan_transfers_multi_gw takes two distinct money figures: `budget`
+    (bank + the sell value of the whole current squad -- total purchasing
+    power, used to cap what the solver may ever hold) and `bank_cash` (real
+    liquid cash, used to seed bank[0]). Collapsing them into one would leave
+    a squad worth ~100m read as ~100m sitting in the bank, so a plan with no
+    transfers at all would still misreport what's actually spendable.
+
+    This was already correct at both levels when checked (bank0's own
+    constraint reads `bank_cash if bank_cash is not None else budget`, and
+    suggest_transfers_for_custom_squad's call site passes bank_cash=bank, the
+    small figure, never budget, the large one) -- these tests exist to keep
+    it that way."""
+
+    def test_plan_transfers_multi_gw_seeds_bank_from_bank_cash_not_budget(self):
+        pool = []
+        pid = 0
+
+        def entry(pos, team, price=5.0):
+            nonlocal pid
+            pid += 1
+            return {"id": pid, "name": "P%d" % pid, "team_id": team, "team": "T%d" % team,
+                    "position": pos, "price": price, "xp": 5.0, "status": "Available",
+                    "on_yellow_card_tightrope": False, "minutes_floor": 1.0, "sell_price": price}
+
+        pool.append(entry("GK", 1, 4.5))
+        pool.append(entry("GK", 2, 4.0))
+        for t in range(1, 6):
+            pool.append(entry("DEF", t, 4.5))
+        for t in [3, 4, 5, 6, 1]:
+            pool.append(entry("MID", t, 6.0))
+        for t in [2, 3, 4]:
+            pool.append(entry("FWD", t, 6.5))
+        for t in [5, 6, 5, 6]:
+            pool.append(entry("FWD", t, 7.0))
+        current_ids = {p["id"] for p in pool[:15]}
+        saa_mean = {p["id"]: [p["xp"]] * 4 for p in pool}
+        # Total purchasing power (bank + full squad sell value) is huge; real
+        # liquid cash is a fraction of a million. A no-transfer week's
+        # bank_after must track the small figure.
+        total_sell = sum(p["price"] for p in pool[:15])
+        budget = 0.3 + total_sell
+        self.assertGreater(budget, 50.0, "fixture must make the two figures obviously distinguishable")
+
+        schedule = fpl_tools._plan_transfers_multi_gw(
+            pool, budget, 1, current_ids, saa_mean, event=10, n=4, bank_cash=0.3)
+        for s in schedule:
+            self.assertLess(
+                s["bank_after"], 20.0,
+                f"bank_after tracked total purchasing power ({budget:.1f}) "
+                f"instead of real liquid cash (0.3): {s}")
+
+    def test_end_to_end_call_site_passes_bank_cash_not_budget(self):
+        """The lower-level unit test above proves _plan_transfers_multi_gw
+        itself honours bank_cash when given it; this proves the real caller,
+        suggest_transfers_for_custom_squad, actually supplies the small figure
+        rather than the combined one -- the wiring the reported defect was
+        really about."""
+        with harness.synthetic_world() as (bs, _fx):
+            squad = harness.squad_as_manager_input(bs, harness.build_squad(bs, "balanced"))
+            total_squad_value = sum(p["price"] for p in squad)
+            self.assertGreater(total_squad_value, 50.0,
+                               "fixture squad must be worth much more than the tiny bank below")
+            res = fpl_tools.suggest_transfers_for_custom_squad(
+                squad, bank=0.3, free_transfers=1, eval_chips=[],
+                event=EVENT, risk="balanced", holding_map=None, current_gw=EVENT,
+                allow_hits=False)
+        plan = res.get("multi_gw_plan") or []
+        self.assertTrue(plan, "expected a multi-GW plan to be produced")
+        for s in plan:
+            self.assertLess(
+                s["bank_after"], 20.0,
+                f"bank_after tracked squad value (~{total_squad_value:.1f}) rather "
+                f"than the manager's real £0.3m bank: {s}")
 
 
 class FreeTransferStateMachineTest(unittest.TestCase):

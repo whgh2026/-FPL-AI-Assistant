@@ -981,6 +981,50 @@ class StylesheetTest(unittest.TestCase):
         self.assertIn("width:", rule)
 
 
+class RoadmapAdvisoryAndChipBadgeTest(unittest.TestCase):
+    """'The next few weeks' card (My Plan, Step 2's multi-GW schedule) needed
+    a strategic caveat above it -- an unconstrained MIP trajectory reads as a
+    mandate otherwise -- and a way to tell a chip solve (an 11-transfer, 0-hit
+    week) apart from an ordinary week, since nothing in the card previously
+    said a chip was even in play."""
+
+    def _next_few_weeks_block(self):
+        src = _app_source()
+        start = src.index("# ---- Multi-GW Transfer Schedule ----")
+        end = src.index("Is your squad set up right?", start)
+        return src[start:end]
+
+    def test_strategic_advisory_present_above_the_card(self):
+        # Adjacent string literals in app.py -- checked as separate fragments
+        # since the raw source has quotes/indentation between them (same
+        # convention as ChipCopyTest.test_new_chip_header_and_caption_present
+        # above).
+        block = self._next_few_weeks_block()
+        self.assertIn("Strategic Advisory:** This multi-gameweek roadmap illustrates ", block)
+        self.assertIn("an unconstrained mathematical trajectory. Elite managers frequently ", block)
+        self.assertIn("roll free transfers early in the season to build flexibility (up to ", block)
+        self.assertIn("the 5-FT cap). Treat multi-transfer sequences and early chip ", block)
+        self.assertIn("activations as optional scenarios to stress-test your squad, not ", block)
+        self.assertIn("mandatory moves.", block)
+        advisory_pos = block.index("Strategic Advisory")
+        card_pos = block.index('"🗓️ The next few weeks"')
+        self.assertLess(advisory_pos, card_pos,
+                        "the advisory must render above the roadmap card, not below it")
+
+    def test_chip_weeks_are_badged_in_the_gameweek_title(self):
+        block = self._next_few_weeks_block()
+        self.assertIn('chip = s.get("chip")', block)
+        self.assertIn("[{chip} Active]", block,
+                     "the GW title must be labelled '[<Chip> Active]' when a "
+                     "Wildcard or Free Hit solve produced that week's schedule")
+        # The GW number and the badge variable must land in the SAME f-string,
+        # badge second, so a chip week renders "GW4 [Wildcard Active]" rather
+        # than the badge appearing before, or in a separate, title.
+        self.assertIn('GW{s["gw"]}{badge}', block)
+        # badge must actually be empty for a chip-less week, not always shown.
+        self.assertIn('if chip else ""', block)
+
+
 class ModelHealthDataTest(unittest.TestCase):
     def test_accuracy_query_returns_empty_rather_than_raising(self):
         """No database in CI, and none on a fresh deploy either. The tab has to

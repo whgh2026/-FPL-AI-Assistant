@@ -3661,6 +3661,16 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     narrows what was already suggestible, so this is not a regression, and a
     fresh solve after Set 1's chip is actually played sees Set 2's copy as a
     normal, independently available chip again.
+
+    A player, once sold, cannot be bought back later in the same horizon
+    (see the no_rebuy_* constraints below). A sell-then-rebuy of the
+    identical player nets zero squad change by the time the second transfer
+    lands but still costs two transfers -- and, past the free-transfer
+    allowance, a real hit -- for a plan built from projections that never
+    change mid-horizon, so nothing can arrive between the two weeks to
+    justify it. This does NOT forbid selling one player and later buying a
+    DIFFERENT one who happens to occupy the same squad slot; it is keyed on
+    player identity, not position.
     """
     if not HAS_PULP:
         return []
@@ -3705,6 +3715,20 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
             # where the REAL squad was, not from the one-off Free Hit XI.
             prob += buy[pid][t] <= 1 - fh[t], f"fh_freeze_buy_{pid}_{t}"
             prob += sell[pid][t] <= 1 - fh[t], f"fh_freeze_sell_{pid}_{t}"
+        # Anti-churn: once sold, this player can never be bought back later in
+        # the SAME horizon. Every week's projection is fixed at solve time, so
+        # nothing genuinely new can arrive between t1 and t2 to justify selling
+        # now and re-buying later -- the model can only ever reach a sell-then-
+        # rebuy by coincidence (e.g. as a stepping stone that happens to free
+        # up budget or a formation slot), and it nets the squad no change by
+        # the time the second transfer lands while still paying for two (and,
+        # past the free-transfer allowance, a real -4 hit) for nothing. Pairwise
+        # rather than a single cumulative indicator: T is small (PLAN_HORIZON
+        # weeks), so the O(T^2) constraint count per player stays trivial for
+        # the solver, and each constraint reads directly as "not both".
+        for t1 in range(T):
+            for t2 in range(t1 + 1, T):
+                prob += sell[pid][t1] + buy[pid][t2] <= 1, f"no_rebuy_{pid}_{t1}_{t2}"
 
     # Squad structure per GW -- for both the persistent squad (x) and the
     # Free Hit one-off squad (y). y's shape constraints hold unconditionally
