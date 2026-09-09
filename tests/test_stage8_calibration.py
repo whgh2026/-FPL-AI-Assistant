@@ -25,6 +25,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -316,6 +317,34 @@ class AutoTuneGuardTest(unittest.TestCase):
         self.assertLess(reject, write,
                         "weights.json is written before the holdout check")
         self.assertIn("return", src[reject:write])
+
+    def test_defaults_to_disabled_with_no_env_var(self):
+        """This job auto-commits weights.json straight into the repo (see
+        .github/workflows/fpl_logger.yml) -- an unset env var must never be
+        one accidental omission away from a live write."""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FPL_AUTOTUNE_ENABLED", None)
+            at = self._mod()
+        self.assertFalse(at.ENABLED)
+
+    def test_requires_the_exact_opt_in_value(self):
+        with mock.patch.dict(os.environ, {"FPL_AUTOTUNE_ENABLED": "1"}):
+            self.assertTrue(self._mod().ENABLED)
+        for off in ("0", "false", "yes", ""):
+            with mock.patch.dict(os.environ, {"FPL_AUTOTUNE_ENABLED": off}):
+                self.assertFalse(self._mod().ENABLED, f"{off!r} must not enable the job")
+
+    def test_main_prints_and_returns_without_writing_when_disabled(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("FPL_AUTOTUNE_ENABLED", None)
+            at = self._mod()
+            with mock.patch.object(at, "ensure_calibration_columns") as ensure_cols, \
+                 mock.patch.object(at, "get_prediction_history") as get_hist, \
+                 mock.patch("builtins.open") as m_open:
+                get_hist.return_value = [{"i": i} for i in range(10_000)]
+                at.main()
+        ensure_cols.assert_called_once()
+        m_open.assert_not_called()  # weights.json must not even be opened for writing
 
 
 class ScriptsStillCompileTest(unittest.TestCase):

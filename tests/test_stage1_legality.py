@@ -12,6 +12,7 @@ quietly stop testing anything if the fixture is regenerated.
 """
 
 import unittest
+from unittest import mock
 
 import fpl_tools
 from tests import harness
@@ -144,6 +145,66 @@ class SolverProfileTest(unittest.TestCase):
         """A typo in CI must not silently fall back to the fast profile."""
         with self.assertRaises(ValueError):
             fpl_tools.set_solver_profile("determinstic")   # deliberate typo
+
+
+class SolverTimeoutHonestyTest(unittest.TestCase):
+    """PuLP's LpStatus does not distinguish a proven bound from a solve CBC's
+    own gap/time-limit termination called "optimal enough" -- both come back
+    as the literal string "Optimal". _solve_squad's own elapsed-time check is
+    what actually tells them apart, so it is tested by lying to the clock
+    rather than by trying to make CBC itself run for a real 0.8s or 60s: the
+    real solve on this fixture is fast and genuinely reaches CBC's own
+    Optimal status either way -- only time.monotonic's two readings (t0, then
+    the post-solve elapsed check) are faked."""
+
+    def _entries(self, bs):
+        lookup = fpl_tools._build_fixture_lookup(bs)
+        return harness.squad_to_pool_entries(
+            bs, harness.build_squad(bs, "balanced"), lookup, EVENT)
+
+    def _solve_with_fake_elapsed(self, bs, profile, elapsed_fraction):
+        entries = self._entries(bs)
+        budget = sum(e["price"] for e in entries)
+        limit = fpl_tools.SOLVER_PROFILES[profile]["timeLimit"]
+        fake_times = iter([1000.0, 1000.0 + limit * elapsed_fraction])
+        with mock.patch("fpl_tools.time.monotonic", side_effect=lambda: next(fake_times)):
+            return fpl_tools._solve_squad(entries, budget=budget)
+
+    def test_a_falsely_reported_optimal_is_not_recorded_as_proven(self):
+        with harness.synthetic_world("interactive") as (bs, _fx):
+            selected, _obj, _parts = self._solve_with_fake_elapsed(bs, "interactive", 0.97)
+        self.assertEqual(fpl_tools._LAST_SOLVE["status"], "Optimal",
+                         "the fixture must actually reach CBC's own Optimal status -- "
+                         "otherwise this isn't exercising the false-optimal case at all")
+        self.assertTrue(fpl_tools._LAST_SOLVE["timed_out"])
+        self.assertFalse(fpl_tools._LAST_SOLVE["proven_optimal"],
+                         "a solve that ran out its wall-clock budget must never be recorded "
+                         "as proven, even when CBC's own status string says Optimal")
+        # Still usable interactively -- falls through to the same structural
+        # validation "Not Solved" already relied on, rather than being
+        # rejected outright.
+        self.assertIsNotNone(selected)
+
+    def test_the_same_falsely_reported_optimal_is_rejected_under_deterministic(self):
+        """Tests must fail loudly rather than accept a squad that would vary
+        with machine load -- the whole reason the deterministic profile
+        exists. The interactive-only fallback must not leak into it just
+        because the status string happens to say Optimal."""
+        with harness.synthetic_world("deterministic") as (bs, _fx):
+            selected, _obj, _parts = self._solve_with_fake_elapsed(bs, "deterministic", 0.97)
+        self.assertTrue(fpl_tools._LAST_SOLVE["timed_out"])
+        self.assertFalse(fpl_tools._LAST_SOLVE["proven_optimal"])
+        self.assertIsNone(selected, "the deterministic profile must reject an unproven "
+                                    "incumbent even when CBC's status says Optimal")
+
+    def test_a_fast_genuine_solve_is_not_flagged_as_timed_out(self):
+        """Baseline: the honesty check must not cry wolf on the overwhelming
+        common case of a solve that actually finished quickly."""
+        with harness.synthetic_world("interactive") as (bs, _fx):
+            entries = self._entries(bs)
+            fpl_tools._solve_squad(entries, budget=sum(e["price"] for e in entries))
+        self.assertFalse(fpl_tools._LAST_SOLVE["timed_out"])
+        self.assertTrue(fpl_tools._LAST_SOLVE["proven_optimal"])
 
 
 if __name__ == "__main__":

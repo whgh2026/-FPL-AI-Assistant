@@ -2362,8 +2362,8 @@ with tab_planner:
                     try:
                         log_decision(manager_id.strip(), GW_ID, "hold", 0.0,
                                      hits=0, chip=confirmed_chip, transfers="HOLD")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Failed to persist hold decision: {e}", exc_info=True)
                     st.session_state["manual_final"] = lineup
                     st.rerun()
     

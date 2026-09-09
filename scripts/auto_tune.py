@@ -29,13 +29,18 @@ WEIGHTS_PATH = os.path.join(ROOT, "weights.json")
 MIN_ROWS = 5000
 DAMPING = fpl_tools.CALIBRATION_DAMPING
 
-# The four repairs this gate was waiting on have landed (damping raised to 0.25
-# and the production value now under test, dc_sensitivity measured by forward
-# difference instead of written as a literal 0.0, the surrogate matched to
-# _player_xp_raw including the cameo clamp and the ep_next blend, and the
-# deviance term floored at PRED_FLOOR). The job is therefore live by default;
-# set FPL_AUTOTUNE_ENABLED=0 to hold it.
-ENABLED = os.environ.get("FPL_AUTOTUNE_ENABLED", "1") == "1"
+# The four repairs this gate was originally waiting on have landed (damping
+# raised to 0.25 and the production value now under test, dc_sensitivity
+# measured by forward difference instead of written as a literal 0.0, the
+# surrogate matched to _player_xp_raw including the cameo clamp and the
+# ep_next blend, and the deviance term floored at PRED_FLOOR) -- but this job
+# writes weights.json straight into the repo and auto-commits it (see
+# .github/workflows/fpl_logger.yml), so it defaults OFF regardless: a
+# misconfigured env, a bad rerun, or a future caller that invokes main()
+# without checking ENABLED first must never be one missing flag away from
+# silently rewriting production weights. Requires an explicit
+# FPL_AUTOTUNE_ENABLED=1 to run.
+ENABLED = os.environ.get("FPL_AUTOTUNE_ENABLED", "0") == "1"
 
 HOLDOUT_FRACTION = 0.25
 

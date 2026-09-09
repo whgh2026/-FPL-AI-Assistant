@@ -2860,16 +2860,33 @@ def _solve_squad(
         prob.setObjective(xp_expr)
 
     global _LAST_SOLVE
+    t0 = time.monotonic()
     prob.solve(_make_solver())
+    elapsed = time.monotonic() - t0
     status = pulp.LpStatus[prob.status]
     selected = [pid for pid in ids if x[pid].varValue is not None and x[pid].varValue > 0.5]
+
+    # CBC's own gap/time-limit termination is not distinguished from a proven
+    # bound in the LpStatus string it hands back to PuLP: a solve that ran out
+    # the wall-clock timeLimit can still report "Optimal" if CBC's internal
+    # tolerance considered whatever incumbent it had "good enough", so status
+    # alone cannot tell a certified optimum from a rushed, unproven one. A
+    # solve that ran to (or past) ~95% of its configured budget is treated as
+    # time-limited regardless of what status it reports; 95% rather than
+    # exactly 100% because the wall-clock check inside CBC itself is not
+    # instantaneous, so a genuinely-timed-out solve can return fractionally
+    # under the nominal limit.
+    limit = SOLVER_PROFILES[_SOLVER_PROFILE]["timeLimit"]
+    timed_out = elapsed >= (limit * 0.95)
+    proven = (status == "Optimal") and not timed_out
 
     # Record what the MIP actually chose, so tests can assert on the XI (the
     # `start` binaries are otherwise invisible to callers) and the UI can tell
     # a proven optimum from a time-limited incumbent.
     _LAST_SOLVE = {
         "status": status,
-        "proven_optimal": status == "Optimal",
+        "proven_optimal": proven,
+        "timed_out": timed_out,
         "profile": _SOLVER_PROFILE,
         "selected": selected,
         "xi": [pid for pid in ids if start is not None
@@ -2887,20 +2904,24 @@ def _solve_squad(
         }
 
     components = _LAST_SOLVE["components"]
-    if status == "Optimal":
+    if proven:
         return selected, pulp.value(prob.objective), components
 
     # A time-limited incumbent is usable interactively but never in tests: the
     # deterministic profile must fail loudly rather than hand back a squad that
     # varies with machine load.
     #
-    # "Not Solved" is the only non-optimal status that carries a usable
-    # incumbent. Infeasible / Unbounded / Undefined leave STALE variable values
-    # from an earlier relaxation, and those values can look superficially
-    # plausible: an infeasible solve was observed returning 15 selected players
-    # with a TEN-man starting XI, because the previous check only counted the
-    # squad. Validate the solution itself, not just its length.
-    if _SOLVER_PROFILE == "interactive" and status == "Not Solved" and _is_valid_squad(selected, by_id, start):
+    # "Not Solved" and a falsely-reported "Optimal" (status says proven, the
+    # elapsed-time check above says otherwise) are the only outcomes that
+    # carry a usable incumbent. Infeasible / Unbounded / Undefined leave STALE
+    # variable values from an earlier relaxation, and those values can look
+    # superficially plausible: an infeasible solve was observed returning 15
+    # selected players with a TEN-man starting XI, because the previous check
+    # only counted the squad. Validate the solution itself, not just its
+    # length -- and not just its reported status, now that status alone is
+    # known not to prove anything when the clock ran out.
+    usable_status = status == "Not Solved" or (status == "Optimal" and timed_out)
+    if _SOLVER_PROFILE == "interactive" and usable_status and _is_valid_squad(selected, by_id, start):
         return selected, pulp.value(prob.objective), components
     return None, None, {}
 
