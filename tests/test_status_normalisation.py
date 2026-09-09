@@ -19,6 +19,20 @@ code for "the club has no fixture this gameweek"). What IS fixed is every
 point that reads a RAW code and used to do so by direct string comparison:
 a display string reaching one of those by accident used to fall through
 silently to "available" instead of being recognised as out.
+
+Follow-up hardening: current_out_statuses (the one deliberately-untouched
+note-domain check named above) sits inside suggest_transfers_for_custom_squad,
+a PUBLIC boundary function -- unlike the internal pipeline, an external
+script, fixture, or API caller building `squad` by hand may pass raw FPL
+element dicts straight through, where "status" is 'i'/'s'/'u'/'n' rather than
+the translated note _pool_entry always stamps internally. Both of its
+occurrences now normalise before the OUT_STATUSES membership test, so a
+raw-code squad and a display-string squad flagging the same players are
+counted identically -- see CurrentOutStatusesHardeningTest below. This does
+not reopen the note-domain question above: "Blank"/"No minutes"/doubtful
+percentages still normalise to "a" (available) exactly as they did before,
+since normalise_status maps the whole note vocabulary, not just the four
+out-equivalent strings that used to be spelled out by hand.
 """
 
 import copy
@@ -131,6 +145,53 @@ class HardenedIngestionTest(unittest.TestCase):
             self.assertNotIn("Zdisplaystring Excludedtest", names,
                              "a display-string 'Unavailable' status must be excluded "
                              "exactly like the raw 'u' code already is")
+
+
+class CurrentOutStatusesHardeningTest(unittest.TestCase):
+    """suggest_transfers_for_custom_squad is a public boundary function, not
+    an internal pipeline step -- an external caller may well build `squad` by
+    hand from raw FPL element dicts, where "status" is 'i'/'s'/'u'/'n' rather
+    than the translated note ("Injured"/"Suspended"/"Unavailable") every
+    internal caller stamps. Both current_out_statuses sites now normalise
+    first, so the two spellings of "this player is out" must be counted, and
+    therefore acted on, identically."""
+
+    def _flagged_squads(self, bs, n_out=4):
+        """Two otherwise-identical squads, differing only in how the same
+        n_out currently-owned players spell "injured" -- raw code in one,
+        the translated note in the other."""
+        squad = harness.squad_as_manager_input(bs, harness.build_squad(bs, "balanced"))
+        raw_squad = copy.deepcopy(squad)
+        note_squad = copy.deepcopy(squad)
+        for p in raw_squad[:n_out]:
+            p["status"] = "i"
+        for p in note_squad[:n_out]:
+            p["status"] = "Injured"
+        return raw_squad, note_squad
+
+    def test_raw_code_and_display_string_squads_score_chips_identically(self):
+        """current_out_statuses feeds the Wildcard injury-crisis threshold
+        exception and the crisis_msg copy in chip_evaluations -- both must
+        come out byte-identical regardless of which vocabulary flagged the
+        same four players out. Before this fix, the raw-code call counted 0
+        (missing all four) while the display-string call correctly counted 4,
+        so the two calls could disagree on recommended_chip and on whether
+        crisis_msg's "N flagged players" text appeared at all."""
+        saved_profile = fpl_tools.get_solver_profile()
+        fpl_tools.set_solver_profile("deterministic")
+        try:
+            with harness.synthetic_world() as (bs, _fx):
+                raw_squad, note_squad = self._flagged_squads(bs)
+                kwargs = dict(bank=2.0, free_transfers=1, eval_chips=list(fpl_tools.CHIPS),
+                             event=EVENT, risk="balanced", holding_map=None, current_gw=EVENT,
+                             allow_hits=True)
+                res_raw = fpl_tools.suggest_transfers_for_custom_squad(raw_squad, **kwargs)
+                res_note = fpl_tools.suggest_transfers_for_custom_squad(note_squad, **kwargs)
+        finally:
+            fpl_tools.set_solver_profile(saved_profile)
+
+        self.assertEqual(res_raw["recommended_chip"], res_note["recommended_chip"])
+        self.assertEqual(res_raw["chip_evaluations"], res_note["chip_evaluations"])
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from typing import Optional
@@ -11,6 +12,8 @@ import datetime
 import time
 import plotly.graph_objects as go
 from db import get_or_backfill_manager_history, log_decision, log_squad_health, save_chip_play, save_plan
+
+logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="FPL Quant Manager", page_icon="⚽", layout="wide",
                     initial_sidebar_state="expanded")
@@ -2299,10 +2302,7 @@ with tab_planner:
 
                 # 1. Base logic (always true).
                 explainer_bullets.append(
-                    "* **We checked every legal 15 you could build this week.** "
-                    "This one scores highest over the next four gameweeks, once "
-                    "your budget, your free transfers and the three-per-club rule "
-                    "are all accounted for.")
+                    "* **Optimized squad selection within your interactive solve budget.**")
 
                 hits_taken = int(tr.get("hits", 0))
 
@@ -2397,8 +2397,15 @@ with tab_planner:
                         if confirmed_chip and confirmed_chip != "None (Hold Chips)":
                             save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
                         save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # A silent `pass` here meant a confirmed transfer decision
+                        # could fail to persist (decision log, chip play, or the
+                        # multi-GW plan) with nothing anywhere to show it -- the
+                        # user saw their accepted transfers go through (the lineup
+                        # and rerun below don't depend on this try block), but
+                        # nothing recorded it happened, and no operator signal
+                        # existed to notice the write was silently lost.
+                        logger.warning(f"Failed to persist decision plan: {e}", exc_info=True)
                     st.session_state["manual_final"] = lineup
                     st.rerun()
     

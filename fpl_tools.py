@@ -4044,7 +4044,14 @@ def suggest_transfers_for_custom_squad(
                                  (risk or "balanced").lower().strip())
     hit_charge = HIT_COST + HIT_HURDLE.get(risk_key, HIT_HURDLE["balanced"])
     # Hard clamp: never take point hits for lateral moves by default.
-    current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
+    # normalise_status() first: every internal caller already stamps the
+    # translated note ("Injured"/"Suspended"/"Unavailable") into "status", but
+    # this is a public boundary function -- an external script, fixture, or
+    # API caller building `squad` by hand may well pass the raw FPL element
+    # dict straight through, where "status" is 'i'/'s'/'u'/'n'. Normalising
+    # first makes both vocabularies count identically instead of the raw-code
+    # one silently missing every out player.
+    current_out_statuses = sum(1 for p in squad if normalise_status(p.get("status")) in OUT_STATUSES)
     fit_count = len(squad) - current_out_statuses
     if free_transfers == 0 and not allow_hits:
         max_transfers = 0
@@ -4389,7 +4396,14 @@ def suggest_transfers_for_custom_squad(
             held.setdefault("status", note_h)
         std_squad.append(held)
     
-    current_out_statuses = sum(1 for p in squad if p.get("status") in ("Injured", "Suspended", "Unavailable", "OUT"))
+    # normalise_status() first: every internal caller already stamps the
+    # translated note ("Injured"/"Suspended"/"Unavailable") into "status", but
+    # this is a public boundary function -- an external script, fixture, or
+    # API caller building `squad` by hand may well pass the raw FPL element
+    # dict straight through, where "status" is 'i'/'s'/'u'/'n'. Normalising
+    # first makes both vocabularies count identically instead of the raw-code
+    # one silently missing every out player.
+    current_out_statuses = sum(1 for p in squad if normalise_status(p.get("status")) in OUT_STATUSES)
     
     for in_id in bought_ids:
         fpl_p = elements_by_id[in_id]
