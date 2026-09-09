@@ -3000,6 +3000,13 @@ with tab_health:
         )
     else:
         pct = min(100, int(100 * _mh_banked / _mh_target))
+        # The third tile used to print _public_model_label(fpl_tools.MODEL_VERSION)
+        # (e.g. "Model build 8") -- a masked but still versioned readout. There has
+        # never been a user-facing control behind it: every query on this page reads
+        # fpl_tools.MODEL_VERSION directly, is never parameterised by anything the
+        # visitor picks, and stays that way here too. This tile now says only that
+        # the pipeline is live, using the same .badge/.g "active" pill as the
+        # attribution line at the foot of the page, not what build number it is.
         st.markdown(
             _card(
                 '<div class="mh-grid">'
@@ -3010,9 +3017,11 @@ with tab_health:
                 f'<div class="sc-value">{_mh_target:,}</div>'
                 f'<div class="mh-bar"><div style="width:{pct}%;"></div></div>'
                 f'<div class="sc-sub">{pct}% of the way there</div></div>'
-                f'<div class="sc-tile"><div class="sc-label">Model in use</div>'
-                f'<div class="sc-value" style="font-size:1.05rem;">{_public_model_label(fpl_tools.MODEL_VERSION)}</div>'
-                f'<div class="sc-sub">the count restarts whenever this changes</div></div>'
+                f'<div class="sc-tile"><div class="sc-label">Model Engine</div>'
+                f'<div class="sc-value" style="font-size:0.95rem;">'
+                f'<span class="badge" style="margin:0;"><span class="g"></span>AutoPilot (Active)</span>'
+                f'</div>'
+                f'<div class="sc-sub">Continuously calibrated via live match actuals</div></div>'
                 '</div>',
                 "📦 Where we're up to",
             ),
