@@ -2,6 +2,7 @@ import math
 import os
 import json
 import re
+import sys
 import time
 import requests
 from typing import Dict, Any, List, Tuple, Optional
@@ -286,6 +287,52 @@ BENCH_DEAD_WEIGHT = 0.035
 # (~135 pool entries) solve in well under a second.
 POOL_SHORTLIST = {"GK": 20, "DEF": 35, "MID": 35, "FWD": 30}
 OUT_STATUSES = {"i", "s", "u", "n"}
+
+# Aliases into the official FPL status alphabet ('a','i','s','u','n','d', read
+# straight off the bootstrap). "No minutes" and "Blank" are deliberately
+# mapped to "a": those are MINUTES-history and FIXTURE notes respectively,
+# never a status flag, so a player carrying either is otherwise available and
+# must not be folded into an out-status count. See normalise_status.
+_STATUS_ALIASES = {
+    "a": "a", "i": "i", "s": "s", "u": "u", "n": "n", "d": "d",
+    "available": "a",
+    "injured": "i",
+    "suspended": "s",
+    "unavailable": "u",
+    "out": "u",           # a bare "OUT" carries no reason of its own; bucket
+                          # it with "u" the same way "n" already is.
+    "doubtful": "d",
+    "no minutes": "a",
+    "blank": "a",
+}
+
+
+def normalise_status(val: Any) -> str:
+    """Canonical single-letter FPL status code, from either vocabulary.
+
+    _player_xp_raw and _player_xp_horizon branch on the OFFICIAL FPL codes
+    ('a','i','s','u','n','d') read straight off the bootstrap. Elsewhere the
+    SAME concept is shown to a person as "Injured" / "Suspended" /
+    "Unavailable" / "OUT" / "Available" -- a deliberately different, richer
+    vocabulary used for display and transfer rationale (see _pool_entry's
+    "status": note, which also carries values like "Blank" and "No minutes"
+    that describe a FIXTURE or a MINUTES history, not the official status
+    flag, and must stay out of this mapping for exactly that reason).
+
+    The two vocabularies must never be compared against each other directly:
+    a raw-code branch tested against the display strings (or vice versa)
+    silently falls through to "available" for whichever spelling it does not
+    recognise. This is the one place either vocabulary is turned into the
+    raw-code form, so a raw-code consumer can call it defensively without
+    caring which representation actually reached it.
+
+    Unrecognised input -- including None, and including "No minutes" /
+    "Blank", which are real notes but not status flags -- maps to "a", which
+    is also _player_xp_raw's own pre-existing default for a missing status.
+    """
+    if val is None:
+        return "a"
+    return _STATUS_ALIASES.get(str(val).strip().lower(), "a")
 
 # Official FPL formation constraints: exactly 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD,
 # with 10 outfield players + 1 GK = 11 starters total.
@@ -1384,7 +1431,13 @@ def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, 
 
     Derived from season starts, minutes and the team's games played, scaled by the
     FPL availability flag. GKs are all-or-nothing (keepers never register cameos).
+
+    `status` is normalised here, once, so every caller -- whether it read a
+    raw bootstrap code itself or forwarded one already classified by
+    _player_xp_raw/_player_xp_horizon -- is protected the same way, without
+    each of them having to remember to do it first.
     """
+    status = normalise_status(status)
     if status in OUT_STATUSES:
         return (1.0, 0.0, 0.0)
     chance = p.get("chance_of_playing_next_round")
@@ -1859,7 +1912,7 @@ def _xp_dgw_sum(p: Dict[str, Any], target: List[Dict[str, Any]], emin: float, po
 def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None,
                    gk_cs_dampener: float = 1.0) -> Tuple[float, str]:
     """Raw expected points for a single gameweek, before risk adjustment."""
-    status = p.get("status", "a")
+    status = normalise_status(p.get("status"))
     chance_val = p.get("chance_of_playing_next_round")
 
     if status == "i":
@@ -1962,7 +2015,7 @@ def calibration_features(p: Dict[str, Any],
     """
     zero = {"raw_total": 0.0, "xp_cameo": 0.0, "ep_w": 0.0, "ep_term": 0.0,
             "cameo_mass": 0.0, "rotation_variance": 0.0}
-    status = p.get("status", "a")
+    status = normalise_status(p.get("status"))
     if status in ("i", "s", "u", "n"):
         return zero
     pos_id = p.get("element_type")
@@ -2074,7 +2127,7 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
     _player_xp, so the identical +/-0.3 momentum term was ~2% of one number and
     ~7.5% of the other. See the Layer 1 note on _player_xp_raw.
     """
-    status = p.get("status", "a")
+    status = normalise_status(p.get("status"))
     if status == "i":
         return 0.0, "Injured"
     elif status == "s":
@@ -2120,7 +2173,48 @@ def get_upcoming_gameweek() -> Dict[str, Any]:
             }
     return {"id": gw, "name": f"Gameweek {gw}", "deadline_time": None}
 
+_LAST_FT_ERROR: Optional[Tuple[str, str]] = None      # (manager_id, message) or None
+
+
+def last_free_transfers_error() -> Optional[Tuple[str, str]]:
+    """Why the most recent get_free_transfers() call could not determine a
+    real count, or None. Mirrors db.last_db_error()'s shape and reason for
+    existing: get_free_transfers used to swallow every failure and return a
+    plain 1, which looked exactly like a confident, computed answer to every
+    caller and to the MILP state machine downstream. A network blip and "this
+    manager genuinely has 1 FT" must not be indistinguishable."""
+    return _LAST_FT_ERROR
+
+
+def _log_ft_error(manager_id: str, exc: BaseException) -> None:
+    global _LAST_FT_ERROR
+    detail = str(exc) or exc.__class__.__name__
+    _LAST_FT_ERROR = (manager_id, detail)
+    print(f"[fpl_tools] get_free_transfers({manager_id}) failed: {detail}",
+          file=sys.stderr, flush=True)
+
+
 def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
+    """Free transfers banked into `target_gw` (or the upcoming gameweek).
+
+    Playing Wildcard or Free Hit does NOT touch the free-transfer bank: FPL's
+    rules are explicit that saved transfers are unaffected by either chip,
+    since the chip's unlimited moves never draw against it. A chip gameweek
+    therefore accumulates exactly like any other week in which zero transfers
+    were made against the bank -- it must never reset the count to 1. It
+    previously did, which meant a manager who wildcarded while holding 4
+    banked transfers was silently told they had 1, and the MILP's own
+    hit-cost and roll-value logic was reasoning about a state that did not
+    exist.
+
+    Raises on genuine failure (network, malformed API response) instead of
+    returning a bare `1`. That fallback used to be indistinguishable from a
+    confidently computed answer -- both to callers and to the state machine
+    that budgets hits and rolled-transfer value against it -- so an outage
+    silently forced hits or ignored real banked transfers rather than
+    surfacing as "unknown". See last_free_transfers_error() for the reason,
+    and the caller for how it degrades.
+    """
     manager_id = _clean_manager_id(manager_id)
     try:
         # Three uncached round trips per call, and this is called on every
@@ -2139,6 +2233,12 @@ def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
             if ev is not None:
                 transfers_per_event[int(ev)] = transfers_per_event.get(int(ev), 0) + 1
 
+        # Gameweeks a Wildcard or Free Hit was played. Transfers made under
+        # either chip still show up in the /transfers/ endpoint (they are
+        # real transfer events, just chip-exempted from the bank), so they
+        # must be excluded from `made` below rather than counted against it --
+        # counting them would zero the bank out on the chip week instead of
+        # correctly leaving it untouched.
         reset_events = set()
         for c in history.get("chips", []):
             if (c.get("name") or "").lower() in ("wildcard", "freehit"):
@@ -2146,22 +2246,17 @@ def get_free_transfers(manager_id: str, target_gw: Optional[int] = None) -> int:
 
         ft = 1
         for ev in range(started_event, int(target_gw)):
-            if ev in reset_events:
-                ft = 1
-            else:
-                ft = min(ft + 1, 5)
-                made = transfers_per_event.get(ev, 0)
-                ft = max(ft - made, 0)
+            ft = min(ft + 1, 5)
+            made = 0 if ev in reset_events else transfers_per_event.get(ev, 0)
+            ft = max(ft - made, 0)
 
-        if int(target_gw) in reset_events:
-            ft = 1
-        else:
-            made_this_week = transfers_per_event.get(int(target_gw), 0)
-            ft = max(ft - made_this_week, 0)
+        made_this_week = 0 if int(target_gw) in reset_events else transfers_per_event.get(int(target_gw), 0)
+        ft = max(ft - made_this_week, 0)
 
         return ft
-    except Exception:
-        return 1
+    except Exception as exc:
+        _log_ft_error(manager_id, exc)
+        raise
 
 def _gw_fixtures(fx: List[Dict[str, Any]], event: int) -> List[Dict[str, Any]]:
     """Every fixture a club plays in `event` -- two of them in a double.
@@ -3712,7 +3807,7 @@ def suggest_transfers_for_custom_squad(
     squad: List[Dict[str, Any]], 
     bank: float, 
     free_transfers: int, 
-    eval_chips: List[str] = [],
+    eval_chips: Optional[List[str]] = None,
     event: Optional[int] = None,
     risk: str = "balanced",
     holding_map: Optional[Dict[Any, int]] = None,
@@ -3721,6 +3816,16 @@ def suggest_transfers_for_custom_squad(
     bench_boost_gw: Optional[int] = None,
     rival_ids: Optional[set] = None,
 ) -> Dict[str, Any]:
+    # A mutable default (`= []`) is evaluated ONCE at def-time and shared by
+    # every call that doesn't pass its own eval_chips -- harmless only for as
+    # long as nothing in this function ever mutates it, which is exactly the
+    # kind of invariant a later edit can break without noticing. It also sits
+    # behind @st.cache_data, whose cache key is derived from the arguments
+    # actually passed in, not from this default -- initialising fresh inside
+    # the function body is the version that can never leak state between
+    # calls, mutation or not.
+    if eval_chips is None:
+        eval_chips = []
     bootstrap = _get_bootstrap()
     fixture_lookup = _build_fixture_lookup(bootstrap)
     teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
@@ -4286,7 +4391,7 @@ def rank_players_by_xp(position: str = None, max_price: float = None, limit: int
     for p in bootstrap["elements"]:
         pos = POS_MAP.get(p["element_type"])
         price = p["now_cost"] / 10.0
-        status = p.get("status", "a")
+        status = normalise_status(p.get("status"))
         if status == "u":
             continue  # left the Premier League — never surface these in rankings
         if position and pos != position:

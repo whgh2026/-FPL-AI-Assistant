@@ -63,6 +63,44 @@ class DependencyPinTest(unittest.TestCase):
         self.assertEqual(hits, [], f"dotenv is imported but not declared: {hits}")
 
 
+class CIWorkflowDependencyTest(unittest.TestCase):
+    """P0 remediation, Task 3 (D4/D8): the scheduled pipeline installed a
+    hand-maintained package list that had already drifted from
+    requirements.txt twice over -- carrying `pandas` (used nowhere, there
+    only to silently supply python-dateutil) while missing `scipy`
+    (fpl_tools._devig_power's power-method de-vig solver), so every scheduled
+    job silently ran the degraded proportional-split fallback instead of the
+    real one, with no error to notice it by."""
+
+    def _workflow(self):
+        path = os.path.join(ROOT, ".github", "workflows", "fpl_logger.yml")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_installs_from_requirements_txt(self):
+        wf = self._workflow()
+        self.assertIn("pip install -r requirements.txt", wf)
+
+    def test_no_hand_maintained_package_list_survives(self):
+        """The specific old command, or any equivalent hardcoded list, must
+        be gone -- not just supplemented by the new one. Checked against the
+        `run:` lines only, so this cannot be satisfied by prose describing
+        the old command in a comment."""
+        run_lines = [ln for ln in self._workflow().splitlines()
+                    if ln.strip().startswith("run:")]
+        for line in run_lines:
+            if "pip install" in line:
+                self.assertEqual(line.strip(), "run: pip install -r requirements.txt",
+                                 f"a hand-maintained pip install line survives: {line!r}")
+
+    def test_scipy_is_actually_available_via_that_file(self):
+        """The concrete failure this fixes: requirements.txt must carry the
+        dependency the workflow now installs wholesale."""
+        names = [ln.split("[")[0].split(">")[0].split("=")[0].split("<")[0].strip().lower()
+                for ln in _requirements()]
+        self.assertIn("scipy", names)
+
+
 class StartCommandTest(unittest.TestCase):
     def test_procfile_exists(self):
         """The start command lived only in the Railway dashboard, so the repo

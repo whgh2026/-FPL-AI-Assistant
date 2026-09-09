@@ -87,5 +87,41 @@ class TransferPolicyTest(unittest.TestCase):
         self.assertEqual(len(res["transfers"]), 1)
 
 
+class MutableDefaultArgumentTest(unittest.TestCase):
+    """P0 remediation, Task 3 (D4): `eval_chips: List[str] = []` is evaluated
+    ONCE at def-time and shared by every call that omits the argument --
+    harmless only for as long as nothing in the function ever mutates it,
+    which is exactly the kind of invariant a later edit can break without
+    anyone noticing. `None`, initialised fresh inside the body, can never
+    leak state between calls, mutation or not."""
+
+    def test_eval_chips_default_is_not_a_mutable_literal(self):
+        import inspect
+        sig = inspect.signature(fpl_tools.suggest_transfers_for_custom_squad)
+        default = sig.parameters["eval_chips"].default
+        self.assertIsNone(default, f"default is {default!r}, not None")
+
+    def test_omitting_eval_chips_entirely_still_works(self):
+        """The whole point of a safe default: callers that never pass
+        eval_chips at all (every internal call site does) must not crash or
+        silently misbehave."""
+        squad = _squad()
+        elements = [_element(pid) for pid in range(1, 16)] + [_element(16)]
+        bootstrap = {"elements": elements,
+                     "teams": [{"id": t, "name": "T%d" % t, "short_name": "T%d" % t}
+                              for t in range(1, 7)],
+                     "events": [{"id": GW, "is_next": True, "finished": False}]}
+        with mock.patch.object(fpl_tools, "_get_bootstrap", return_value=bootstrap), \
+             mock.patch.object(fpl_tools, "_build_fixture_lookup", return_value={}), \
+             mock.patch.object(fpl_tools, "_player_xp_horizon", return_value=(12.0, "Available")), \
+             mock.patch.object(fpl_tools, "_player_xp", return_value=(3.0, "Available")), \
+             mock.patch.object(fpl_tools, "_player_fdr_list", return_value=[2, 2, 2, 2]), \
+             mock.patch.object(fpl_tools, "_is_on_tightrope", return_value=False):
+            res = fpl_tools.suggest_transfers_for_custom_squad(
+                squad, bank=0.0, free_transfers=1,
+                event=GW, risk="balanced", holding_map=None, current_gw=GW)
+        self.assertIn("transfers", res)
+
+
 if __name__ == "__main__":
     unittest.main()

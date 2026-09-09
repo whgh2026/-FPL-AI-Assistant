@@ -50,6 +50,55 @@ def main():
     check("set_piece_none", app._set_piece_note({}) == "")
     check("set_piece_missing_element", app._set_piece_note(None) == "")
 
+    # ---- status badge: hardened against a raw code, unchanged for notes ---
+    # _pool_entry normally hands this a translated note ("Injured",
+    # "50% Chance", ...); P0 Task 1 hardens it against a raw FPL code ('i',
+    # 's', 'u', 'n', 'd') reaching it directly instead, without changing a
+    # single existing note-string case.
+    check("status_badge_available_is_blank", app._status_badge("a") == "")
+    check("status_badge_note_unchanged",
+          app._status_badge("Injured") == '<span class="stat-badge stat-out">🔴 Injured</span>')
+    check("status_badge_percentage_note_unchanged",
+          app._status_badge("50% Chance") == '<span class="stat-badge stat-doubt">⚠️ 50% Chance</span>')
+    check("status_badge_doubtful_note_unchanged",
+          app._status_badge("Doubtful") == '<span class="stat-badge stat-doubt">⚠️ Doubtful</span>',
+          "'Doubtful' normalises to code 'd' but is not itself 'd' -- must not be intercepted")
+    check("status_badge_raw_injured_code_renders_like_the_note",
+          app._status_badge("i") == app._status_badge("Injured"))
+    check("status_badge_raw_suspended_code_renders_like_the_note",
+          app._status_badge("s") == app._status_badge("Suspended"))
+    check("status_badge_raw_unavailable_codes_render_like_the_note",
+          app._status_badge("u") == app._status_badge("n") == app._status_badge("Unavailable"))
+    check("status_badge_raw_doubtful_code_renders_like_the_note",
+          app._status_badge("d") == app._status_badge("Doubtful"))
+
+    # ---- players_by_id initialised before the try that can fail it --------
+    # P0 remediation Task 3 (D8): a failed bootstrap fetch inside the inner
+    # try used to leave players_by_id (and fixture_lookup, teams) completely
+    # unbound, so the very next line's players_by_id.get(pid) raised a raw
+    # NameError that surfaced to the user as "Could not analyse squad: name
+    # 'players_by_id' is not defined" instead of a clean, actionable message.
+    # Both render_app.py and this harness run app.py in "bare mode" with no
+    # button ever clicked, so the branch containing the bug never executes --
+    # this checks the SOURCE ordering directly, the same technique
+    # test_stage7_render.py already uses for a comparable invariant.
+    app_src_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
+    with open(app_src_path, encoding="utf-8") as fh:
+        app_src = fh.read()
+    # Scoped to the one function this bug was in: "Run the Numbers" is its
+    # button, and the same players_by_id-building line appears verbatim
+    # elsewhere in app.py for unrelated (already-safe) code paths, so an
+    # unscoped search would find one of those instead.
+    button_pos = app_src.find('"⚽ Run the Numbers')
+    window = app_src[button_pos:button_pos + 3500]
+    safe_init = window.find('players_by_id = {}')
+    try_assignment = window.find('players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}')
+    first_use = window.find("players_by_id.get(pid)")
+    check("players_by_id_has_a_safe_init_before_the_try_and_first_use",
+          button_pos != -1 and -1 not in (safe_init, try_assignment, first_use)
+          and safe_init < try_assignment < first_use,
+          f"button_pos={button_pos} init={safe_init} try_assignment={try_assignment} first_use={first_use}")
+
     # ---- scorecard arithmetic ---------------------------------------------
     # A nailed starter, a rotation risk, and a bench of known cost. The
     # scorecard must separate "what it scores" from "how it is built".

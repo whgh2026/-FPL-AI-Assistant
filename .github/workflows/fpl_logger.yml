@@ -32,12 +32,17 @@ jobs:
         with:
           python-version: '3.10'
 
-      # Was: pip install requests pulp pandas psycopg2-binary numpy.
-      # `pandas` is used nowhere in the repository; it was silently supplying
-      # python-dateutil, which fpl_tools imports unguarded. Dropping pandas
-      # without noticing that would have broken all three jobs on import.
+      # Was a hand-maintained list (requests pulp pandas psycopg2-binary
+      # numpy), which had already drifted twice: `pandas` was in there used
+      # nowhere in the repository, silently supplying python-dateutil (which
+      # fpl_tools imports unguarded) as a side effect, and `scipy` -- which
+      # fpl_tools._devig_power needs for its power-method de-vig solver --
+      # was missing outright, so every scheduled job silently ran the
+      # proportional-split fallback instead of the real one. Installing from
+      # requirements.txt is the version that cannot drift again: it is the
+      # same file the app itself installs from, pinned the same way.
       - name: Install Dependencies
-        run: pip install requests pulp psycopg2-binary numpy python-dateutil
+        run: pip install -r requirements.txt
 
       # Every day this does not run is a day of replay history that cannot be
       # recovered later. Deliberately the cheapest and most frequent job.

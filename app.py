@@ -80,9 +80,25 @@ def _pos_chip(pos: str) -> str:
     return f'<span class="pos" style="background:{c}">{pos}</span>'
 
 
+_STATUS_CODE_LABELS = {"i": "Injured", "s": "Suspended", "u": "Unavailable",
+                       "n": "Unavailable", "d": "Doubtful"}
+
+
 def _status_badge(status: str) -> str:
     if not status or status in ("Available", "a"):
         return ""
+    # Defensive: _pool_entry normally sets this to a translated note
+    # ("Injured", "50% Chance", ...), but if a raw FPL status code ('i', 's',
+    # 'u', 'n', 'd') ever reaches this display helper instead, show what it
+    # means rather than a bare, cryptic letter. fpl_tools.normalise_status
+    # maps a genuine raw code to itself, which is how this detects one
+    # without also mis-firing on a note string that merely happens to route
+    # to the same code -- "Doubtful" normalises to "d", but is not itself
+    # "d", so it is untouched and falls through to the branches below exactly
+    # as before.
+    code = fpl_tools.normalise_status(status)
+    if code != "a" and code == status.strip().lower():
+        status = _STATUS_CODE_LABELS[code]
     if status in ("OUT", "Injured", "Suspended", "Unavailable"):
         return f'<span class="stat-badge stat-out">🔴 {status}</span>'
     return f'<span class="stat-badge stat-doubt">⚠️ {status}</span>'
@@ -1635,9 +1651,16 @@ with tab_planner:
                         
                         try:
                             st.session_state["api_free_transfers_default"] = fpl_tools.get_free_transfers(manager_id.strip())
-                        except:
+                        except Exception:
+                            # get_free_transfers now RAISES rather than guessing "1" when
+                            # it cannot determine a real count (see
+                            # fpl_tools.last_free_transfers_error() for why). Defaulting to
+                            # 0 here -- not the old silent 1 -- is the fail-closed choice:
+                            # it never lets the planner assume free-transfer capacity that
+                            # may not exist, and the number is still just a prefilled
+                            # default the manager can correct below.
                             st.session_state["api_free_transfers_default"] = 0
-                            
+
                         st.rerun()
                     except Exception as e:
                         st.session_state["squad_preview"] = {"error": str(e)}
@@ -1825,17 +1848,30 @@ with tab_planner:
                             preview_squad = st.session_state.get("squad_preview", {}).get("squad", [])
                             sell_by_id = {p["player_id"]: p.get("selling_price", p.get("price")) for p in preview_squad}
                             
+                            # Initialised before the try so a failed fetch below leaves
+                            # well-defined empty state instead of leaving these names
+                            # unbound -- looking a player up in an undefined dict here
+                            # raised a raw NameError that reached the user as "Could not
+                            # analyse squad: name 'players_by_id' is not defined" instead
+                            # of a clean, actionable message.
+                            players_by_id = {}
+                            fixture_lookup = None
+                            teams = {}
+                            pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
                             try:
                                 bootstrap = fpl_tools._get_bootstrap()
                                 fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap)
                                 players_by_id = {p["id"]: p for p in bootstrap.get("elements", [])}
                                 teams = {t["id"]: t["short_name"] for t in bootstrap.get("teams", [])}
-                                pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
                             except Exception:
                                 pass
-                                
+
+                            missing_ids = []
                             for pid in active_squad_ids:
                                 fpl_p = players_by_id.get(pid)
+                                if fpl_p is None or fixture_lookup is None:
+                                    missing_ids.append(pid)
+                                    continue
                                 xp, note = fpl_tools._player_xp(fpl_p, fixture_lookup, event=GW_ID)
                                 analysed.append({
                                     "player_id": pid, "name": f"{fpl_p['first_name']} {fpl_p['second_name']}",
@@ -1846,7 +1882,13 @@ with tab_planner:
                                     "xp": xp, "status": note, "is_captain": False,
                                     "on_yellow_card_tightrope": fpl_tools._is_on_tightrope(fpl_p, GW_ID),
                                 })
-                            
+
+                            if missing_ids:
+                                raise RuntimeError(
+                                    "Couldn't reach live FPL data for the whole squad "
+                                    "-- please try again in a moment."
+                                )
+
                             holding_map = get_or_backfill_manager_history(manager_id, GW_ID)
                             rival_ids = st.session_state.get("rival_ids")
                             transfers = fpl_tools.suggest_transfers_for_custom_squad(
