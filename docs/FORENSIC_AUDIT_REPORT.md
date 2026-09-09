@@ -319,7 +319,7 @@ This section is the one to read before trusting any of the above.
 ## 8. Model versioning
 
 `MODEL_VERSION` gates which rows the calibrator will fit together. It bumped
-**four** times, not the three originally planned:
+**five** times, not the three originally planned:
 
 | Version | Stage | What changed in the forecast |
 |---|---|---|
@@ -328,13 +328,14 @@ This section is the one to read before trusting any of the above.
 | `v4-xp-overhaul` | 5b | `EP_BLEND` taper, clean sheets, DefCon, Beta prior on start rate |
 | `v5-continuous-ratings` | 8b | Team ratings no longer rounded to 2dp |
 | `v6-bonus-and-cards` | 8c | Bonus and cards become per-player |
-| **`v7-minutes-recency`** | 8c | Exponentially weighted minutes; doubt redistribution |
+| `v7-minutes-recency` | 8c | Exponentially weighted minutes; doubt redistribution |
+| **`v8-tau-correction`** | 4 | `_tau_correction`'s transposed 1-0/0-1 branches fixed -- the Dixon–Coles low-score correction was applied with home/away rates swapped for those two scorelines |
 
 v5 was tiny in effect (max 0.005 points, 0.097% relative) and bumped anyway.
 The rule is applied **without a size exemption on purpose**: the point of the
 stamp is that nobody has to adjudicate whether a change was "big enough".
 
-**Consequence:** the usable calibration archive starts from `v7`. At ~280
+**Consequence:** the usable calibration archive starts from `v8`. At ~280
 filtered rows per gameweek against `MIN_ROWS = 5000`, calibration first fires
 roughly 18 gameweeks after deployment. The UI copy derives this from a live row
 count, so it stays honest as the figure moves.

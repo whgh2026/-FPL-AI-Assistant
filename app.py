@@ -1039,7 +1039,6 @@ def _render_player_inspector(squad) -> None:
 # excluded captaincy, bench weights, CVaR, stacking, EO and tax, and could rank
 # moves differently from the solver that chose them.
 WATERFALL_ROWS = [
-    ("projected_points", "Projected points over 4 gameweeks"),
     ("points_hit", "Points hit"),
     ("transfer_bar", "The bar a transfer has to clear"),
     ("banked_transfer_value", "Free transfer you'd have banked"),

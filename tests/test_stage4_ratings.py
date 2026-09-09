@@ -279,6 +279,72 @@ def _corr(a, b):
     return cov / (va * vb)
 
 
+class TauCorrectionTest(unittest.TestCase):
+    """The 1-0/0-1 branches of `_tau_correction` were transposed: the 1-0
+    correction was keyed off the home rate (`lh`) instead of the away rate
+    (`la`) that Dixon & Coles (1997) actually scale it by, and vice versa for
+    0-1. Both bugs are invisible when `lh == la` (a "neutral venue" fixture),
+    which is exactly why a synthetic league with home advantage baked in is
+    needed to catch them."""
+
+    def _pmf(self, lam, k):
+        return math.exp(-lam) * lam ** k / math.factorial(k)
+
+    def test_tau_conserves_mass(self):
+        """Dixon-Coles redistributes probability among the four low-score
+        cells without changing their combined mass: summing
+        P_indep(x,y) * (tau(x,y) - 1) over (0,0), (1,0), (0,1), (1,1) must be
+        exactly zero for ANY lh, la, rho. Algebraically this only cancels
+        when the 1-0 term carries `la` and the 0-1 term carries `lh` -- the
+        transposed branches left a residual of rho*(lh-la)**2 whenever the
+        home and away rates differ, which is the normal case."""
+        lh, la, rho = 1.7, 0.9, -0.12
+        total = 0.0
+        for x, y in ((0, 0), (1, 0), (0, 1), (1, 1)):
+            tau, _dlh, _dla, _drho = fpl_tools._tau_correction(x, y, lh, la, rho)
+            p_indep = self._pmf(lh, x) * self._pmf(la, y)
+            total += p_indep * (tau - 1.0)
+        self.assertAlmostEqual(total, 0.0, places=12,
+                                msg=f"mass not conserved: residual {total!r}")
+
+    def test_tau_derivatives(self):
+        """Each branch's analytic partials must match its own formula, and
+        the 1-0/0-1 branches must load onto the AWAY/HOME rate respectively
+        (not the reverse)."""
+        lh, la, rho = 1.7, 0.9, -0.12
+
+        tau00, d00_lh, d00_la, d00_rho = fpl_tools._tau_correction(0, 0, lh, la, rho)
+        self.assertAlmostEqual(tau00, 1.0 - lh * la * rho)
+        self.assertAlmostEqual(d00_lh, -la * rho)
+        self.assertAlmostEqual(d00_la, -lh * rho)
+        self.assertAlmostEqual(d00_rho, -lh * la)
+
+        tau10, d10_lh, d10_la, d10_rho = fpl_tools._tau_correction(1, 0, lh, la, rho)
+        self.assertAlmostEqual(tau10, 1.0 + la * rho,
+                                msg="1-0 must scale with the AWAY rate")
+        self.assertAlmostEqual(d10_lh, 0.0)
+        self.assertAlmostEqual(d10_la, rho)
+        self.assertAlmostEqual(d10_rho, la)
+
+        tau01, d01_lh, d01_la, d01_rho = fpl_tools._tau_correction(0, 1, lh, la, rho)
+        self.assertAlmostEqual(tau01, 1.0 + lh * rho,
+                                msg="0-1 must scale with the HOME rate")
+        self.assertAlmostEqual(d01_lh, rho)
+        self.assertAlmostEqual(d01_la, 0.0)
+        self.assertAlmostEqual(d01_rho, lh)
+
+        tau11, d11_lh, d11_la, d11_rho = fpl_tools._tau_correction(1, 1, lh, la, rho)
+        self.assertAlmostEqual(tau11, 1.0 - rho)
+        self.assertAlmostEqual(d11_lh, 0.0)
+        self.assertAlmostEqual(d11_la, 0.0)
+        self.assertAlmostEqual(d11_rho, -1.0)
+
+        # Asymmetry check: with lh != la, the two branches must NOT be
+        # interchangeable -- this is what the transposed bug would hide.
+        self.assertNotAlmostEqual(tau10, 1.0 + lh * rho)
+        self.assertNotAlmostEqual(tau01, 1.0 + la * rho)
+
+
 class DefenceSignTest(unittest.TestCase):
     """The headline fix: a tough defence must suppress our attackers."""
 

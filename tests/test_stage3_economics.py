@@ -269,6 +269,69 @@ class PositionalHurdleEndToEndTest(unittest.TestCase):
                          "exactly one original MID should have been dropped for mid_alt")
 
 
+class ChurnResistanceTest(unittest.TestCase):
+    """Section 6 item 4 of the forensic report: at a REALISTIC sigma (median
+    0.49 on the horizon scale) the implied hurdle is ~1.0 per leg, ~2.0 per
+    swap. That has to reject a flat, noise-sized edge ON ITS OWN, independent
+    of how many free transfers are banked.
+
+    FT_OPTION_MARGINAL is a concave curve: spending a transfer forfeits its
+    NEXT marginal banked-FT value, which is 1.30 going from 0->1 banked but
+    only 0.05 going from 4->5. So using a transfer is nearly free from the
+    banked-FT-option's point of view once 5 are already banked, and a hurdle
+    that only rejected noise because ft=1 made spending expensive would let
+    the identical noise-sized edge through at ft=5. The sigma-weighted hurdle
+    does not depend on free_transfers at all, so it has to carry the whole
+    rejection by itself in both cases.
+    """
+
+    EDGE = 1.5   # comfortably below the ~2.0-per-swap hurdle at sigma=0.49
+
+    def _solve(self, free_transfers):
+        pool = _toy_squad_pool()
+        # Every original MID at the realistic sigma, not just the one the
+        # solver "should" sell -- otherwise it simply sells one of the four
+        # untouched (sigma=0.0) decoys instead, whose leg of the hurdle is
+        # far cheaper, and the test would be measuring a squad with only one
+        # realistic-sigma leg rather than the two the report's ~2.0-per-swap
+        # figure assumes.
+        for p in pool:
+            if p["position"] == "MID":
+                p["sigma"] = 0.49
+        held_ids = {e["id"] for e in pool}
+        candidate = _toy_candidate("mid_alt", "MID", 4.0 + self.EDGE, team_id=999)
+        candidate["sigma"] = 0.49
+        pool = pool + [candidate]
+        budget = sum(e["price"] for e in pool if e["id"] in held_ids)
+        selected, _obj, _parts = fpl_tools._solve_squad(
+            pool, budget=budget, must_include_ids=held_ids,
+            hit_config={"free_transfers": free_transfers, "hit_cost": fpl_tools.HIT_COST,
+                        "max_transfers": 5})
+        return selected
+
+    def test_a_flat_small_edge_is_declined_at_ft1(self):
+        selected = self._solve(free_transfers=1)
+        self.assertNotIn("mid_alt", selected,
+                         "a +1.5 xP edge at sigma=0.49 must not clear the ~2.0 swap hurdle")
+        original_mids = {f"mid{i}" for i in range(5)}
+        self.assertEqual(original_mids & set(selected), original_mids,
+                         "no swap should have happened at all")
+
+    def test_the_same_edge_is_still_declined_at_ft5(self):
+        """The regression this guards against: at ft=5 spending the transfer
+        only forfeits the 5th (0.05) marginal banked-FT value instead of the
+        1st (1.30), so if the sigma hurdle were not doing real work on its
+        own this exact noise-sized edge would clear here even though it does
+        not at ft=1."""
+        selected = self._solve(free_transfers=5)
+        self.assertNotIn("mid_alt", selected,
+                         "banking 5 free transfers must not make a noise-sized "
+                         "edge worth taking")
+        original_mids = {f"mid{i}" for i in range(5)}
+        self.assertEqual(original_mids & set(selected), original_mids,
+                         "no swap should have happened at all")
+
+
 class GKLockTest(unittest.TestCase):
     """Task 1.3: the Active GK Lock -- a pure-function test of the
     eligibility check (_locked_starting_gk) plus an end-to-end test that the

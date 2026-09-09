@@ -88,7 +88,6 @@ PRIOR_MINUTES = 270.0
 # 0.86 to 0.71 rather than 1.00 to 0.75.
 PRIOR_STARTS = 2.0
 PRIOR_GAMES = 3.0
-WILDCARD_SCARCITY_COST = 55.0
 TIGHTROPE_DISCOUNT = 0.85   # 15% haircut on multi-week xP for a player one card from a ban
 
 # Positional "routes to points" transfer hurdle -- an ADDITIONAL, position-
@@ -183,7 +182,11 @@ RED_CARD_PTS = 3.0
 # up to ~0.33 points of bonus and ~0.4 of card charge. Nor is v7: minutes are
 # exponentially weighted toward recent matches and doubt now shifts a player
 # from starting toward a cameo, and minutes multiply every other component.
-MODEL_VERSION = "v7-minutes-recency"
+# v8 fixes `_tau_correction`'s transposed 1-0/0-1 branches -- the Dixon-Coles
+# low-score correction was being applied with home and away rates swapped for
+# those two scorelines, distorting the fitted attack/defence ratings that
+# every fixture-adjusted projection is built from.
+MODEL_VERSION = "v8-tau-correction"
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -487,13 +490,20 @@ def _tau_correction(x: float, y: float, lh: float, la: float, rho: float):
 
     Returns (tau, d_tau/d_lh, d_tau/d_la, d_tau/d_rho). Corrects the 0-0, 1-0,
     0-1 and 1-1 scorelines which the independent-Poisson model over-predicts.
+
+    Per Dixon & Coles (1997), the 1-0 correction scales with the AWAY rate
+    (`la`) and the 0-1 correction scales with the HOME rate (`lh`) -- the
+    correction is a function of the goal count that did NOT occur, not the
+    one that did. The two branches were previously transposed (1-0 keyed off
+    `lh`, 0-1 keyed off `la`), which silently swapped the low-score
+    correction between the home and away side of every fixture.
     """
     if x == 0 and y == 0:
         return 1.0 - lh * la * rho, -la * rho, -lh * rho, -lh * la
     if x == 1 and y == 0:
-        return 1.0 + lh * rho, rho, 0.0, lh
-    if x == 0 and y == 1:
         return 1.0 + la * rho, 0.0, rho, la
+    if x == 0 and y == 1:
+        return 1.0 + lh * rho, rho, 0.0, lh
     if x == 1 and y == 1:
         return 1.0 - rho, 0.0, 0.0, -1.0
     return 1.0, 0.0, 0.0, 0.0
@@ -521,6 +531,12 @@ def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=-0.10, iterations=300, l
     actually contribute to it. Only 0-0, 1-0, 0-1 and 1-1 have a non-zero
     d(tau)/d(rho); dividing by the weight of *all* matches diluted the step by
     roughly 1/0.35, which is why rho barely moved from its initial value.
+
+    `_tau_correction`'s 1-0 and 0-1 branches were themselves transposed --
+    1-0 (home scores, away doesn't) was keyed off the home rate `lh` instead
+    of the away rate `la`, and vice versa for 0-1. That fed the gradient
+    updates in this loop the wrong low-score correction for roughly half the
+    fixtures that touch it, on top of the centring fix above.
 
     Pure-Python gradient ascent (no scipy/numpy).
     """
@@ -1044,7 +1060,8 @@ _FIXTURE_LOOKUP_TS: float = 0.0
 FIXTURE_LOOKUP_TTL_SECONDS = 300.0
 
 
-def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[int, List[Dict[str, Any]]]:
+def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None,
+                           fixtures_override: Optional[List[Dict]] = None) -> Dict[int, List[Dict[str, Any]]]:
     """Per-team fixture lists, decorated with ratings, lambdas and odds.
 
     Memoised. This is called from more than fifty sites -- score_my_squad,
@@ -1057,26 +1074,37 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
     the lookup pinning ratings that have already moved on. _clear_rating_caches
     drops this too, for the same reason: anything that changes the fit has to
     invalidate what was built on top of it.
+
+    `fixtures_override` bypasses both the live `_get_fixtures()` call and the
+    module-level cache above -- it exists for the offline model-health
+    backfill (scripts/backfill_model_health.py), which builds one lookup per
+    HISTORICAL gameweek from that gameweek's own unfiltered fixture list and
+    must never read stale entries from, or overwrite, the cache the running
+    app shares across requests.
     """
-    global _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS
-    if (_FIXTURE_LOOKUP_CACHE is not None
-            and (time.time() - _FIXTURE_LOOKUP_TS) < FIXTURE_LOOKUP_TTL_SECONDS):
-        return _FIXTURE_LOOKUP_CACHE
+    if fixtures_override is None:
+        global _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS
+        if (_FIXTURE_LOOKUP_CACHE is not None
+                and (time.time() - _FIXTURE_LOOKUP_TS) < FIXTURE_LOOKUP_TTL_SECONDS):
+            return _FIXTURE_LOOKUP_CACHE
 
     if bootstrap is None:
         bootstrap = _get_bootstrap()
     teams = {t["id"]: t for t in bootstrap.get("teams", [])}
 
-    try:
-        fixtures = _get_fixtures()
-    except Exception as exc:
-        # Raise, never return {}. An empty lookup makes _player_xp_raw report
-        # "Blank" with 0.0 xP for EVERY player in the game, which the solver
-        # then reads as a squad of worthless assets -- a total failure that
-        # renders as a plausible-looking page. The caller must decide how to
-        # degrade; it cannot do that if the failure is disguised as data.
-        raise FixtureDataUnavailable(
-            "could not load the FPL fixture list") from exc
+    if fixtures_override is not None:
+        fixtures = fixtures_override
+    else:
+        try:
+            fixtures = _get_fixtures()
+        except Exception as exc:
+            # Raise, never return {}. An empty lookup makes _player_xp_raw report
+            # "Blank" with 0.0 xP for EVERY player in the game, which the solver
+            # then reads as a squad of worthless assets -- a total failure that
+            # renders as a plausible-looking page. The caller must decide how to
+            # degrade; it cannot do that if the failure is disguised as data.
+            raise FixtureDataUnavailable(
+                "could not load the FPL fixture list") from exc
 
     win_probs = _fetch_market_win_probs(bootstrap)
     ratings = _team_attack_def_ratings()
@@ -1124,8 +1152,9 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[in
 
     for t in lookup:
         lookup[t].sort(key=lambda x: x["event"] if x["event"] is not None else 999)
-    _FIXTURE_LOOKUP_CACHE = lookup
-    _FIXTURE_LOOKUP_TS = time.time()
+    if fixtures_override is None:
+        _FIXTURE_LOOKUP_CACHE = lookup
+        _FIXTURE_LOOKUP_TS = time.time()
     return lookup
 
 
@@ -1374,8 +1403,16 @@ def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, 
         if recent:
             start_rate = min(1.0, (recent["start_rate"] * recent["n_eff"] + PRIOR_STARTS)
                              / (recent["n_eff"] + PRIOR_GAMES))
+        elif starts > 0:
+            start_rate = min(1.0, starts / games)
+        elif minutes >= 60:
+            start_rate = 1.0
         else:
-            start_rate = min(1.0, starts / games) if starts > 0 else (1.0 if minutes >= 60 else 0.0)
+            # Zero (or sub-60) evidence -- true GW1, or a keeper with no
+            # recorded starts and no recorded minutes. Falling straight to
+            # 0.0 zeroed the player out of the projection entirely; the same
+            # Beta prior used everywhere else reads 0.5 at games=1.0 instead.
+            start_rate = min(1.0, PRIOR_STARTS / (games + PRIOR_GAMES))
         base_full, base_sub = start_rate, 0.0
     elif recent:
         # Recency path (C10b). The same Beta prior as the season path, applied
@@ -1395,10 +1432,16 @@ def _minute_distribution(p: Dict[str, Any], status: str) -> Tuple[float, float, 
             # from 1.00 to 0.75 and the whole projection with it, because minutes
             # multiply every other component.
             base_full = min(1.0, (starts + PRIOR_STARTS) / (games + PRIOR_GAMES))
-        else:
+        elif minutes > 0:
             # Starts unreported: infer from minutes (treat as full-game starts) so a
             # 1000-minute player is a nailed starter, not a 100% cameo sub.
-            base_full = min(1.0, (minutes / 90.0) / games) if minutes > 0 else 0.0
+            base_full = min(1.0, (minutes / 90.0) / games)
+        else:
+            # Zero evidence -- true GW1, or a new signing with no minutes
+            # recorded yet. Falling straight to 0.0 zeroed the player out of
+            # the projection entirely; fall back to the same Beta prior used
+            # above, which reads 0.5 at games=1.0 rather than "will not play".
+            base_full = min(1.0, PRIOR_STARTS / (games + PRIOR_GAMES))
         sub_minutes = max(0.0, minutes - base_full * games * 90.0)
         sub_apps = sub_minutes / AVG_SUB_MINUTES
         base_sub = min(sub_apps / games, max(0.0, 1.0 - base_full))
@@ -3858,6 +3901,15 @@ def suggest_transfers_for_custom_squad(
           figure excluded captaincy, bench weights, CVaR, stacking, EO and tax,
           so the number shown to the user was not the quantity being maximised
           and could rank moves differently from the solver that chose them.
+
+        * net_gain now folds in banked_transfer_value, chip_cost and
+          cash_optionality alongside points_hit and transfer_bar. Those three
+          are shown as their own rows in the app's waterfall (app.py's
+          WATERFALL_ROWS) but were missing from this sum, so "Net" in the UI
+          did not equal the rows stacked above it whenever any of the three
+          was non-zero -- an unforced residual that could trip the >20%
+          "everything else combined" warning on a move with no real
+          interaction effect at all.
         """
         if not selected_ids:
             return [], 0, 0.0, 0.0, {}
@@ -3895,8 +3947,12 @@ def suggest_transfers_for_custom_squad(
             "cash_optionality": round(float(parts.get("liquidity", 0.0)), 2),
         }
         # Net gain relative to holding: the objective delta the moves bought.
+        # Every breakdown row that carries a real objective term is summed in
+        # here, so "Net" always reconciles with the rows the waterfall shows.
         net_gain = round(sum(m["xp_gain"] for m in mvs)
-                         + breakdown["points_hit"] + breakdown["transfer_bar"], 2)
+                         + breakdown["points_hit"] + breakdown["transfer_bar"]
+                         + breakdown["banked_transfer_value"] + breakdown["chip_cost"]
+                         + breakdown["cash_optionality"], 2)
         breakdown["net"] = net_gain
         return mvs, hits, net_gain, cost_chg, breakdown
 
@@ -3993,8 +4049,16 @@ def suggest_transfers_for_custom_squad(
                             reverse=True)[:11]
             fh_net = round(sum(fh_xi) - sum(cur_xi), 2)
 
-    # Wildcard is a full-season chip: re-solve with a scarcity penalty so it is
-    # only deployed when the rebuilt squad decisively outscores the current one.
+    # Wildcard is a full-season chip: re-solve unsuppressed (no in-objective
+    # scarcity_cost) and let the rebuild delta be judged solely by the
+    # external gate below -- _chip_reservation_threshold plus
+    # _wildcard_timing_penalty. A 55.0 in-objective scarcity_cost used to sit
+    # here as well, which double-penalised the same decision: it depressed
+    # wc_net (the score the external threshold then gates) AND could change
+    # which squad the solver picked, so the number shown to the user was not
+    # a clean rebuild delta and the reservation threshold was gating an
+    # already-suppressed figure. The external gate is now the single source
+    # of truth.
     wc_moves, wc_hits, wc_net, wc_cost = [], 0, 0.0, 0.0
     if "Wildcard" in eval_chips:
         wc_selected, _wc_obj, wc_parts = _solve_squad(
@@ -4003,7 +4067,6 @@ def suggest_transfers_for_custom_squad(
                         "hurdle_scale": 0.0},
             bench_boost=("Bench Boost" in eval_chips),
             bench_cap=_bench_cap_for(current_gw, bench_boost_gw),
-            scarcity_cost=WILDCARD_SCARCITY_COST,
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
             cvar_scenarios=stress_scenarios,

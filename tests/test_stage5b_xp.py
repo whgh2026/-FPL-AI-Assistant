@@ -182,6 +182,30 @@ class StartRatePriorTest(unittest.TestCase):
         a symmetric prior would drag nailed players down."""
         self.assertGreater(fpl_tools.PRIOR_STARTS / fpl_tools.PRIOR_GAMES, 0.5)
 
+    def test_zero_evidence_outfield_player_is_not_zeroed_out(self):
+        """True GW1: zero starts and zero minutes anywhere, for anyone. The
+        `starts <= 0` branch used to fall to `base_full = 0.0` whenever
+        `minutes == 0`, reading a brand-new signing (or the whole league in
+        GW1) as guaranteed not to play. It must fall back to the same Beta
+        prior used for small samples elsewhere -- 0.5 at games=1.0."""
+        _p0, _c, full = self._dist(0, 1, played=0)
+        expected = fpl_tools.PRIOR_STARTS / (1.0 + fpl_tools.PRIOR_GAMES)
+        self.assertAlmostEqual(full, expected, places=6)
+        self.assertGreater(full, 0.4, "zero-evidence player must not be zeroed out")
+
+    def test_zero_evidence_goalkeeper_is_not_zeroed_out(self):
+        """Mirrors the outfield fix for the GK branch: `starts == 0` and
+        `minutes < 60` used to read straight to 0.0."""
+        from unittest import mock
+        p = {"element_type": 1, "team": 1, "starts": 0, "minutes": 0,
+             "chance_of_playing_next_round": None}
+        with mock.patch.object(fpl_tools, "_team_played_map", return_value={1: 1}):
+            _p0, p_cameo, p_full = fpl_tools._minute_distribution(p, "a")
+        expected = fpl_tools.PRIOR_STARTS / (1.0 + fpl_tools.PRIOR_GAMES)
+        self.assertAlmostEqual(p_full, expected, places=6)
+        self.assertEqual(p_cameo, 0.0, "keepers never register cameos")
+        self.assertGreater(p_full, 0.4, "zero-evidence keeper must not be zeroed out")
+
 
 class DefconTest(unittest.TestCase):
     """C6: every defender used to receive an identical +1.36."""

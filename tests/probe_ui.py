@@ -250,6 +250,33 @@ def main():
           fx_run_count == 2,
           f"expected 2 fixture tracks (out + in), found {fx_run_count}")
 
+    # ---- waterfall reconciliation: no incommensurate "total squad" row ----
+    # The removed "projected_points" row carried the WHOLE squad's projected
+    # points over the horizon (order ~100+ over a 4-GW window), while every
+    # other row and "net" are single-digit move deltas. Comparing the two
+    # meant "shown" always swamped "net" and the >20% residual warning fired
+    # on essentially every recommended transfer, whatever the real components
+    # reconciled to.
+    check("waterfall_rows_drop_projected_points",
+          "projected_points" not in dict(app.WATERFALL_ROWS),
+          str(app.WATERFALL_ROWS))
+
+    tracked_breakdown = {
+        "points_hit": -4.0,
+        "transfer_bar": -0.8,
+        "banked_transfer_value": 0.65,
+        "chip_cost": 0.0,
+        "cash_optionality": 0.05,
+    }
+    tracked_breakdown["net"] = round(sum(tracked_breakdown.values()), 2)
+    clean_html = app._waterfall_html(tracked_breakdown)
+    check("waterfall_projected_points_label_absent",
+          "Projected points" not in clean_html, clean_html)
+    check("waterfall_tracked_terms_reconcile_without_warning",
+          "wf-warn" not in clean_html,
+          f"tracked terms summed to net cleanly but still fired the "
+          f"residual warning: {clean_html!r}")
+
     # ---- pitch-view fixture dots: real circular elements, not emoji ------
     dots_html = app._pitch_fixture_dots_html(any_team_id)
     check("pitch_fixture_dots_renders_four_real_dots",

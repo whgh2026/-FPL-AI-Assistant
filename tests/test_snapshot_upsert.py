@@ -105,6 +105,19 @@ class SnapshotUpsertTest(unittest.TestCase):
         for sql, _rows, _page_size in cur.batch_calls:
             self.assertNotIn("DELETE", sql.upper())
 
+    def test_snapshot_stamps_current_version(self):
+        """Every row's model_version (tuple index 11 -- see the INSERT column
+        list: player_id, gameweek, player_name, position, team, predicted_xp,
+        base_pts, cameo_mass, rotation_variance, dc_sensitivity,
+        minutes_floor, model_version, ...) must be fpl_tools.MODEL_VERSION at
+        the moment of the snapshot, not a stale literal that drifts the next
+        time MODEL_VERSION bumps."""
+        _conn, cur = self._run_main_with_fakes()
+        _sql, rows, _page_size = cur.batch_calls[0]
+        self.assertTrue(rows, "expected at least one row from the synthetic fixture")
+        for row in rows:
+            self.assertEqual(row[11], fpl_tools.MODEL_VERSION)
+
     def test_runs_the_upsert_key_migration_alongside_the_others(self):
         with harness.synthetic_world() as (_bs, _fx), \
              mock.patch.object(snapshot_xp, "_connect", return_value=_FakeConn(_FakeCursor())), \
