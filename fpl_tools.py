@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import requests
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
 import dateutil.parser
 
@@ -3186,26 +3187,153 @@ def _wildcard_timing_penalty(gw: int, swing_scores=None) -> float:
     return round(WILDCARD_ENVELOPE_PENALTY * min(1.0, distance / 4.0), 2)
 
 
-def get_played_chips(manager_id: str) -> List[str]:
-    """Chip names the manager has already played (from FPL history)."""
+def get_played_chips_with_events(manager_id: str) -> List[Tuple[str, int]]:
+    """(chip name, gameweek played) for every chip in the manager's FPL
+    history, oldest first.
+
+    The event is what get_played_chips() used to throw away: knowing a chip
+    was played is not enough to know whether it is still available now, since
+    availability depends on WHICH gameweek (and therefore which chip set --
+    see CHIP_SET1_EXPIRY_GW/CHIP_SET2_EXPIRY_GW) it was played in. This is
+    also why the result is not deduplicated by name the way get_played_chips
+    is: the same chip name legitimately appears twice across a season, once
+    per set, and collapsing those into one entry silently lost the second.
+    """
     try:
         manager_id = _clean_manager_id(manager_id)
         resp = requests.get(f"{BASE_URL}/entry/{manager_id}/history/", timeout=10)
         resp.raise_for_status()
         chips = resp.json().get("chips") or []
-        # Normalised to display names. The API returns its own vocabulary --
-        # "wildcard", "freehit", "bboost", "3xc" -- which was being compared
-        # directly against "Wildcard", "Free Hit", "Bench Boost", "Triple
-        # Captain". Nothing ever matched, so a played chip stayed on the
-        # available list and could be recommended a second time.
         out = []
         for c in chips:
             name = normalise_chip_name(c.get("name"))
-            if name and name not in out:
-                out.append(name)
+            event = c.get("event")
+            if name and event is not None:
+                out.append((name, int(event)))
+        out.sort(key=lambda ne: ne[1])
         return out
     except Exception:
         return []
+
+
+def get_played_chips(manager_id: str) -> List[str]:
+    """Chip names the manager has already played (from FPL history).
+
+    A thin, name-only view over get_played_chips_with_events for callers that
+    only need "has this chip EVER been played" (e.g. the Set-1-deadline
+    warning banner) rather than when. Normalised to display names: the API
+    returns its own vocabulary -- "wildcard", "freehit", "bboost", "3xc" --
+    which was being compared directly against "Wildcard", "Free Hit", "Bench
+    Boost", "Triple Captain". Nothing ever matched, so a played chip stayed
+    on the available list and could be recommended a second time.
+    """
+    seen = []
+    for name, _event in get_played_chips_with_events(manager_id):
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+@dataclass
+class ChipEntry:
+    """One chip's state within one chip set. FPL issues all four chips fresh
+    at the start of each set, so a manager holds up to eight independent
+    slots across a season (4 chips x 2 sets) -- this is one of them."""
+    name: str                    # one of CHIPS
+    chip_set: int                # 1 or 2
+    window_open_gw: int
+    window_close_gw: int
+    is_used: bool = False
+    used_gw: Optional[int] = None
+
+
+@dataclass
+class ChipLedger:
+    """A manager's full chip state for the season: which of the eight
+    (4 chips x 2 sets) slots have been played, and when.
+
+    Exists so the solver can be told which chips are actually still
+    available instead of being handed CHIPS/ALL_CHIPS unconditionally on
+    every call -- see suggest_transfers_for_custom_squad's and
+    _plan_transfers_multi_gw's chip_ledger parameter. Built via
+    ChipLedger.from_history(); the bare constructor is for tests that want
+    to hand-place specific entries.
+    """
+    entries: List[ChipEntry] = field(default_factory=list)
+
+    @classmethod
+    def from_history(cls, played: List[Tuple[str, int]]) -> "ChipLedger":
+        """played: [(chip_name, event), ...], e.g. from
+        get_played_chips_with_events(manager_id)."""
+        entries = []
+        for chip in CHIPS:
+            for chip_set in (1, 2):
+                open_gw, close_gw = (
+                    (1, CHIP_SET1_EXPIRY_GW) if chip_set == 1
+                    else (CHIP_SET1_EXPIRY_GW + 1, CHIP_SET2_EXPIRY_GW)
+                )
+                entries.append(ChipEntry(name=chip, chip_set=chip_set,
+                                         window_open_gw=open_gw, window_close_gw=close_gw))
+        ledger = cls(entries=entries)
+        for name, gw in played:
+            entry = ledger._entry_for(name, gw)
+            if entry is not None:
+                entry.is_used = True
+                entry.used_gw = int(gw)
+        return ledger
+
+    def _entry_for(self, name: str, gw: int) -> Optional[ChipEntry]:
+        chip_set = 1 if int(gw) <= CHIP_SET1_EXPIRY_GW else 2
+        for e in self.entries:
+            if e.name == name and e.chip_set == chip_set:
+                return e
+        return None
+
+    def _last_used_before(self, gw: int) -> Tuple[Optional[str], Optional[int]]:
+        """The most recently used chip strictly before `gw`, from this
+        ledger's own recorded history. Used by can_play when the caller does
+        not supply an explicit last_played_chip -- e.g. a plain "what can I
+        play this gameweek" query rather than a speculative multi-step one."""
+        used = [(e.used_gw, e.name) for e in self.entries
+               if e.is_used and e.used_gw is not None and e.used_gw < int(gw)]
+        if not used:
+            return None, None
+        used_gw, name = max(used)
+        return name, used_gw
+
+    def can_play(self, chip: str, gw: int,
+                last_played_chip: Optional[Tuple[str, int]] = None) -> bool:
+        """Whether `chip` is legal to play at gameweek `gw`.
+
+        `last_played_chip`, if given, is (name, gw) of whatever chip a
+        caller is treating as "just played" for the purpose of this query --
+        e.g. a multi-step planner checking "if I play Free Hit at GW19, can I
+        play it again at GW20" before that decision is recorded in the
+        ledger. Omitted, this falls back to the ledger's own history, which
+        is the right answer for every non-speculative query.
+        """
+        chip = normalise_chip_name(chip) or chip
+        gw = int(gw)
+        entry = self._entry_for(chip, gw)
+        if entry is None:
+            return False
+        if gw < entry.window_open_gw or gw > entry.window_close_gw:
+            return False
+        if entry.is_used:
+            return False
+        if chip == "Free Hit":
+            if gw <= 1:
+                return False  # nothing to revert to yet
+            prev_name, prev_gw = (last_played_chip if last_played_chip is not None
+                                  else self._last_used_before(gw))
+            if prev_name == "Free Hit" and prev_gw == gw - 1:
+                return False  # no consecutive Free Hits (the GW19->GW20 case)
+        return True
+
+    def available_chips(self, gw: int) -> List[str]:
+        """Every chip that is legal AND unplayed for `gw`, in CHIPS order."""
+        gw = int(gw)
+        return [c for c in CHIPS if self.can_play(c, gw)]
 
 
 def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
@@ -3493,7 +3621,8 @@ def _ft_state_machine_constraints(prob, ft_t, ft_next, u_t, chip_t, hits_t,
 
 
 def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean,
-                             event, n=PLAN_HORIZON, bank_cash=None):
+                             event, n=PLAN_HORIZON, bank_cash=None,
+                             chip_ledger: Optional[ChipLedger] = None):
     """Multi-GW transfer scheduler: ownership + FT + budget over N GWs (Omega(f)).
 
     Spans the horizon so banking FTs now can fund a coupled structural pivot in a
@@ -3517,11 +3646,21 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
       wrong: the temporary squad would otherwise permanently overwrite the
       real one, one week early, in every week displayed after it.
 
-    This cannot know whether a chip has already been spent this season -- the
-    caller does not currently pass that in (eval_chips is always the full set
-    in every existing call site) -- so, like the rest of the app, this can
-    suggest a chip regardless of whether it is still available. Not a new
-    limitation: the single-GW solver has the same gap.
+    `chip_ledger`, when supplied, forces wc[t]/fh[t] to 0 for any week whose
+    absolute gameweek (event + t) the ledger says that chip is not legal for
+    -- already used this set, past the set's deadline, or (Free Hit) illegal
+    at GW1 or immediately after a Free Hit played the previous gameweek. Left
+    None (the default, and every call site before this parameter existed),
+    wc_once/fh_once below are the only cap, exactly as before: the planner
+    cannot know whether a chip has already been spent this season, so it can
+    suggest one regardless of whether it is still available. One known
+    residual gap even with a ledger: wc_once/fh_once still cap the WHOLE
+    horizon at one Wildcard and one Free Hit, so a horizon that spans the
+    GW19/GW20 boundary cannot recommend a legitimate "one now in Set 1, one
+    later in Set 2" pair within a single solve -- the ledger only ever
+    narrows what was already suggestible, so this is not a regression, and a
+    fresh solve after Set 1's chip is actually played sees Set 2's copy as a
+    normal, independently available chip again.
     """
     if not HAS_PULP:
         return []
@@ -3598,6 +3737,15 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
         # At most one chip per week, and (mirroring "one chip per set") at
         # most one Wildcard and one Free Hit across the whole horizon.
         prob += wc[t] + fh[t] <= 1, f"chip_excl_{t}"
+
+        if chip_ledger is not None:
+            gw_t = int(event) + t
+            allowed_t = set(chip_ledger.available_chips(gw_t))
+            if "Wildcard" not in allowed_t:
+                prob += wc[t] == 0, f"ledger_wc_blocked_{t}"
+            if "Free Hit" not in allowed_t:
+                prob += fh[t] == 0, f"ledger_fh_blocked_{t}"
+
         chip_t = wc[t] + fh[t]
 
         _ft_state_machine_constraints(
@@ -3815,6 +3963,7 @@ def suggest_transfers_for_custom_squad(
     allow_hits: bool = False,
     bench_boost_gw: Optional[int] = None,
     rival_ids: Optional[set] = None,
+    chip_ledger: Optional[ChipLedger] = None,
 ) -> Dict[str, Any]:
     # A mutable default (`= []`) is evaluated ONCE at def-time and shared by
     # every call that doesn't pass its own eval_chips -- harmless only for as
@@ -3830,12 +3979,26 @@ def suggest_transfers_for_custom_squad(
     fixture_lookup = _build_fixture_lookup(bootstrap)
     teams_by_id = {t["id"]: t["name"] for t in bootstrap.get("teams", [])}
     elements_by_id = {e["id"]: e for e in bootstrap["elements"]}
-    
+
     if event is None:
         event = _next_gameweek(bootstrap)
 
     if current_gw is None:
         current_gw = event
+
+    # Every existing call site passes eval_chips=ALL_CHIPS/CHIPS unconditionally,
+    # with no notion of which chips this manager has actually already spent --
+    # so the solver could recommend a chip a second time, past its set's
+    # deadline, or in violation of a temporal rule (Free Hit in GW1, or twice
+    # in a row across the GW19/GW20 set boundary). A ledger, when supplied,
+    # is the hard source of truth: it INTERSECTS with (never widens) whatever
+    # the caller asked to evaluate. A ledger with no eval_chips narrowing at
+    # all defaults to "evaluate everything the ledger allows".
+    if chip_ledger is not None:
+        if not eval_chips:
+            eval_chips = list(CHIPS)
+        allowed = set(chip_ledger.available_chips(current_gw))
+        eval_chips = [c for c in eval_chips if c in allowed]
 
     # Rank-aware logic is driven by the STRATEGY the manager picked, not by the
     # calendar. This was gated behind current_gw >= PHASE2_START_GW (26), so for
@@ -3985,7 +4148,8 @@ def suggest_transfers_for_custom_squad(
             if p["id"] in sigmas:
                 p["sigma"] = sigmas[p["id"]]
         multi_gw_plan = _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids,
-                                                saa_mean, event, bank_cash=bank)
+                                                saa_mean, event, bank_cash=bank,
+                                                chip_ledger=chip_ledger)
     except Exception:
         saa_mean, scenario_matrix, stress_scenarios, multi_gw_plan = {}, {}, {}, []
 

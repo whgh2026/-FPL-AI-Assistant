@@ -1,5 +1,6 @@
 import os
 import re
+from typing import Optional
 import requests
 import streamlit as st
 import fpl_tools
@@ -102,6 +103,24 @@ def _status_badge(status: str) -> str:
     if status in ("OUT", "Injured", "Suspended", "Unavailable"):
         return f'<span class="stat-badge stat-out">🔴 {status}</span>'
     return f'<span class="stat-badge stat-doubt">⚠️ {status}</span>'
+
+
+def _build_chip_ledger(manager_id: str) -> Optional[fpl_tools.ChipLedger]:
+    """This manager's chip ledger, or None if it can't be built right now.
+
+    None (rather than an empty/default ledger) on failure: suggest_transfers_
+    for_custom_squad treats chip_ledger=None as "no ledger available", which
+    falls back to its pre-ledger behaviour (every chip the caller asked to
+    evaluate is a candidate) -- the same fail-open posture every other
+    manager-history lookup on this page already has (see
+    get_or_backfill_manager_history), rather than fail-closed and silently
+    hide every chip the moment the FPL API has a bad moment.
+    """
+    try:
+        played = fpl_tools.get_played_chips_with_events(manager_id)
+        return fpl_tools.ChipLedger.from_history(played)
+    except Exception:
+        return None
 
 
 def _player_card(p, max_xp: float, role: str = None) -> str:
@@ -1895,7 +1914,7 @@ with tab_planner:
                                 analysed, float(bank_val), int(st.session_state.get("available_ft", 1)), eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                                 holding_map=holding_map, current_gw=GW_ID,
                                 allow_hits=st.session_state.get("ov_allow_hits", False),
-                                rival_ids=rival_ids)
+                                rival_ids=rival_ids, chip_ledger=_build_chip_ledger(manager_id))
 
                             try:
                                 log_decision(
@@ -2018,7 +2037,8 @@ with tab_planner:
                             eval_chips=ALL_CHIPS, event=GW_ID, risk=risk_label.lower(),
                             holding_map=holding_map, current_gw=GW_ID,
                             allow_hits=st.session_state.get("ov_allow_hits", False),
-                            rival_ids=st.session_state.get("rival_ids")
+                            rival_ids=st.session_state.get("rival_ids"),
+                            chip_ledger=_build_chip_ledger(manager_id),
                         )
                         ov["transfers"] = tr
                     except Exception as e:
@@ -2038,12 +2058,18 @@ with tab_planner:
                     eval_html = "".join(f"<div style='margin-bottom:6px;'>{e}</div>" for e in evals)
                     st.markdown(_card(eval_html, "🎟️ Active Chip Analysis & Recommendations"), unsafe_allow_html=True)
 
-                chip_options = ["None (Hold Chips)"] + ALL_CHIPS
+                # Sourced from the same ChipLedger the optimizer itself now solves
+                # against (see suggest_transfers_for_custom_squad's chip_ledger
+                # param), so a manager can never even SELECT a chip here that the
+                # solver would then refuse to evaluate as illegal/already spent.
+                chip_ledger = _build_chip_ledger(manager_id.strip())
+                available_now = chip_ledger.available_chips(GW_ID) if chip_ledger else ALL_CHIPS
+                chip_options = ["None (Hold Chips)"] + available_now
 
                 set1_remaining = []
                 try:
                     inv = fpl_tools._chip_inventory(GW_ID)
-                    played = fpl_tools.get_played_chips(manager_id.strip())
+                    played = sorted({e.name for e in chip_ledger.entries if e.is_used}) if chip_ledger else []
                     set1_remaining = [c for c in inv["set1"] if c not in played]
                     if inv["set1"]:
                         st.markdown(f"**🎟️ Chip Scenario Lab (Set 1 · Expire GW{inv['expiry_gw']})**")
@@ -2063,6 +2089,13 @@ with tab_planner:
                         "projected points shift. Leave blank for standard rolling "
                         "transfer strategy."
                     )
+                # chip_options can legitimately shrink between reruns (a chip
+                # played for real on FPL between two loads of this page) --
+                # a stale selection no longer in the list is not a bug, but
+                # st.radio raises if a key's persisted value isn't in
+                # `options`, so drop it back to the default first.
+                if st.session_state.get("confirmed_chip_radio") not in chip_options:
+                    st.session_state["confirmed_chip_radio"] = chip_options[0]
                 confirmed_chip = st.radio(
                     "Play a chip this Gameweek (only one allowed)",
                     chip_options,
