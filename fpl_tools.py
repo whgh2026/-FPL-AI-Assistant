@@ -343,6 +343,22 @@ VALID_FORMATIONS = [
     if d + m + f == 10
 ]
 
+# Captaincy safety margin for select_starting_xi/_select_captaincy. A
+# defender or goalkeeper's biggest single-week returns are clean-sheet
+# dependent -- one binary, match-defining event that a single added-time
+# concession erases completely -- while MID/FWD have several independent,
+# largely continuous routes to points (goals, assists, open-play xG, BPS)
+# that do not all collapse on the same moment. The armband therefore
+# defaults to the best MID/FWD even when a GK/DEF is nominally projected a
+# little higher, unless that GK/DEF clears CAPTAINCY_OVERRIDE_MARGIN: past
+# that gap the raw expected-points edge is wide enough that the extra
+# variance no longer hides a genuinely bigger return, and the projection
+# should win. 1.5 is deliberately a MARGIN, not a plain ">" comparison --
+# a GK/DEF a fraction of a point clear of the best attacker is not a real
+# edge once that variance is priced in.
+CAPTAINCY_SAFE_POSITIONS = {"MID", "FWD"}
+CAPTAINCY_OVERRIDE_MARGIN = 1.5
+
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _LAST_FETCH_TIME = None
 
@@ -4663,6 +4679,57 @@ def _next_gw_opponents() -> Dict[Any, set]:
         return {}
 
 
+def _select_captaincy(xi: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Pick (captain, vice_captain) from an already-fixed starting XI.
+
+    Defaults to the highest-xP MID/FWD ("the best attacker") rather than the
+    single highest-xP player in the XI outright. A defender or goalkeeper's
+    biggest single-week returns are clean-sheet dependent -- one binary,
+    match-defining event that a single added-time concession erases
+    completely -- while MID/FWD have several independent, largely continuous
+    routes to points (goals, assists, open-play xG, BPS) that do not all
+    collapse on the same moment. Handing the armband to a GK/DEF on a
+    marginal xP edge doubles down on the single most fragile return in the
+    XI for a small expected gain.
+
+    EXCEPTION: if a GK/DEF's own xP clears the best attacker's by at least
+    CAPTAINCY_OVERRIDE_MARGIN, the raw numbers win and that GK/DEF takes the
+    armband after all -- past that gap the expected-points edge is wide
+    enough that the extra variance no longer hides a genuinely bigger
+    return. This is a MARGIN, not a plain ">" comparison, on purpose: a
+    GK/DEF a fraction of a point clear of the best attacker is not a real
+    edge once that variance is priced in, so the default should still hold.
+
+    Vice-captaincy mirrors today's plain runner-up rule in the normal case
+    (second-highest xP in the XI, excluding the captain). Only when the
+    override fires does the vice anchor to the best attacker instead of the
+    naive runner-up -- the runner-up in an override XI is frequently another
+    clean-sheet-dependent asset (often from the same defence), which would
+    leave BOTH armband slots exposed to the same single goal conceded.
+    """
+    best_attacker = max(
+        (p for p in xi if p.get("position") in CAPTAINCY_SAFE_POSITIONS),
+        key=lambda x: x.get("xp", 0), default=None,
+    )
+    best_overall = max(xi, key=lambda x: x.get("xp", 0))
+
+    if (best_attacker is not None
+            and best_overall.get("position") not in CAPTAINCY_SAFE_POSITIONS
+            and best_overall.get("xp", 0) - best_attacker.get("xp", 0) >= CAPTAINCY_OVERRIDE_MARGIN):
+        # The GK/DEF clears the safety margin on its own numbers -- captain
+        # it, and anchor the vice-captaincy on the best attacker rather than
+        # the naive runner-up so the two picks are not both defence-dependent.
+        return best_overall, best_attacker
+
+    # Normal case -- also exactly today's pre-existing behaviour when the
+    # highest-xP player in the XI already IS a MID/FWD, since best_attacker
+    # then equals best_overall and the branch above never fires.
+    captain = best_attacker if best_attacker is not None else best_overall
+    vice = max((p for p in xi if _pid(p) != _pid(captain)),
+               key=lambda x: x.get("xp", 0), default=None)
+    return captain, vice
+
+
 def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_pos = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     for p in squad:
@@ -4682,9 +4749,11 @@ def select_starting_xi(squad: List[Dict[str, Any]]) -> Dict[str, Any]:
     if best_xi is None:
         return {"xi": [], "bench": [], "formation": None, "captain": None, "vice_captain": None, "total_xp": 0.0}
 
-    # Automated captaincy: (C) = highest-projected starter, (VC) = second-highest.
-    captain = max(best_xi, key=lambda x: x.get("xp", 0))
-    vice = max((p for p in best_xi if _pid(p) != _pid(captain)), key=lambda x: x.get("xp", 0), default=None)
+    # Automated captaincy: see _select_captaincy for the GK/DEF safety-margin
+    # override this now applies on top of "highest-projected starter". Kept
+    # in its own helper so the rule is independently testable from the
+    # XI/bench mechanics above.
+    captain, vice = _select_captaincy(best_xi)
 
     xi_ids = {_pid(p) for p in best_xi}
     bench = [p for p in squad if _pid(p) not in xi_ids]

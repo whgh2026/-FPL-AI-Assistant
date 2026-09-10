@@ -127,6 +127,114 @@ class StructuralHealthTest(unittest.TestCase):
         self.assertTrue(opt["ok"])
 
 
+class CaptaincyOverrideTest(unittest.TestCase):
+    """_select_captaincy: the armband defaults to the best MID/FWD, with a
+    margin-gated exception when a GK/DEF's own projection clears it by
+    enough that the extra clean-sheet variance no longer hides a genuinely
+    bigger return. See CAPTAINCY_OVERRIDE_MARGIN's own comment for the full
+    reasoning; these tests are its behavioural half.
+    """
+
+    _ATTACKER_XP = 5.0
+
+    def _squad(self, gk_xp, def_xps, mid_xps, fwd_xps):
+        """A supply-exact 1-3-4-3 squad (11 players -> the only formation
+        VALID_FORMATIONS can build from this supply), so the resulting XI is
+        unambiguous regardless of the xP values under test, with no bench."""
+        rows = ([("GK", gk_xp)] + [("DEF", x) for x in def_xps]
+                + [("MID", x) for x in mid_xps] + [("FWD", x) for x in fwd_xps])
+        return [{"player_id": i + 1, "position": pos, "xp": xp, "name": "P%d" % (i + 1)}
+                for i, (pos, xp) in enumerate(rows)]
+
+    def test_normal_case_is_byte_for_byte_unchanged(self):
+        """The highest-xP player in the XI is already a MID/FWD -- the
+        override must never even be consulted, and (C)/(VC) must match
+        exactly what the pre-existing plain max()/runner-up formula gave."""
+        squad = self._squad(3.0, [4.0, 3.3, 1.8], [7.0, 4.6, 2.9, 2.2], [5.0, 3.6, 1.5])
+        result = fpl_tools.select_starting_xi(squad)
+        self.assertEqual(result["captain"]["player_id"], 5)       # MID, xp 7.0 - outright best
+        self.assertEqual(result["vice_captain"]["player_id"], 9)  # FWD, xp 5.0 - plain runner-up
+
+    def test_override_does_not_fire_below_the_margin(self):
+        """The DEF is the single highest-xP player in the XI, but only
+        (margin - 0.5) clear of the best attacker -- below
+        CAPTAINCY_OVERRIDE_MARGIN, so the armband must still default to the
+        attacker, and the vice must still be the plain runner-up (the DEF)."""
+        def_xp = self._ATTACKER_XP + fpl_tools.CAPTAINCY_OVERRIDE_MARGIN - 0.5
+        squad = self._squad(3.0, [def_xp, 3.3, 1.8],
+                             [self._ATTACKER_XP, 4.0, 2.9, 2.2], [4.5, 3.6, 1.5])
+        result = fpl_tools.select_starting_xi(squad)
+        self.assertEqual(result["captain"]["player_id"], 5)   # MID, best attacker
+        self.assertEqual(result["vice_captain"]["player_id"], 2)  # plain runner-up (the DEF)
+
+    def test_override_fires_at_exactly_the_margin(self):
+        """A gap of exactly CAPTAINCY_OVERRIDE_MARGIN must fire (>=, not >)."""
+        def_xp = self._ATTACKER_XP + fpl_tools.CAPTAINCY_OVERRIDE_MARGIN
+        squad = self._squad(3.0, [def_xp, 3.3, 1.8],
+                             [self._ATTACKER_XP, 4.0, 2.9, 2.2], [4.5, 3.6, 1.5])
+        result = fpl_tools.select_starting_xi(squad)
+        self.assertEqual(result["captain"]["player_id"], 2)
+
+    def test_override_fires_comfortably_above_the_margin(self):
+        def_xp = self._ATTACKER_XP + fpl_tools.CAPTAINCY_OVERRIDE_MARGIN + 3.0
+        squad = self._squad(3.0, [def_xp, 3.3, 1.8],
+                             [self._ATTACKER_XP, 4.0, 2.9, 2.2], [4.5, 3.6, 1.5])
+        result = fpl_tools.select_starting_xi(squad)
+        self.assertEqual(result["captain"]["player_id"], 2)
+
+    def test_vice_anchors_to_the_best_attacker_when_the_override_fires(self):
+        """Regression guard for the reported failure mode: captain and vice
+        both being high-variance defensive assets from the same back line
+        leaves the whole armband exposed to one goal conceded. A SECOND
+        defender out-projects the best attacker and would win the naive
+        runner-up race -- the vice must anchor to the attacker instead."""
+        def_xp_captain = self._ATTACKER_XP + fpl_tools.CAPTAINCY_OVERRIDE_MARGIN + 3.0
+        def_xp_trap = self._ATTACKER_XP + 1.0   # 2nd-highest overall, but still a DEF
+        squad = self._squad(3.0, [def_xp_captain, def_xp_trap, 1.8],
+                             [self._ATTACKER_XP, 4.0, 2.9, 2.2], [4.5, 3.6, 1.5])
+        result = fpl_tools.select_starting_xi(squad)
+        self.assertEqual(result["captain"]["player_id"], 2)
+        self.assertEqual(result["vice_captain"]["player_id"], 5)
+        self.assertNotEqual(result["vice_captain"]["player_id"], 3,
+                             "vice must not be the naive runner-up (another DEF)")
+
+
+class SelectStartingXIBenchOrderTest(unittest.TestCase):
+    """select_starting_xi's bench order (GK-first, then outfield descending
+    by xP) backs _squad_structural_health's bench-cost and dead-weight
+    checks and is rendered directly as Bench Slots 1-4 in the Final Lineup,
+    but nothing asserted on it directly until now -- StructuralHealthTest
+    only ever checks the aggregate bench COST, never slot order or identity.
+    """
+
+    def _squad(self):
+        pl = lambda pid, pos, xp: {"player_id": pid, "position": pos, "xp": xp,
+                                    "name": "P%d" % pid}
+        return [
+            pl(1, "GK", 5.0), pl(2, "GK", 2.0),
+            pl(3, "DEF", 6.5), pl(4, "DEF", 6.0), pl(5, "DEF", 5.5),
+            pl(6, "DEF", 3.0), pl(7, "DEF", 1.5),
+            pl(8, "MID", 7.0), pl(9, "MID", 6.8), pl(10, "MID", 6.2),
+            pl(11, "MID", 4.0), pl(12, "MID", 2.5),
+            pl(13, "FWD", 8.0), pl(14, "FWD", 5.0), pl(15, "FWD", 1.0),
+        ]
+
+    def test_reserve_gk_leads_the_bench_even_when_an_outfielder_projects_higher(self):
+        """MID pid=12 (xp 2.5) out-projects GK pid=2 (xp 2.0) but must still
+        sit in Slot 2, not Slot 1 -- Slot 1 is reserved for the only player
+        who can legally replace the starting keeper."""
+        result = fpl_tools.select_starting_xi(self._squad())
+        self.assertEqual(result["formation"], (4, 4, 2))
+        bench_ids = [p["player_id"] for p in result["bench"]]
+        self.assertEqual(bench_ids, [2, 12, 7, 15])
+        self.assertEqual(result["bench"][0]["position"], "GK")
+
+    def test_outfield_bench_is_strictly_descending_by_xp(self):
+        result = fpl_tools.select_starting_xi(self._squad())
+        outfield_xp = [p["xp"] for p in result["bench"][1:]]
+        self.assertEqual(outfield_xp, sorted(outfield_xp, reverse=True))
+
+
 class BenchWeightsTest(unittest.TestCase):
 
     def test_convex_ordering(self):

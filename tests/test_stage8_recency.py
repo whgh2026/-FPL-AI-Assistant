@@ -204,6 +204,55 @@ class DoubtRedistributionTest(unittest.TestCase):
             self.assertAlmostEqual(pc, 0.0, places=9)
 
 
+class MinutesDiscountEndToEndTest(unittest.TestCase):
+    """DoubtRedistributionTest above proves _minute_distribution's own three
+    probabilities move the right way in isolation. Nothing before this walks
+    that discount all the way through _player_xp_raw/_player_xp to the final
+    projection -- the number every other engine decision (transfers,
+    captaincy, the solver's objective) actually reads. The two players below
+    share every attacking input (expected_goals_per_90, expected_assists_
+    per_90 -- both set comfortably above the positional prior
+    _xp_for_fixture's empirical-Bayes shrinkage pulls thin-minutes players
+    toward, so that shrinkage reinforces rather than fights the effect under
+    test here) and differ ONLY in the signals _minute_distribution reads:
+    minutes, starts, and chance_of_playing_next_round.
+    """
+
+    def test_a_rotation_and_doubt_risk_scores_strictly_below_an_identical_nailed_starter(self):
+        with harness.synthetic_world():
+            bootstrap, _ = harness.load_synthetic()
+            lookup = ft._build_fixture_lookup(bootstrap)
+            gw = ft._next_gameweek(bootstrap)
+            nailed = player(pid=501, expected_goals_per_90=0.6, expected_assists_per_90=0.4,
+                            minutes=900, starts=10, chance_of_playing_next_round=None)
+            fringe = player(pid=501, expected_goals_per_90=0.6, expected_assists_per_90=0.4,
+                            minutes=90, starts=1, chance_of_playing_next_round=50)
+            xp_nailed, _ = ft._player_xp_raw(nailed, lookup, event=gw)
+            xp_fringe, _ = ft._player_xp_raw(fringe, lookup, event=gw)
+            self.assertGreater(xp_nailed, 0.0,
+                               "sanity check: the nailed player must have a live projection")
+            self.assertLess(xp_fringe, xp_nailed,
+                            "identical per-90 production must not save a rotation/doubt "
+                            "risk from a strictly lower final projection")
+
+    def test_the_ordering_survives_the_global_modifier_in_player_xp(self):
+        """_player_xp layers weights.json's global_xP_modifier and rounding
+        on top of _player_xp_raw -- neither may undo the ordering
+        _player_xp_raw already established, and _player_xp (not the _raw
+        variant) is what every production call site actually uses."""
+        with harness.synthetic_world():
+            bootstrap, _ = harness.load_synthetic()
+            lookup = ft._build_fixture_lookup(bootstrap)
+            gw = ft._next_gameweek(bootstrap)
+            nailed = player(pid=501, expected_goals_per_90=0.6, expected_assists_per_90=0.4,
+                            minutes=900, starts=10, chance_of_playing_next_round=None)
+            fringe = player(pid=501, expected_goals_per_90=0.6, expected_assists_per_90=0.4,
+                            minutes=90, starts=1, chance_of_playing_next_round=50)
+            xp_nailed, _ = ft._player_xp(nailed, lookup, event=gw)
+            xp_fringe, _ = ft._player_xp(fringe, lookup, event=gw)
+            self.assertLess(xp_fringe, xp_nailed)
+
+
 class FetchDisciplineTest(unittest.TestCase):
     """One HTTP call per player, so where it is NOT called matters."""
 
