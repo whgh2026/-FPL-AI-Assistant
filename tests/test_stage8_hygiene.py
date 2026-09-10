@@ -93,6 +93,33 @@ class CIWorkflowDependencyTest(unittest.TestCase):
                 self.assertEqual(line.strip(), "run: pip install -r requirements.txt",
                                  f"a hand-maintained pip install line survives: {line!r}")
 
+    def test_python_version_supports_the_pinned_numpy_floor(self):
+        """fpl_logger.yml pinned Python 3.10 while requirements.txt's numpy
+        floor (raised to >=2.4 for Stage 8a) needs >=3.11 -- pip on 3.10
+        can't see that from the error alone, it just reports "no matching
+        distribution" for numpy<3,>=2.4 and the whole install step dies
+        before any of the four scheduled jobs (archive/snapshot/ingest/
+        autotune) get a chance to run. tests.yml already runs 3.11 against
+        this exact requirements.txt; both workflows must specify the same
+        version so this cannot drift apart again."""
+        wf_versions = {}
+        for name in ("fpl_logger.yml", "tests.yml"):
+            path = os.path.join(ROOT, ".github", "workflows", name)
+            with open(path, encoding="utf-8") as fh:
+                m = re.search(r'python-version:\s*[\'"]?([\d.]+)[\'"]?', fh.read())
+            self.assertIsNotNone(m, f"{name}: no python-version found")
+            wf_versions[name] = m.group(1)
+
+        self.assertEqual(wf_versions["fpl_logger.yml"], wf_versions["tests.yml"],
+                         f"workflow Python versions drifted apart: {wf_versions}")
+        numpy_floor = next(ln for ln in _requirements() if ln.startswith("numpy"))
+        floor_version = re.search(r'>=(\d+\.\d+)', numpy_floor).group(1)
+        self.assertGreaterEqual(tuple(map(int, wf_versions["fpl_logger.yml"].split("."))),
+                                (3, 11),
+                                f"numpy{numpy_floor[len('numpy'):]} (floor {floor_version}) "
+                                f"needs Python >=3.11; fpl_logger.yml pins "
+                                f"{wf_versions['fpl_logger.yml']}")
+
     def test_scipy_is_actually_available_via_that_file(self):
         """The concrete failure this fixes: requirements.txt must carry the
         dependency the workflow now installs wholesale."""

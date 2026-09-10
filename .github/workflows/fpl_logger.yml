@@ -27,10 +27,17 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # requirements.txt pins numpy>=2.4,<3 (Stage 8a), and numpy 2.3+ requires
+      # Python >=3.11 -- pip has no way to see that from a 3.10 interpreter,
+      # so it silently narrows the candidate list to <=2.2.6 and then fails
+      # with "no matching distribution" against the >=2.4 floor. tests.yml
+      # already runs 3.11 against the same requirements.txt; this just
+      # matches it so both workflows install the identical dependency set
+      # instead of drifting again.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       # Was a hand-maintained list (requests pulp pandas psycopg2-binary
       # numpy), which had already drifted twice: `pandas` was in there used
