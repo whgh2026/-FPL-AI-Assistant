@@ -2,7 +2,6 @@ import logging
 import os
 import re
 from typing import Optional
-import requests
 import streamlit as st
 import fpl_tools
 import squad_override
@@ -69,7 +68,8 @@ ALL_CHIPS = ["Wildcard", "Free Hit", "Bench Boost", "Triple Captain"]
 
 
 # ------------------------------------------------------------------
-# Dark "Final Boss" theme overrides + analytics component styles
+# Dark theme overrides + analytics component styles. (Named after a retired
+# feature until Stage 9; the styles themselves are app-wide and stay.)
 # ------------------------------------------------------------------
 
 
@@ -2126,10 +2126,6 @@ with tab_planner:
             else:
                 moves = tr.get("standard_transfers", tr.get("transfers", []))
                 transfer_advice = tr.get("hit_advice", "")
-            # Remember precisely what the screen shows, so the AI critiques the
-            # plan the user is actually looking at.
-            st.session_state["displayed_moves"] = moves
-            st.session_state["displayed_chip"] = confirmed_chip
     
             # ---- Market Alert & Value Tracker (rendered above transfer recommendations) ----
             try:
@@ -2708,129 +2704,8 @@ with tab_planner:
     
 
 
-    st.markdown("---")
-    st.markdown("### 👾 The FPL Final Boss")
-    st.markdown("Step into the manager's office. Present your transfers to the Final Boss for a brutal tactical interrogation.")
 
-    if "ai_response" not in st.session_state:
-        st.session_state.ai_response = None
-    if "last_ai_prompt" not in st.session_state:
-        st.session_state.last_ai_prompt = None
 
-    fb_lineup = st.session_state.get("manual_final")
-
-    fb_ai_prompt = None
-    fb_system_prompt = None
-    if fb_lineup:
-        fb_tr = st.session_state.get("override_analysis", {}).get("transfers", {})
-        # The exact moves rendered above. Previously this read
-        # fb_tr.get("transfers", ...) -- and the engine returns "transfers" and
-        # "standard_transfers" as the SAME object, with "wildcard_transfers"
-        # separate. So with a Wildcard or Free Hit confirmed the screen showed
-        # the 15-transfer chip plan while the AI was handed the standard
-        # 1-transfer plan and reviewed something the user could not see.
-        fb_moves = st.session_state.get("displayed_moves")
-        if fb_moves is None:
-            fb_moves = fb_tr.get("transfers", fb_tr.get("standard_transfers", []))
-        fb_hits = int(fb_tr.get("hits", 0))
-        fb_hit_cost = fpl_tools._risk_profile(risk_label.lower()).get("hit_cost", 4.0)
-        fb_total_hit = fb_hits * fb_hit_cost
-
-        fb_xi_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in fb_lineup.get("xi", []))
-        fb_bench_str = "; ".join(f"{p.get('name', '?')} ({p.get('team', '?')})" for p in fb_lineup.get("bench", []))
-        fb_move_str = "; ".join(f"{m['out']['name']} -> {m['in']['name']}" for m in fb_moves) or "None (holding)"
-
-        fb_net_gain = float(fb_tr.get("net_gain", 0.0))
-        fb_context = (
-            f"Starting XI: {fb_xi_str}\n"
-            f"Bench: {fb_bench_str}\n"
-            f"Proposed transfers: {fb_move_str}\n"
-            f"Transfers made: {len(fb_moves)}\n"
-            f"Net hit deduction: -{fb_total_hit} ({fb_hits} hits)\n"
-            f"Projected net xP delta: +{fb_net_gain:.1f}\n"
-        )
-
-        fb_system_prompt = (
-            "You are The FPL Final Boss. You are auditing an already-solved quantitative transfer plan. "
-            "You must critique, stress-test, and contextualise THESE EXACT MOVES. Never propose conflicting "
-            "moves or alternative transfers.\n"
-            "CHIP DISCIPLINE: If chips are disabled or inactive in the user context, you are strictly "
-            "FORBIDDEN from suggesting a Wildcard, Free Hit, Bench Boost, or Triple Captain. Never suggest "
-            "them as alternatives.\n"
-            "CRITICAL FPL MATH: Transfer point deductions are strictly multiples of 4 (-4, -8, -12). NEVER "
-            "invent figures such as -9.\n"
-            "CAPTAINCY: Validate the highest-ceiling asset. If an elite premium faces weak opposition (e.g., "
-            "Haaland vs newly promoted or struggling opposition), validate the quantitative favourite. Do not "
-            "recommend contrarian differentials for the sake of it.\n"
-            "You are a former overall Fantasy Premier League winner and quantitative macro planner. Be concise, "
-            "highly tactical, and data-driven. Return exactly 3-4 short bullet points."
-        )
-        fb_ai_prompt = (
-            "Audit this already-solved FPL transfer plan over the next 4 gameweeks and give 3-4 concise "
-            "tactical bullets. These moves are immutable — critique, stress-test, and contextualise them; do "
-            "not propose conflicting moves or alternative transfers.\n"
-            "1. 'Killing It' Benchmark: if the engine recommends 0 transfers (banking the free transfer), "
-            "validate structural health and endorse rolling the transfer for future leverage.\n"
-            "2. 'Crisis' Benchmark: if it recommends a -8 hit or worse, or flags widespread "
-            "injury/suspension disruption, stress-test the cost of the point hits against the projected net "
-            "xP delta.\n"
-            "3. Managerial changes & tactical upheaval: flag assets at clubs with recent real-world managerial "
-            "sackings or new appointments, weighing 'new manager bounce' upside against role uncertainty.\n"
-            "4. Macro calendar & disciplinary flags: upcoming fixture swings beyond 4 weeks, yellow-card "
-            "suspension thresholds, European fixture congestion, and mid-season tournaments (e.g. AFCON).\n"
-            "5. Captaincy Sanity Check: validate that the armband is anchored to the highest-ceiling, most "
-            "reliable premium asset; if a differential is being captained, flag the risk.\n"
-            "6. Bench Balance Audit: warn if too much team value is trapped on the bench (bench fodder should "
-            "have secure baseline minutes at minimal cost, not premium rotational assets).\n\n"
-            f"Immutable team context:\n{fb_context}"
-        )
-
-    if not fb_lineup:
-        st.info("Generate your final lineup (Step 4) to unlock the AI summary.")
-    else:
-        if st.button("Press here to face the Final Boss (If you dare)", type="primary"):
-            with st.spinner("The Final Boss is reviewing your tactics... brace yourself for impact."):
-                api_key = os.environ.get("DEEPSEEK_API_KEY")
-                if not api_key:
-                    st.warning("API key missing. Please configure the environment variable.")
-                else:
-                    response_text = None
-                    for attempt in range(3):
-                        try:
-                            st.toast(f"The Final Boss is pondering deeply... ({attempt + 1}/3)")
-                            resp = requests.post(
-                                "https://api.deepseek.com/chat/completions",
-                                headers={
-                                    "Authorization": f"Bearer {api_key}",
-                                    "Content-Type": "application/json",
-                                },
-                                json={
-                                    "model": "deepseek-v4-flash",
-                                    "messages": [
-                                        {"role": "system", "content": fb_system_prompt},
-                                        {"role": "user", "content": fb_ai_prompt},
-                                    ],
-                                    "temperature": 0.4,
-                                },
-                                timeout=120,
-                            )
-                            resp.raise_for_status()
-                            response_text = resp.json()["choices"][0]["message"]["content"]
-                            break
-                        except Exception as e:
-                            if attempt < 2:
-                                continue
-                            st.error(f"API Request Failed: {str(e)}")
-
-                    if response_text is not None:
-                        st.session_state.ai_response = response_text
-                        st.session_state.last_ai_prompt = fb_ai_prompt
-
-        if st.session_state.ai_response:
-            if st.session_state.last_ai_prompt == fb_ai_prompt:
-                st.markdown(st.session_state.ai_response)
-            else:
-                st.warning("⚠️ Tactics altered! The previous verdict is void. Face the Final Boss again to validate your new setup.")
 
 with tab_roadmap:
     st.markdown(
