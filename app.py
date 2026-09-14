@@ -2852,8 +2852,16 @@ with tab_roadmap:
             tr = ov["transfers"]
             plan = tr.get("multi_gw_plan") or []
             xp_lookup = {p["name"]: p.get("xp", 0.0) for p in ov["analysed_squad"]}
+            # Positions are load-bearing now, not cosmetic: the roadmap's
+            # captaincy badges run through _select_captaincy, which needs to
+            # know whether a candidate is a MID/FWD before it can apply the
+            # safe-position rule. Same key space as xp_lookup, which is what
+            # gates the ranking, so every rankable player carries a position.
+            position_lookup = {p["name"]: p.get("position", "?")
+                               for p in ov["analysed_squad"]}
             gantt = fpl_tools.build_transfer_gantt_data(
-                ov["analysed_squad"], plan, xp_lookup=xp_lookup)
+                ov["analysed_squad"], plan, xp_lookup=xp_lookup,
+                position_lookup=position_lookup)
             if gantt["bars"]:
                 st.plotly_chart(
                     _transfer_gantt_figure(gantt),

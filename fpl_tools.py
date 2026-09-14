@@ -3936,6 +3936,7 @@ def build_transfer_gantt_data(
     initial_squad: List[Dict[str, Any]],
     schedule: List[Dict[str, Any]],
     xp_lookup: Optional[Dict[str, float]] = None,
+    position_lookup: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Reshape _plan_transfers_multi_gw's week-by-week buy/sell diff list into
     per-player tenure bars a Gantt chart can plot directly, plus chip-
@@ -3946,8 +3947,11 @@ def build_transfer_gantt_data(
     hand this its inputs and draw the result.
 
     `initial_squad` is the persistent squad BEFORE schedule[0]'s gameweek:
-    [{"name": str, "position": str}, ...] (position is cosmetic -- used only
-    to colour/group bars; "?" if omitted). `schedule` is exactly what
+    [{"name": str, "position": str}, ...]. `position_lookup` supplies
+    positions for players BOUGHT mid-horizon, who do not appear in
+    `initial_squad` -- without it they fall back to "?" and the captaincy
+    rule below cannot tell whether such a player is a safe armband. Position
+    is no longer merely cosmetic for that reason. `schedule` is exactly what
     _plan_transfers_multi_gw returns. `xp_lookup` is an optional {name: xp}
     map for choosing captain/vice-captain; omit it and every week's captain
     call is simply None rather than a guess.
@@ -3979,7 +3983,7 @@ def build_transfer_gantt_data(
     start_gw = schedule[0]["gw"]
     end_gw = schedule[-1]["gw"]
 
-    position_by_name: Dict[str, str] = {}
+    position_by_name: Dict[str, str] = dict(position_lookup or {})
     open_bars: Dict[str, Dict[str, Any]] = {}
     for p in initial_squad:
         name = p.get("name")
@@ -4018,7 +4022,8 @@ def build_transfer_gantt_data(
             for name in week.get("buys", []):
                 if name not in held:
                     held.add(name)
-                    position_by_name.setdefault(name, "?")
+                    position_by_name.setdefault(
+                        name, (position_lookup or {}).get(name, "?"))
                     open_bars[name] = {"start_gw": gw, "entered_via": "buy"}
             pool_this_week = held
         else:
@@ -4028,11 +4033,29 @@ def build_transfer_gantt_data(
             # INTO this week.
             pool_this_week = (held - set(week.get("sells", []))) | set(week.get("buys", []))
 
+        # Route through _select_captaincy rather than reimplementing it. The
+        # naive "top two by xP" this replaces had no positional guard at all,
+        # so a manager whose two best assets are both defenders saw a D-D
+        # armband pair on the roadmap -- both halves exposed to the same
+        # single goal conceded, which is the exact failure CAPTAINCY_SAFE_
+        # POSITIONS exists to prevent and which the live XI selector already
+        # prevents. The two were free to disagree about the same gameweek.
+        #
+        # Sliced to eleven first: _select_captaincy maxes over whatever list
+        # it is given, and `pool_this_week` is the FIFTEEN. Handing it all
+        # fifteen could crown a player who would not be started. Formation
+        # legality is not modelled here -- this is a roadmap badge, not a
+        # lineup -- so top-eleven-by-xP is the honest approximation, and it is
+        # the same eleven the Gantt itself implies.
         ranked = sorted((n for n in pool_this_week if n in xp_lookup),
-                        key=lambda n: xp_lookup[n], reverse=True)
+                        key=lambda n: xp_lookup[n], reverse=True)[:11]
+        xi_entries = [{"name": n, "player_id": n,
+                       "position": position_by_name.get(n, "?"),
+                       "xp": xp_lookup[n]} for n in ranked]
+        cap, vc = _select_captaincy(xi_entries) if xi_entries else (None, None)
         captains[gw] = {
-            "captain": ranked[0] if ranked else None,
-            "vice_captain": ranked[1] if len(ranked) > 1 else None,
+            "captain": cap.get("name") if cap else None,
+            "vice_captain": vc.get("name") if vc else None,
         }
 
     for name in list(held):
