@@ -250,15 +250,12 @@ HURDLE_SIGMA_WEIGHT = 1.2
 #   Defensive (conservative): -8.0 xP  — massive expected gain required for any hit.
 #   Balanced:                 -6.5 xP  — clear multi-gameweek upgrade to justify a -4.
 #   Aggressive:               -4.0 xP  — raw mathematical cost, allows tactical punts.
-RISK_PROFILES = {
-    "conservative": {},
-    "balanced":     {},
-    "aggressive":   {},
-    # Competitive modes: defend a lead (shield high-ownership assets) vs chase a
-    # leader (hunt low-ownership high-xGI differentials).
-    "rank_protecting": {},
-    "rank_chasing":    {},
-}
+# RISK_PROFILES and _risk_profile were removed in Stage 9. Every profile dict
+# had been emptied by earlier stages (the per-profile hit_cost that used to
+# live here was the "corrupted cost" HIT_COST/HIT_HURDLE replaced), leaving
+# five empty dicts and a lookup that could only ever return {}. Its last
+# caller went with the Final Boss AI block. Risk appetite is expressed by
+# HIT_HURDLE, keyed by the same names.
 
 # Display-label aliases so the UI can pass human-readable mode names.
 _RISK_ALIASES = {
@@ -523,11 +520,6 @@ def _manager_sell_price(selling_price_raw: Any, purchase_price_raw: Any, now_cos
     purchase = purchase_price_raw if purchase_price_raw is not None else now_cost_tenths
     return _selling_price(_to_float(purchase) / 10.0, _to_float(now_cost_tenths) / 10.0)
 
-
-def _risk_profile(risk: str) -> Dict[str, float]:
-    key = (risk or "balanced").lower().strip()
-    key = _RISK_ALIASES.get(key, key)
-    return RISK_PROFILES.get(key, RISK_PROFILES["balanced"])
 
 def _clean_manager_id(raw: str) -> str:
     raw = (raw or "").strip()

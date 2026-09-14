@@ -1761,7 +1761,12 @@ with tab_planner:
             
             var_col1, var_col2 = st.columns(2)
             with var_col1:
-                ft_val = st.number_input("Available Free Transfers", min_value=0, max_value=5, value=1, step=1, key="available_ft", help="Set the exact number of Free Transfers you currently hold on fantasy.premierleague.com.")
+                # Seeded from the API-derived figure rather than a hardcoded 1.
+                # get_free_transfers already resolved the manager's real
+                # allowance into api_free_transfers_default; ignoring it meant
+                # the whole plan was solved against a number the app had
+                # already worked out was wrong.
+                ft_val = st.number_input("Available Free Transfers", min_value=0, max_value=5, value=int(st.session_state.get("api_free_transfers_default", 1)), step=1, key="available_ft", help="Set the exact number of Free Transfers you currently hold on fantasy.premierleague.com.")
             with var_col2:
                 bank_val = st.number_input("Remaining Budget in Bank (£m)", 0.0, 50.0, plan_bank, 0.1, key="ov_bank")
             allow_hits = st.checkbox("Allow Point Hits (-4 pts per additional transfer)", value=False, key="ov_allow_hits", help="Disabled by default to enforce elite transfer conservation. When checked, the solver may suggest taking point deductions only if an incoming player's immediate gain outweighs the 4-point penalty.")
@@ -1920,7 +1925,16 @@ with tab_planner:
                                 rival_ids=rival_ids, chip_ledger=_build_chip_ledger(manager_id))
 
                             try:
-                                log_decision(
+                                # Audit telemetry for an exploratory step, not
+                                # a commitment -- so a failure is logged rather
+                                # than surfaced. The "Lineup is local-only"
+                                # warning belongs at the two points where the
+                                # manager actually commits (hold / accept);
+                                # here there is no lineup yet and the message
+                                # would be wrong. What is NOT acceptable is the
+                                # bare `except: pass` this replaces, which
+                                # discarded both the exception and the False.
+                                if not log_decision(
                                     manager_id.strip(), GW_ID, "plan",
                                     float(transfers.get("net_gain", 0.0)),
                                     hits=int(transfers.get("hits", 0)),
@@ -1929,9 +1943,14 @@ with tab_planner:
                                         f"{m['out']['name']}->{m['in']['name']}"
                                         for m in transfers.get("standard_transfers", [])
                                     ) or "HOLD",
-                                )
-                            except Exception:
-                                pass
+                                ):
+                                    logger.warning(
+                                        "plan decision not persisted (db write "
+                                        "returned False)")
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to persist plan decision: {e}",
+                                    exc_info=True)
 
                             st.session_state["override_analysis"] = {
                                 "analysed_squad": analysed,
@@ -2044,9 +2063,14 @@ with tab_planner:
                             chip_ledger=_build_chip_ledger(manager_id),
                         )
                         ov["transfers"] = tr
+                        # INSIDE the try, after the assignment. Clearing the
+                        # flag outside meant a failed re-solve still marked the
+                        # plan fresh: the warning below was shown once and then
+                        # the stale plan was served as current on every
+                        # subsequent rerun, with nothing to retry it.
+                        st.session_state["_transfers_stale"] = False
                     except Exception as e:
                         st.warning(f"Could not recalculate transfers: {e}")
-                st.session_state["_transfers_stale"] = False
 
             evals = tr.get("chip_evaluations", [])
 
@@ -2066,7 +2090,19 @@ with tab_planner:
                 # param), so a manager can never even SELECT a chip here that the
                 # solver would then refuse to evaluate as illegal/already spent.
                 chip_ledger = _build_chip_ledger(manager_id.strip())
-                available_now = chip_ledger.available_chips(GW_ID) if chip_ledger else ALL_CHIPS
+                if chip_ledger is not None:
+                    available_now = chip_ledger.available_chips(GW_ID)
+                else:
+                    # FAIL CLOSED. This used to fall back to ALL_CHIPS, so an
+                    # API outage re-enabled every chip the manager had already
+                    # spent -- and the one thing worse than not offering a chip
+                    # is offering one that cannot be played. "No history" is
+                    # not "no chips played"; say which it is.
+                    available_now = []
+                    st.warning(
+                        "Chip history unavailable — the chip list is hidden "
+                        "rather than guessed. This does not mean you have no "
+                        "chips left; retry once the FPL API responds.")
                 chip_options = ["None (Hold Chips)"] + available_now
 
                 set1_remaining = []
@@ -2247,7 +2283,8 @@ with tab_planner:
                 try:
                     health = fpl_tools._squad_structural_health(ov["analysed_squad"], float(ov.get("bank", 0.0)))
                     try:
-                        log_squad_health(manager_id.strip(), GW_ID, health)
+                        if not log_squad_health(manager_id.strip(), GW_ID, health):
+                            st.warning("Database write failed. Lineup is local-only.")
                     except Exception:
                         pass
                     for h in health:
@@ -2364,10 +2401,15 @@ with tab_planner:
                     lineup = fpl_tools.select_starting_xi(analysed_current)
                     lineup["confirmed_chip"] = confirmed_chip
                     try:
-                        log_decision(manager_id.strip(), GW_ID, "hold", 0.0,
-                                     hits=0, chip=confirmed_chip, transfers="HOLD")
+                        # db's writers return False on a failed write rather
+                        # than raising, so the except below never saw those --
+                        # the decision looked persisted and was not.
+                        if not log_decision(manager_id.strip(), GW_ID, "hold", 0.0,
+                                            hits=0, chip=confirmed_chip, transfers="HOLD"):
+                            st.warning("Database write failed. Lineup is local-only.")
                     except Exception as e:
                         logger.warning(f"Failed to persist hold decision: {e}", exc_info=True)
+                        st.warning("Database write failed. Lineup is local-only.")
                     st.session_state["manual_final"] = lineup
                     st.rerun()
     
@@ -2391,7 +2433,11 @@ with tab_planner:
                     lineup = fpl_tools.select_starting_xi(final_squad)
                     lineup["confirmed_chip"] = confirmed_chip
                     try:
-                        log_decision(
+                        # Every writer here returns a boolean; a False is a
+                        # FAILED write that raises nothing, so ignoring the
+                        # return meant a chip could be marked played in the UI
+                        # and not in the ledger.
+                        ok = log_decision(
                             manager_id.strip(), GW_ID, "accept",
                             float(tr.get("net_gain", 0.0)),
                             hits=int(tr.get("hits", 0)),
@@ -2399,7 +2445,7 @@ with tab_planner:
                             transfers="; ".join(f"{m['out']['name']}->{m['in']['name']}" for m in moves) or "HOLD",
                         )
                         if confirmed_chip and confirmed_chip != "None (Hold Chips)":
-                            save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
+                            ok = save_chip_play(manager_id.strip(), GW_ID, confirmed_chip) and ok
                         # The multi-GW roadmap is a PERSISTENT-squad artefact.
                         # A Free Hit squad reverts after one gameweek, so the
                         # schedule built from the persistent chain describes a
@@ -2407,7 +2453,10 @@ with tab_planner:
                         # under this gameweek files a plan against the wrong
                         # squad entirely.
                         if confirmed_chip != "Free Hit":
-                            save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
+                            ok = save_plan(manager_id.strip(), GW_ID,
+                                           tr.get("multi_gw_plan") or []) and ok
+                        if not ok:
+                            st.warning("Database write failed. Lineup is local-only.")
                     except Exception as e:
                         # A silent `pass` here meant a confirmed transfer decision
                         # could fail to persist (decision log, chip play, or the
