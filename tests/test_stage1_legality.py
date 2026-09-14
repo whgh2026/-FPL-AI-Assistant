@@ -98,11 +98,20 @@ class FormationLegalityTest(unittest.TestCase):
                                          round(budget, 1) + 1e-6)
 
     def test_bench_boost_path_also_legal(self):
-        """Bench Boost skips the starter binaries, so the squad rules still bind.
+        """Bench Boost models the XI too, so BOTH sets of rules bind.
 
-        Under bench_boost the XI is not modelled at all (every player scores), so
-        there is no formation to check -- but the 15-man composition must hold,
-        and no stale XI may be left behind in the diagnostics.
+        RE-BASELINED. This test used to assert `_LAST_SOLVE["xi"] == []`,
+        which codified the defect rather than a requirement: bench_boost set
+        `start = None` to save 15+1+3+3 binaries, and the captaincy binary
+        was then linked to x[] alone -- so the armband could be assigned to a
+        BENCH player, which is exactly the week that must never happen. The
+        empty xi was the visible symptom of the missing constraint, and
+        asserting on it made the symptom a contract.
+
+        The eleven is now chosen under Bench Boost as well (scored at
+        BB_START_TIEBREAK so it cannot change which fifteen get bought), so
+        the assertions become the real ones: a legal fifteen, a legal eleven,
+        and an armband inside it.
         """
         with harness.synthetic_world() as (bs, _fx):
             lookup = fpl_tools._build_fixture_lookup(bs)
@@ -113,7 +122,16 @@ class FormationLegalityTest(unittest.TestCase):
             selected, _, _parts = fpl_tools._solve_squad(entries, budget=budget, bench_boost=True)
             chosen = [by_id[pid] for pid in selected]
             self.assertEqual(_formation(chosen), {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3})
-            self.assertEqual(fpl_tools._LAST_SOLVE["xi"], [])
+
+            xi = fpl_tools._LAST_SOLVE["xi"]
+            self.assertEqual(len(xi), 11, "Bench Boost no longer models the XI")
+            form = fpl_tools._LAST_SOLVE["formation"]
+            self.assertEqual(form["GK"], 1)
+            for pos, lo, hi in (("DEF", 3, 5), ("MID", 2, 5), ("FWD", 1, 3)):
+                self.assertTrue(lo <= form[pos] <= hi,
+                                f"illegal Bench Boost formation: {form}")
+            self.assertTrue(set(xi).issubset(set(selected)),
+                            "a starter was not among the selected fifteen")
 
 
 class SolverProfileTest(unittest.TestCase):

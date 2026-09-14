@@ -283,6 +283,14 @@ HORIZON_SUM = sum(HORIZON_WEIGHTS)   # ~3.1. NOT a hit multiplier: see HIT_COST.
 BENCH_GK_WEIGHT = 0.05
 BENCH_B1_WEIGHT = 0.30
 BENCH_DEAD_WEIGHT = 0.035
+# Under Bench Boost the objective scores all fifteen at x[], so the starter
+# binaries carry ZERO objective coefficient: every legal eleven is exactly as
+# good as every other and branch-and-bound explores a plateau of equivalent
+# solutions rather than descending toward one. A tiny xP-proportional
+# tie-break restores a gradient without changing which fifteen get bought --
+# at 1e-4 a ten-point player contributes 0.001, three orders of magnitude
+# below the smallest real term in the objective (BENCH_DEAD_WEIGHT * xp).
+BB_START_TIEBREAK = 1e-4
 # Market candidate shortlist entering the MIP: the manager's 15 plus the top
 # assets per position by horizon xP, so the starter/bench/captain binaries
 # (~135 pool entries) solve in well under a second.
@@ -2632,8 +2640,10 @@ def _solve_squad(
     gk_ids = [pid for pid in ids if by_id[pid]["position"] == "GK"]
     outfield_ids = [pid for pid in ids if by_id[pid]["position"] != "GK"]
 
-    if bench_boost or not gk_ids:
-        # Bench Boost (or no keeper pool): every selected player counts fully.
+    if not gk_ids:
+        # Degenerate pool with no keeper at all. Formation legality is
+        # unexpressible (one_start_gk would be infeasible), so this path keeps
+        # its original shape: no starter binaries, captaincy linked to x below.
         xp_expr = pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in ids)
         start = None
     else:
@@ -2641,6 +2651,15 @@ def _solve_squad(
         # remaining 4 bench slots at their activation-probability weight. The
         # outfield bench is convex: the "12th man" (B1) is worth ~30% (likeliest
         # autosub) while B2/B3 are near-dead capital (~3.5%).
+        #
+        # Built UNCONDITIONALLY, including under Bench Boost. Bench Boost used
+        # to set start = None to save 15+1+3+3 binaries, which left the
+        # captaincy binary linked to x[] alone -- so the armband could be
+        # assigned to any SELECTED player, bench included. On a Bench Boost
+        # week that is not a corner case: the solver picks the highest-xP
+        # fifteen and nothing then forces the armband onto the eleven. It also
+        # left _LAST_SOLVE["xi"] empty and _is_valid_squad's formation check
+        # unreachable on exactly the path that most needed them.
         start = pulp.LpVariable.dicts("start", ids, cat="Binary")
         for pid in ids:
             prob += start[pid] <= x[pid], f"start_le_x_{pid}"
@@ -2655,6 +2674,17 @@ def _solve_squad(
             pos_start = pulp.lpSum(start[pid] for pid in ids if by_id[pid]["position"] == pos)
             prob += pos_start >= lo, f"formation_{pos}_min"
             prob += pos_start <= hi, f"formation_{pos}_max"
+
+    if gk_ids and bench_boost:
+        # Every selected player scores in full -- that is what the chip does --
+        # so the bench-decay reconstruction below is skipped. The eleven is
+        # still CHOSEN, purely so the captaincy binary has a defined feasible
+        # set to sit on. See BB_START_TIEBREAK for why a zero-coefficient
+        # binary needs a nudge.
+        xp_expr = pulp.lpSum(by_id[pid]["xp"] * x[pid] for pid in ids)
+        xp_expr += BB_START_TIEBREAK * pulp.lpSum(
+            by_id[pid]["xp"] * start[pid] for pid in ids)
+    elif gk_ids:
         xp_expr = pulp.lpSum(by_id[pid]["xp"] * start[pid] for pid in ids)
         # 12th-man binary: the single highest-value outfield bench slot.
         b1 = pulp.LpVariable.dicts("b1", outfield_ids, cat="Binary")
@@ -2907,6 +2937,13 @@ def _solve_squad(
         "selected": selected,
         "xi": [pid for pid in ids if start is not None
                and start[pid].varValue is not None and start[pid].varValue > 0.5],
+        # The armband the MIP actually assigned. Exposed for the same reason
+        # "xi" is: the captaincy binary is otherwise invisible to callers, and
+        # "the captain is inside the eleven" is a rule worth being able to
+        # assert directly rather than infer from the constraint list.
+        "captain": next((pid for pid in ids
+                         if captain[pid].varValue is not None
+                         and captain[pid].varValue > 0.5), None),
         "formation": None,
         # Component breakdown of the objective, so the UI can render a waterfall
         # that reconciles exactly with what was maximised.
