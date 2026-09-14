@@ -2060,8 +2060,16 @@ def _xp_dgw_sum(p: Dict[str, Any], target: List[Dict[str, Any]], emin: float, po
 
 
 def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None,
-                   gk_cs_dampener: float = 1.0) -> Tuple[float, str]:
-    """Raw expected points for a single gameweek, before risk adjustment."""
+                   gk_cs_dampener: float = 1.0, blend_ep: bool = True) -> Tuple[float, str]:
+    """Raw expected points for a single gameweek, before risk adjustment.
+
+    `blend_ep=False` suppresses the ep_next blend. FPL publishes ep_next for
+    the NEXT gameweek only -- it is a single number, not a series -- so
+    blending it into GW+1, GW+2 and GW+3 as well pins a constant onto weeks it
+    says nothing about and flattens the fixture sensitivity that is the entire
+    reason for projecting a horizon. _player_xp_horizon passes False for every
+    week after the first.
+    """
     status = normalise_status(p.get("status"))
     chance_val = p.get("chance_of_playing_next_round")
 
@@ -2116,7 +2124,7 @@ def _player_xp_raw(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, A
     rotation_penalty = _w.get("rotation_convexity", 0.4) * variance
     our_total = our_total - cameo_penalty - rotation_penalty
 
-    ep_next = _to_float(p.get("ep_next"))
+    ep_next = _to_float(p.get("ep_next")) if blend_ep else 0.0
     if ep_next > 0:
         # EP_BLEND was a flat 0.5: half of every single-gameweek projection was
         # FPL's own ep_next. Three problems. It capped the model's edge at half
@@ -2293,7 +2301,12 @@ def _player_xp_horizon(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[st
     weights = HORIZON_WEIGHTS[:n] if n <= len(HORIZON_WEIGHTS) else HORIZON_WEIGHTS
     total = 0.0
     for i, w in enumerate(weights):
-        raw, _ = _player_xp_raw(p, fixture_lookup, start_event + i, gk_cs_dampener)
+        # blend_ep only on the first week. The comment inside _player_xp_raw
+        # has described this defect for several stages ("_player_xp_horizon
+        # blends the SAME ep_next into GW+1/+2/+3"); this is the line that
+        # actually stops it.
+        raw, _ = _player_xp_raw(p, fixture_lookup, start_event + i,
+                                gk_cs_dampener, blend_ep=(i == 0))
         total += w * raw
 
     # Proactive suspension tightrope: a player one yellow card away from a ban
@@ -2462,7 +2475,18 @@ def _fixture_calendar(fixture_lookup=None, start_event=1, n=38) -> Dict[int, Dic
             counts.setdefault(ev, {})
             counts[ev][tid] = counts[ev].get(tid, 0) + 1
 
-    n_teams = len(fixture_lookup) or 20
+    # Counted from the bootstrap's club list, not from len(fixture_lookup).
+    # The lookup is keyed by team and only carries clubs that have at least one
+    # fixture in the loaded range, so a club blanking across the WHOLE range
+    # has no key at all -- it silently left the denominator, and
+    # `blanks = n_teams - playing` under-reported exactly the gameweeks with
+    # the most blanks. That figure gates the Free Hit emergency override, so
+    # the error ran the wrong way: the worse the blank week, the more it was
+    # understated.
+    try:
+        n_teams = len(_get_bootstrap().get("teams", [])) or len(fixture_lookup) or 20
+    except Exception:
+        n_teams = len(fixture_lookup) or 20
     out = {}
     for ev in range(start_event, start_event + n):
         per_team = counts.get(ev, {})
