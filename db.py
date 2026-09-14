@@ -619,7 +619,7 @@ def get_prediction_history(model_version=None):
             return []
         try:
             cur = conn.cursor()
-            cols = ("SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
+            cols = ("SELECT player_id, gameweek, predicted_xp, actual_points, base_pts, cameo_mass, "
                     "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
                     "ep_w, ep_term FROM fpl_predictions "
                     "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE)

@@ -55,6 +55,7 @@ def _split(rows):
     on one side.
     """
     step = int(1 / HOLDOUT_FRACTION)
+    rows = sorted(rows, key=lambda r: (r.get("gameweek", 0), r.get("player_id", 0)))
     holdout = rows[::step]
     train = [r for i, r in enumerate(rows) if i % step != 0]
     return train, holdout

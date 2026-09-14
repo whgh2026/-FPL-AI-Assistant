@@ -1172,9 +1172,9 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
             # A book quoting only two outcomes on a three-way market cannot be
             # de-vigged correctly; skipping is better than a 39% inflation.
             continue
-        h_imp = 1.0 / (sum(h_prices) / len(h_prices))
-        a_imp = 1.0 / (sum(a_prices) / len(a_prices))
-        d_imp = 1.0 / (sum(d_prices) / len(d_prices))
+        h_imp = sum(1.0 / p for p in h_prices) / len(h_prices)
+        a_imp = sum(1.0 / p for p in a_prices) / len(a_prices)
+        d_imp = sum(1.0 / p for p in d_prices) / len(d_prices)
         # Power-method de-vig rather than flat proportional normalisation --
         # see _devig_power's docstring for why an even split of the margin
         # (the flat p_i/S this replaces) overstates the longshot side of a
@@ -2726,9 +2726,11 @@ def _locked_starting_gk(current_ids: List[Any], elements_by_id: Dict[Any, Dict[s
 
     current_xp = pool_by_id[protected].get("xp", 0.0)
     owned_gk_ids = {pid for pid in current_ids if pool_by_id.get(pid, {}).get("position") == "GK"}
+    protected_price = pool_by_id[protected].get("sell_price", pool_by_id[protected].get("price", 0.0))
     best_alt = max(
         (entry.get("xp", 0.0) for pid, entry in pool_by_id.items()
-         if entry.get("position") == "GK" and pid not in owned_gk_ids),
+         if entry.get("position") == "GK" and pid not in owned_gk_ids
+         and entry.get("price", 0.0) <= protected_price + 1e-6),
         default=0.0)
     if best_alt - current_xp >= gk_hurdle_xp:
         return None
@@ -4445,7 +4447,7 @@ def suggest_transfers_for_custom_squad(
     # the caller asked to evaluate. A ledger with no eval_chips narrowing at
     # all defaults to "evaluate everything the ledger allows".
     if chip_ledger is not None:
-        if not eval_chips:
+        if eval_chips is None:
             eval_chips = list(CHIPS)
         allowed = set(chip_ledger.available_chips(current_gw))
         eval_chips = [c for c in eval_chips if c in allowed]
