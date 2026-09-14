@@ -76,14 +76,30 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python scripts/ingest_actuals.py
 
-      # Auto-tune stays disabled until Stage 8 repairs the calibration loop
-      # (damping, frozen dc_sensitivity gradient, surrogate mismatch, loss
-      # floor). Running coordinate descent against a misspecified surrogate on
-      # early v2 rows would drift the weights in a direction driven by noise.
+      # Re-enabled. The four Stage 8 calibration repairs (damping, the frozen
+      # dc_sensitivity gradient, the surrogate mismatch, the loss floor) had
+      # already landed; what was still missing was point-in-time integrity in
+      # the training archive, which fpl_tools._team_attack_def_ratings'
+      # `as_of_event` now enforces and ARITH_FINGERPRINT now stamps.
+      #
+      # The Wednesday cron was declared in `on.schedule` but NOT named in this
+      # step's `if:`, so a scheduled run fired the workflow and matched no
+      # step at all -- auto-tune had effectively never run on a schedule, only
+      # by hand. Both triggers are named explicitly now so the two cannot
+      # drift apart again.
+      #
+      # FPL_AUTOTUNE_ENABLED is set HERE rather than defaulted ON in
+      # scripts/auto_tune.py on purpose. The job writes weights.json into the
+      # repo and auto-commits it below, so the opt-in belongs at the one call
+      # site that is meant to do that. The script stays inert by default, and
+      # a stray `python scripts/auto_tune.py` -- or a future caller that
+      # forgets to check ENABLED -- cannot silently rewrite production
+      # weights. AutoTuneGuardTest holds that default in place.
       - name: Wednesday Auto-Tune & Commit
-        if: (github.event_name == 'workflow_dispatch' && inputs.step == 'autotune')
+        if: (github.event_name == 'workflow_dispatch' && inputs.step == 'autotune') || github.event.schedule == '0 10 * * 3'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FPL_AUTOTUNE_ENABLED: "1"
         run: |
           python scripts/auto_tune.py
           git config --global user.name 'github-actions[bot]'
