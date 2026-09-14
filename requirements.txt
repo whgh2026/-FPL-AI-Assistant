@@ -17,6 +17,15 @@ Pillow>=12.3,<13
 scipy>=1.11,<2
 # The rolling transfer horizon Gantt chart (app.py, st.plotly_chart).
 plotly>=5.18,<6
+# tests/test_phase_workflow.py parses .github/workflows/fpl_logger.yml to
+# assert that every declared cron is matched by some step's `if:`. It was
+# passing locally only because PyYAML happens to sit in the container's base
+# image (pip reports it as Required-by: conan) -- nothing in this file pulled
+# it in, so a clean CI runner installing from requirements.txt alone had no
+# yaml module and the suite died at collection. Exactly the silent drift the
+# CIWorkflowDependencyTest in test_stage8_hygiene.py exists to catch, arriving
+# from the other direction: a real import with no declaration.
+PyYAML>=6.0,<7
 
 # Not importable in the test container, so these carry floors rather than
 # tested versions: psycopg2-binary is exercised only against a real database,
