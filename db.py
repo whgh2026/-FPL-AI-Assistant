@@ -527,6 +527,15 @@ def ensure_calibration_columns():
         ("xp_cameo", "DOUBLE PRECISION"),
         ("ep_w", "DOUBLE PRECISION"),
         ("ep_term", "DOUBLE PRECISION"),
+        # Stage 9. MODEL_VERSION is a hand-maintained label and can lag the
+        # code it describes; rows written in that window carry the new
+        # arithmetic under the old label. This column records a hash of the
+        # constants that actually decide what _player_xp_raw returns, so the
+        # calibrator can select a genuinely homogeneous population instead of
+        # trusting the label. Nullable: legacy rows carry NULL and are
+        # excluded, which is correct -- their arithmetic is not reproducible
+        # against today's fpl_tools.
+        ("arith_fingerprint", "TEXT"),
     ]
     try:
         conn = get_db_connection()
@@ -581,6 +590,20 @@ def ensure_predictions_upsert_key():
         return False
 
 
+# Rows written by an EARLIER v8 pipeline that predate the dc_sensitivity
+# forward-difference probe and the base_pts column. backfill_model_health.py
+# does not write base_pts at all, and snapshot_xp.py always does, so the null
+# is a reliable marker for a row the current calibrator cannot interpret.
+#
+# Fully parenthesised on purpose. The obvious spelling --
+#   AND NOT model_version = 'v8-tau-correction' AND base_pts IS NULL
+# -- binds AND tighter than the intended grouping and silently widens to
+# other model versions. Written as a single negated conjunction it can only
+# ever exclude the rows it names.
+_V8_QUARANTINE = ("NOT (model_version = 'v8-tau-correction' "
+                  "AND base_pts IS NULL)")
+
+
 def get_prediction_history(model_version=None):
     """Return calibration rows for one model version.
 
@@ -596,19 +619,14 @@ def get_prediction_history(model_version=None):
             return []
         try:
             cur = conn.cursor()
+            cols = ("SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
+                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
+                    "ep_w, ep_term FROM fpl_predictions "
+                    "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE)
             if model_version is None:
-                cur.execute(
-                    "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
-                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
-                    "ep_w, ep_term "
-                    "FROM fpl_predictions WHERE actual_points IS NOT NULL")
+                cur.execute(cols)
             else:
-                cur.execute(
-                    "SELECT predicted_xp, actual_points, base_pts, cameo_mass, "
-                    "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
-                    "ep_w, ep_term "
-                    "FROM fpl_predictions WHERE actual_points IS NOT NULL "
-                    "AND model_version = %s", (model_version,))
+                cur.execute(cols + " AND model_version = %s", (model_version,))
             rows = []
             for r in cur.fetchall():
                 rows.append({
@@ -711,11 +729,11 @@ def count_checked_predictions(model_version=None):
         with conn.cursor() as cur:
             if model_version is None:
                 cur.execute("SELECT count(*) FROM fpl_predictions "
-                            "WHERE actual_points IS NOT NULL")
+                            "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE)
             else:
                 cur.execute("SELECT count(*) FROM fpl_predictions "
-                            "WHERE actual_points IS NOT NULL AND model_version = %s",
-                            (model_version,))
+                            "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE
+                            + " AND model_version = %s", (model_version,))
             row = cur.fetchone()
         global _LAST_DB_ERROR
         _LAST_DB_ERROR = None      # a prior failure is now stale; don't haunt the UI
@@ -750,7 +768,7 @@ def prediction_accuracy_by_gw(model_version=None, limit=12):
     if conn is None:
         return []
     try:
-        where = "actual_points IS NOT NULL"
+        where = "actual_points IS NOT NULL AND " + _V8_QUARANTINE
         params = []
         if model_version is not None:
             where += " AND model_version = %s"

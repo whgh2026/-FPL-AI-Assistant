@@ -351,6 +351,26 @@ class DGWFatigueTest(unittest.TestCase):
 
 
 class ModelVersionTest(unittest.TestCase):
+    def test_version_is_past_the_historical_isolation_boundary(self):
+        """v9 carries the venue_def single-application fix, which moves every
+        clean-sheet number on the inference branch and therefore changes what
+        _player_xp returns. Rows either side of it are not one population.
+
+        Note that as_of_event threading, landing in the same stage, is NOT
+        part of this rationale: at its default of None it is a no-op by
+        construction, and there is a test asserting exactly that. The bump is
+        earned by venue_def alone.
+        """
+        import re
+        m = re.match(r"^v(\d+)-", fpl_tools.MODEL_VERSION)
+        self.assertIsNotNone(m, f"unparseable stamp {fpl_tools.MODEL_VERSION!r}")
+        self.assertGreaterEqual(int(m.group(1)), 9)
+
+    def test_the_version_name_is_the_canonical_one(self):
+        """One string, everywhere. An alias in a second place is how two
+        populations end up under what looks like one label."""
+        self.assertEqual(fpl_tools.MODEL_VERSION, "v9-historical-isolation")
+
     def test_version_is_past_the_stage_5b_boundary(self):
         """Stage 4 -> v2, Stage 2 -> v3, Stage 5b -> v4, Stage 8 -> v5. Each
         stage that changes what _player_xp returns must bump, or auto_tune fits

@@ -116,7 +116,8 @@ def main() -> None:
                      float(xp), float(base_xp), feats["cameo_mass"],
                      feats["rotation_variance"], dc_sensitivity, minutes_floor,
                      fpl_tools.MODEL_VERSION, feats["raw_total"],
-                     feats["xp_cameo"], feats["ep_w"], feats["ep_term"]))
+                     feats["xp_cameo"], feats["ep_w"], feats["ep_term"],
+                     fpl_tools.ARITH_FINGERPRINT))
 
     conn = _connect()
     try:
@@ -140,8 +141,9 @@ def main() -> None:
                 "INSERT INTO fpl_predictions "
                 "(player_id, gameweek, player_name, position, team, predicted_xp, "
                 "base_pts, cameo_mass, rotation_variance, dc_sensitivity, minutes_floor, "
-                "model_version, raw_total, xp_cameo, ep_w, ep_term) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "model_version, raw_total, xp_cameo, ep_w, ep_term, "
+                "arith_fingerprint) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT (player_id, gameweek, model_version) DO UPDATE SET "
                 "player_name = EXCLUDED.player_name, position = EXCLUDED.position, "
                 "team = EXCLUDED.team, predicted_xp = EXCLUDED.predicted_xp, "
@@ -149,7 +151,9 @@ def main() -> None:
                 "rotation_variance = EXCLUDED.rotation_variance, "
                 "dc_sensitivity = EXCLUDED.dc_sensitivity, "
                 "minutes_floor = EXCLUDED.minutes_floor, raw_total = EXCLUDED.raw_total, "
-                "xp_cameo = EXCLUDED.xp_cameo, ep_w = EXCLUDED.ep_w, ep_term = EXCLUDED.ep_term",
+                "xp_cameo = EXCLUDED.xp_cameo, ep_w = EXCLUDED.ep_w, "
+                "ep_term = EXCLUDED.ep_term, "
+                "arith_fingerprint = EXCLUDED.arith_fingerprint",
                 rows,
                 page_size=1000,
             )

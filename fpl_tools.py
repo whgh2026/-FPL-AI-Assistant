@@ -188,7 +188,37 @@ RED_CARD_PTS = 3.0
 # low-score correction was being applied with home and away rates swapped for
 # those two scorelines, distorting the fitted attack/defence ratings that
 # every fixture-adjusted projection is built from.
-MODEL_VERSION = "v8-tau-correction"
+MODEL_VERSION = "v9-historical-isolation"
+
+
+def _arith_fingerprint() -> str:
+    """Hash of the constants that decide what _player_xp_raw returns.
+
+    MODEL_VERSION is a hand-maintained label, so it can lag the code it
+    describes: there is always a window between a change to the projection
+    arithmetic landing and the version string being bumped, and any row
+    snapshot_xp.py writes inside that window is stamped with the OLD label
+    while carrying the NEW arithmetic. The calibrator filters on the label
+    alone, so those rows are fitted as though they were homogeneous with
+    the rest.
+
+    This closes the window mechanically. Adding a constant here, or changing
+    one, changes the hash, and rows written under a different hash are simply
+    not selected -- no one has to remember to bump anything.
+    """
+    import hashlib
+    blob = json.dumps({
+        "model": MODEL_VERSION,
+        "bonus_conv": BONUS_CONVEXITY, "bonus_cap": BONUS_CAP,
+        "yellow": YELLOW_CARD_PTS, "red": RED_CARD_PTS,
+        "ep_blend": EP_BLEND, "ep_fade": EP_BLEND_FADE_MINUTES,
+        "prior_starts": PRIOR_STARTS, "prior_games": PRIOR_GAMES,
+        "prior_minutes": PRIOR_MINUTES,
+        "tightrope": TIGHTROPE_DISCOUNT,
+        "dc_default": DIXON_COLES_DECAY_DEFAULT,
+        "lam_bounds": [LAMBDA_MIN, LAMBDA_MAX],
+    }, sort_keys=True)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 # Phase 1 in-memory upgrades — value of rolled FTs (diminishing marginal curve),
 # cash-reserve liquidity, and minutes-floor hit-hurdle scaling.
@@ -366,6 +396,10 @@ VALID_FORMATIONS = [
 # edge once that variance is priced in.
 CAPTAINCY_SAFE_POSITIONS = {"MID", "FWD"}
 CAPTAINCY_OVERRIDE_MARGIN = 1.5
+
+# Computed here, not beside _arith_fingerprint: every constant it hashes has
+# to exist first.
+ARITH_FINGERPRINT = _arith_fingerprint()
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _LAST_FETCH_TIME = None
