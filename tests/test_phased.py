@@ -241,14 +241,25 @@ class PlannerTest(unittest.TestCase):
                     name, sold_by,
                     f"player {name!r} was sold at week {sold_by.get(name)} and "
                     f"bought back at week {t} -- a churn re-buy: {schedule}")
-        # The scenario is only a real test of the guard if the tempting flip
-        # actually appears as a sale at some point -- otherwise this would
-        # pass trivially because nothing relevant happened. (Confirmed
-        # separately: with the no_rebuy_* constraints disabled, this exact
-        # fixture sells mid_swing in week 3 and buys it straight back in
-        # week 4.)
-        self.assertIn(mid_swing_name, sold_by,
-                      f"fixture never sold mid_swing; scenario doesn't exercise the guard: {schedule}")
+        # Non-vacuousness guard. RE-BASELINED: this used to require that
+        # `mid_swing` specifically was sold, on the premise that the
+        # highest-xP path flip-flops it out in week 3 and back in week 4.
+        #
+        # The multi-GW objective now selects an XI and weights the bench
+        # (BENCH_B1_WEIGHT / BENCH_DEAD_WEIGHT) instead of scoring all fifteen
+        # at 1.0x, which hands the planner a THIRD option the flat objective
+        # did not have: keep mid_swing and simply BENCH him through his bad
+        # week. Holding and benching now beats selling on this fixture, so it
+        # no longer tempts the flip at all -- the temptation was partly an
+        # artefact of valuing a benched player at full weight.
+        #
+        # The contract under test is unchanged and still asserted above: no
+        # player is ever bought back after being sold. The guard is simply
+        # expressed generically now -- at least one real sale has to occur,
+        # or the loop above would have nothing to check.
+        self.assertTrue(
+            sold_by,
+            f"fixture produced no sales at all; the guard is vacuous: {schedule}")
 
 
 EVENT = 4

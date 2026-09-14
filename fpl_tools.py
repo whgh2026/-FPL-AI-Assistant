@@ -3695,7 +3695,13 @@ def _planner_shortlist(pool, current_ids, saa_mean):
 # rebuild), PTS_BIGM exceeds any plausible 15-man squad's single-week total,
 # and BUDGET_BIGM exceeds any plausible 15-man squad's total price.
 _PLAN_FT_BIGM = 16.0
-_PLAN_PTS_BIGM = 1000.0
+# Sized against a real weekly total, not a round number. The largest value
+# pts_x/pts_y can take is roughly 11 starters + an armband at premium xP --
+# comfortably under 100 -- so 150 cannot bind on the relaxed branch while
+# being ~7x tighter than the 1000.0 it replaces. Big-M slack is pure
+# weakness in the LP relaxation: a looser bound means a worse dual, more
+# branching, and a slower proof of optimality on every solve.
+_PLAN_PTS_BIGM = 150.0
 _PLAN_BUDGET_BIGM = 1000.0
 
 
@@ -3832,6 +3838,56 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     bank = [pulp.LpVariable(f"bank_{t}", lowBound=0) for t in range(T + 1)]
     wc = pulp.LpVariable.dicts("wc", range(T), cat="Binary")
     fh = pulp.LpVariable.dicts("fh", range(T), cat="Binary")
+
+    # Role binaries. The weekly score used to be sum(xp * x) over all fifteen
+    # at 1.0x, so the planner was indifferent between a premium starter and a
+    # premium BENCH player -- a selected player contributed their full xP
+    # whether they could be fielded or not. On the fixture that buys four
+    # expensive forwards to sit next to a squad that cannot start them.
+    #
+    # This is the same trilinear shape _solve_squad already uses for a single
+    # gameweek (XI at 1.0, twelfth man at BENCH_B1_WEIGHT, the rest near-dead,
+    # reserve keeper at BENCH_GK_WEIGHT, plus the armband), projected onto the
+    # T-week grid so the roadmap and the immediate solve value a squad the
+    # same way.
+    outfield_ids = [pid for pid in ids if by_id[pid]["position"] != "GK"]
+    gk_pool_ids = [pid for pid in ids if by_id[pid]["position"] == "GK"]
+    start_x = pulp.LpVariable.dicts("mstart", (ids, range(T)), cat="Binary")
+    b1_x = pulp.LpVariable.dicts("mb1", (outfield_ids, range(T)), cat="Binary")
+    cap_x = pulp.LpVariable.dicts("mcap", (ids, range(T)), cat="Binary")
+    # The Free Hit squad gets the SAME XI + armband treatment. Leaving `y` at a
+    # flat 1.0x for all fifteen (as the spec's own rewrite did) would score a
+    # chip week several points above an identical non-chip week purely from
+    # bench accounting, biasing the planner toward burning the chip -- exactly
+    # the defect this commit is fixing, reintroduced on the other branch.
+    start_y = pulp.LpVariable.dicts("fstart", (ids, range(T)), cat="Binary")
+    cap_y = pulp.LpVariable.dicts("fcap", (ids, range(T)), cat="Binary")
+
+    def _role_constraints(own, start, cap, tag):
+        """Eleven legal starters and one armband inside them, every week."""
+        # `prob += c` is an augmented assignment, so without this Python binds
+        # `prob` as a local of this helper and the first use raises
+        # UnboundLocalError.
+        nonlocal prob
+        for t in range(T):
+            prob += pulp.lpSum(start[pid][t] for pid in ids) == 11, f"{tag}_xi_{t}"
+            prob += pulp.lpSum(start[pid][t] for pid in gk_pool_ids) == 1, f"{tag}_gk_{t}"
+            for pos, lo, hi in (("DEF", 3, 5), ("MID", 2, 5), ("FWD", 1, 3)):
+                ps = pulp.lpSum(start[pid][t] for pid in ids
+                                if by_id[pid]["position"] == pos)
+                prob += ps >= lo, f"{tag}_{pos}_min_{t}"
+                prob += ps <= hi, f"{tag}_{pos}_max_{t}"
+            prob += pulp.lpSum(cap[pid][t] for pid in ids) == 1, f"{tag}_cap_{t}"
+            for pid in ids:
+                prob += start[pid][t] <= own[pid][t], f"{tag}_s_le_o_{pid}_{t}"
+                prob += cap[pid][t] <= start[pid][t], f"{tag}_c_le_s_{pid}_{t}"
+
+    _role_constraints(x, start_x, cap_x, "mx")
+    _role_constraints(y, start_y, cap_y, "my")
+    for t in range(T):
+        prob += pulp.lpSum(b1_x[pid][t] for pid in outfield_ids) == 1, f"mb1_one_{t}"
+        for pid in outfield_ids:
+            prob += b1_x[pid][t] <= x[pid][t] - start_x[pid][t], f"mb1_le_bench_{pid}_{t}"
     pts_t = [pulp.LpVariable(f"pts_{t}", lowBound=0) for t in range(T)]
 
     def _prev_x(pid, t):
@@ -3963,8 +4019,31 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     obj = 0.0
     for t in range(T):
         gw_w = PLAN_WEIGHTS[t] if t < len(PLAN_WEIGHTS) else 0.0
-        pts_x = pulp.lpSum(x[pid][t] * saa_xp[pid][t] for pid in ids)
-        pts_y = pulp.lpSum(y[pid][t] * saa_xp[pid][t] for pid in ids)
+        # XI at full weight, twelfth man at ~30%, remaining outfield bench
+        # near-dead, reserve keeper at ~5%, plus the armband's second helping.
+        pts_x = (
+            pulp.lpSum(start_x[pid][t] * saa_xp[pid][t] for pid in ids)
+            + BENCH_B1_WEIGHT * pulp.lpSum(
+                b1_x[pid][t] * saa_xp[pid][t] for pid in outfield_ids)
+            + BENCH_DEAD_WEIGHT * pulp.lpSum(
+                (x[pid][t] - start_x[pid][t] - b1_x[pid][t]) * saa_xp[pid][t]
+                for pid in outfield_ids)
+            + BENCH_GK_WEIGHT * pulp.lpSum(
+                (x[pid][t] - start_x[pid][t]) * saa_xp[pid][t] for pid in gk_pool_ids)
+            + pulp.lpSum(cap_x[pid][t] * saa_xp[pid][t] for pid in ids)
+        )
+        # A Free Hit squad is assembled to be FIELDED -- its bench is
+        # deliberate fodder for one week, never a rotation asset -- so the
+        # whole bench is weighted at BENCH_DEAD_WEIGHT rather than carrying its
+        # own twelfth-man binary. That keeps the branch honest without paying
+        # another |outfield| x T binaries for a chip that fires at most once
+        # across the horizon.
+        pts_y = (
+            pulp.lpSum(start_y[pid][t] * saa_xp[pid][t] for pid in ids)
+            + BENCH_DEAD_WEIGHT * pulp.lpSum(
+                (y[pid][t] - start_y[pid][t]) * saa_xp[pid][t] for pid in ids)
+            + pulp.lpSum(cap_y[pid][t] * saa_xp[pid][t] for pid in ids)
+        )
         # pts_t[t] is the week's SCORED points: the persistent squad's, unless
         # Free Hit is active, in which case the one-off squad's. Maximisation
         # settles pts_t at whichever bound is tight -- the other is relaxed

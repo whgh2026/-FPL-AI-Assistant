@@ -190,5 +190,74 @@ class PlanValidatorTest(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class ObjectiveAlignmentTest(unittest.TestCase):
+    """The weekly score used to be sum(xp * x) over all fifteen at 1.0x, so a
+    selected player contributed their full xP whether they could be fielded or
+    not. The planner was therefore indifferent between a premium starter and a
+    premium BENCH player, and would happily spend on fodder it could never
+    start. The score is now the same trilinear shape _solve_squad uses for a
+    single gameweek, projected onto the T-week grid.
+    """
+
+    def _src(self):
+        import inspect
+        return inspect.getsource(fpl_tools._plan_transfers_multi_gw)
+
+    def test_the_weekly_score_is_no_longer_flat_across_all_fifteen(self):
+        src = self._src()
+        self.assertNotIn("pts_x = pulp.lpSum(x[pid][t] * saa_xp[pid][t] for pid in ids)", src,
+                         "the persistent squad is still scored flat at 1.0x")
+        self.assertNotIn("pts_y = pulp.lpSum(y[pid][t] * saa_xp[pid][t] for pid in ids)", src,
+                         "the Free Hit squad is still scored flat at 1.0x")
+
+    def test_both_branches_carry_the_xi_and_captain_shape(self):
+        """D-D. The spec's own rewrite left the Free Hit branch at a flat 1.0x
+        for all fifteen while giving the persistent branch XI + weighted bench
+        + captaincy. That scores a chip week several points above an identical
+        non-chip week purely from bench accounting, biasing the planner toward
+        BURNING the chip -- the same defect, reintroduced on the other side."""
+        src = self._src()
+        for name in ("start_x", "cap_x", "b1_x", "start_y", "cap_y"):
+            self.assertIn(name, src, f"{name} binaries are missing")
+        self.assertIn("BENCH_B1_WEIGHT", src)
+        self.assertIn("BENCH_GK_WEIGHT", src)
+
+    def test_a_free_hit_is_not_played_for_phantom_bench_points(self):
+        """Behavioural half of D-D. With a pool where the current squad is
+        already the best available, a Free Hit can buy nothing -- so it must
+        not be played. Under the flat objective the chip's squad scored all
+        fifteen at 1.0x while the persistent squad scored XI + decayed bench,
+        so firing the chip conjured the bench difference out of nothing and
+        the planner took it."""
+        with harness.synthetic_world("deterministic"):
+            pool = _pool()
+            # Every player identical, so no transfer and no chip can improve
+            # anything. Any chip week in the output is phantom value.
+            for p in pool:
+                p["xp"] = 5.0
+            current_ids = {p["id"] for p in pool[:15]}
+            saa_mean = {p["id"]: [5.0] * 4 for p in pool}
+            total_sell = sum(p["price"] for p in pool[:15])
+            schedule = fpl_tools._plan_transfers_multi_gw(
+                pool, total_sell + 0.5, 1, current_ids, saa_mean,
+                event=10, n=4, bank_cash=0.5)
+        # Free Hit specifically. A Wildcard on this fixture is a genuine
+        # no-op the solver is INDIFFERENT to -- with every player identical it
+        # costs nothing and gains nothing, so CBC may set wc[t]=1 arbitrarily.
+        # That is degeneracy in the Wildcard modelling, not phantom value, and
+        # it is not what D-D is about. Free Hit is different: under the flat
+        # objective it produced a positive, fictitious gain.
+        fh_weeks = [w["gw"] for w in schedule if w.get("chip") == "Free Hit"]
+        self.assertEqual(fh_weeks, [],
+                         f"Free Hit was played for phantom bench points: {schedule}")
+
+    def test_the_big_m_cannot_bind_on_a_realistic_week(self):
+        """F-2. _PLAN_PTS_BIGM was 1000.0 against a realistic weekly total
+        under 100 -- slack that is pure weakness in the LP relaxation. It must
+        stay above any achievable weekly score and well below the old value."""
+        self.assertGreater(fpl_tools._PLAN_PTS_BIGM, 100.0)
+        self.assertLess(fpl_tools._PLAN_PTS_BIGM, 1000.0)
+
+
 if __name__ == "__main__":
     unittest.main()
