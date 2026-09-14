@@ -5,8 +5,10 @@ keep arriving after a dependency releases a new major, and whether anyone other
 than the person holding the Railway dashboard can redeploy this thing.
 """
 
+import ast
 import os
 import re
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -126,6 +128,127 @@ class CIWorkflowDependencyTest(unittest.TestCase):
         names = [ln.split("[")[0].split(">")[0].split("=")[0].split("<")[0].strip().lower()
                 for ln in _requirements()]
         self.assertIn("scipy", names)
+
+
+# Distribution name -> the module name it actually installs, where the two
+# differ. Without this a declared dependency reads as undeclared.
+_IMPORT_NAME = {
+    "pyyaml": "yaml",
+    "pillow": "PIL",
+    "psycopg2-binary": "psycopg2",
+    "python-dateutil": "dateutil",
+    "google-genai": "google",
+}
+
+
+def _declared_modules():
+    """Importable module names requirements.txt provides."""
+    out = set()
+    for line in _requirements():
+        dist = re.split(r"[<>=~\[]", line, 1)[0].strip().lower()
+        out.add(_IMPORT_NAME.get(dist, dist))
+    return out
+
+
+def _tests_workflow_install():
+    """The tests workflow's `pip install` command, as a token list."""
+    path = os.path.join(ROOT, ".github", "workflows", "tests.yml")
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if stripped.startswith("run:") and "pip install" in stripped:
+                return stripped[len("run:"):].strip().split()
+    return []
+
+
+def _local_modules():
+    """Module names resolvable from the repo itself.
+
+    tests/ and scripts/ both prepend their own directory to sys.path, so a
+    bare `import backtest` is a LOCAL import of scripts/backtest.py, not a
+    third-party package. Missing this is what makes a naive version of this
+    check produce five false positives.
+    """
+    out = {"tests", "scripts"}
+    for sub in ("", "scripts", "tests", os.path.join("tests", "fixtures")):
+        d = os.path.join(ROOT, sub)
+        if not os.path.isdir(d):
+            continue
+        out |= {f[:-3] for f in os.listdir(d) if f.endswith(".py")}
+    return out
+
+
+def _top_level_imports(path):
+    with open(path, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    mods = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            # level > 0 is an explicit relative import, always local.
+            mods.add(node.module.split(".")[0])
+    return mods
+
+
+class TestsWorkflowDependencyTest(unittest.TestCase):
+    """CIWorkflowDependencyTest above guards fpl_logger.yml. tests.yml is the
+    job that actually runs the suite and had no equivalent guard, which is how
+    an undeclared PyYAML import shipped: the suite went green locally, because
+    PyYAML sits in the dev container's base image (pip reports it as
+    Required-by: conan), and would have died at COLLECTION on a clean runner --
+    taking all 600-odd tests with it, not just the five that import yaml.
+
+    The comment above tests.yml's own install step describes the identical
+    failure one layer down: a hand-typed list that omitted streamlit, green
+    locally for the same reason, red on every push, and nobody had opened the
+    Actions tab.
+    """
+
+    def test_the_test_job_installs_from_requirements_txt(self):
+        self.assertIn("-r", _tests_workflow_install())
+        self.assertIn("requirements.txt", _tests_workflow_install())
+
+    def test_anything_installed_alongside_it_is_test_tooling(self):
+        """Extras are allowed -- pytest is not an app dependency and has no
+        business in requirements.txt -- but they are the same drift risk the
+        hand-maintained list was, so the permitted set is explicit."""
+        tokens = _tests_workflow_install()
+        extras = [t for t in tokens[tokens.index("install") + 1:]
+                  if t not in ("-r", "requirements.txt")]
+        self.assertTrue(set(extras) <= {"pytest"},
+                        f"unexpected packages installed outside requirements.txt: {extras}")
+
+
+class ImportDeclarationTest(unittest.TestCase):
+    """Every third-party module the repo imports must be installable from
+    requirements.txt (plus whatever tests.yml installs alongside it).
+
+    This is the check that would have caught the PyYAML miss before CI did.
+    A dependency satisfied only by the dev container's base image is invisible
+    until a clean runner tries it, and by then it is a collection error.
+    """
+
+    def test_every_third_party_import_is_declared(self):
+        allowed = (_declared_modules() | _local_modules()
+                   | set(sys.stdlib_module_names)
+                   | {t for t in _tests_workflow_install()
+                      if t not in ("pip", "install", "-r", "requirements.txt")})
+        undeclared = {}
+        for sub in ("", "scripts", "tests"):
+            d = os.path.join(ROOT, sub)
+            if not os.path.isdir(d):
+                continue
+            for name in sorted(os.listdir(d)):
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(d, name)
+                for mod in _top_level_imports(path) - allowed:
+                    undeclared.setdefault(mod, []).append(os.path.join(sub, name))
+        self.assertEqual(
+            undeclared, {},
+            "third-party imports with no entry in requirements.txt: "
+            + "; ".join(f"{m} <- {', '.join(f)}" for m, f in sorted(undeclared.items())))
 
 
 class StartCommandTest(unittest.TestCase):
