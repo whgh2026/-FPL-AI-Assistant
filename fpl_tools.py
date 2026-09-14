@@ -395,6 +395,13 @@ _SOLVER_PROFILE = os.environ.get("FPL_SOLVER_PROFILE", "interactive")
 # between "optimal" and "best plan found in the time available").
 _LAST_SOLVE: Dict[str, Any] = {}
 
+# Diagnostics from the most recent _plan_transfers_multi_gw call, mirroring
+# _LAST_SOLVE. fpl_tools carries no logger, and the planner's two silent
+# failure modes -- an opening bank reconstructed from squad equity, and a
+# schedule returned from an unproven incumbent -- both need to be visible to
+# the UI and assertable by tests rather than inferred from the output.
+_LAST_PLAN_SOLVE: Dict[str, Any] = {}
+
 
 def set_solver_profile(name: str) -> None:
     """Select a solver profile. Raises on an unknown name rather than silently
@@ -3851,8 +3858,34 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     # bank + sum(selling_price of the current squad); the flow constraint below
     # then adds sell_value[t] again on every sale, so seeding bank[0] with
     # `budget` counted every held player's equity twice and handed the planner
-    # an imaginary war chest.
-    prob += bank[0] == (budget if bank_cash is None else float(bank_cash)), "bank0"
+    # an imaginary war chest -- roughly 2 x squad_value - real_bank on day one.
+    #
+    # Unwind the equity leg when the caller does not supply real cash.
+    global _LAST_PLAN_SOLVE
+    _bank_clamped = False
+    if bank_cash is None:
+        total_sell = sum(by_id[pid].get("sell_price", by_id[pid]["price"])
+                         for pid in ids if pid in cur_set)
+        inferred = budget - total_sell
+        # Clamped in PYTHON, before the constraint is built. `bank` is declared
+        # lowBound=0, so attaching `bank[0] == <negative>` would make the whole
+        # model INFEASIBLE and the planner would return [] -- the roadmap would
+        # simply vanish, with nothing to explain it. A small negative here means
+        # rounding or a stale sell_price, not a real overdraft.
+        _bank_clamped = inferred < -1e-6
+        opening_bank = max(0.0, inferred)
+    else:
+        opening_bank = float(bank_cash)
+    # `prob +=`, not a bare `bank[0] == ...`. PuLP builds an LpConstraint from
+    # the comparison and DISCARDS it unless it is added to the problem, which
+    # would leave the opening bank bounded only by lowBound=0 -- looser than
+    # the bug being fixed, and silent.
+    prob += bank[0] == opening_bank, "bank0"
+    _LAST_PLAN_SOLVE = {
+        "opening_bank": opening_bank,
+        "bank_inferred": bank_cash is None,
+        "bank_clamped": _bank_clamped,
+    }
     for t in range(T):
         # At most one chip per week, and (mirroring "one chip per set") at
         # most one Wildcard and one Free Hit across the whole horizon.
