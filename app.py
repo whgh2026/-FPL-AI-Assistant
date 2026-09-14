@@ -525,17 +525,65 @@ def _badge_style(team_code) -> str:
             "background-size:contain;background-repeat:no-repeat;background-position:center;")
 
 
+# Marks a crest the app could not resolve to any club. Kept as its own class so
+# the failure is detectable by a test and inspectable in the DOM, rather than
+# being indistinguishable from the legitimate initials fallback below.
+BADGE_UNRESOLVED_CLASS = "badge-unresolved"
+
+
 def _badge_img(team_id, large: bool = False) -> str:
-    ctx = _bootstrap_ctx()
-    t = (ctx or {}).get("teams_by_id", {}).get(team_id, {})
-    code = t.get("code")
+    """Club crest for a team ID.
+
+    Three outcomes, deliberately distinguishable -- two are normal and one is
+    a programming error, and they used to render identically:
+
+    1. A known club with a crest code -> the crest.
+    2. No identifier supplied, or a known club carrying no code -> a text
+       fallback. Legitimate: nothing was promised and nothing is wrong.
+    3. An identifier naming NO club -> BADGE_UNRESOLVED_CLASS and a log line.
+       This is never valid input.
+
+    Case 3 matters more than it looks. FPL gives every club BOTH an `id`
+    (1..20, what this function takes) and a `code` (what the crest CDN takes,
+    applied below by _badge_style). Those two number spaces OVERLAP in the
+    live API -- ids run 1..20 and codes include values like 3, 6, 7 and 8 --
+    so a code passed where an id belongs does NOT fail to resolve. It quietly
+    resolves to a different, entirely valid club and renders a real crest for
+    the wrong team, with nothing anywhere to indicate a problem.
+
+    The synthetic fixture cannot surface that on its own: its codes are
+    100..119 and cannot collide with its ids 1..20, so there the same mistake
+    merely fails to resolve. Flagging the unresolved case is what gives the
+    suite something to assert on, given the fixture cannot reproduce the
+    collision itself.
+    """
     cls = "badge-lg" if large else "badge-img"
+    ctx = _bootstrap_ctx()
+    teams = (ctx or {}).get("teams_by_id", {}) or {}
+
+    if team_id is None:
+        # Nothing supplied, so nothing to resolve. Not an error.
+        return f'<div class="badge-crest {cls}">?</div>'
+
+    if teams and team_id not in teams:
+        # Guarded on `teams` being non-empty: with no bootstrap loaded at all
+        # (offline, or first paint) every id is "unknown", and flagging a
+        # whole page would be noise rather than signal.
+        logger.warning(
+            "unresolved team identifier %r passed to _badge_img -- not a known "
+            "team id; a team CODE used where an id belongs is the usual cause",
+            team_id,
+        )
+        return (f'<div class="badge-crest {cls} {BADGE_UNRESOLVED_CLASS}" '
+                f'title="unresolved team identifier: {team_id}">!</div>')
+
+    t = teams.get(team_id, {})
+    code = t.get("code")
     if not code:
-        # No crest mapped at all (an unmapped or missing team) previously
-        # rendered nothing -- a silent gap where a team identifier should
-        # be. This case can render a genuine, permanent text fallback: there
-        # is no image being attempted here at all, so no risk of the
-        # initials bleeding through a real crest that loads fine.
+        # A known club with no crest mapped. Previously rendered nothing -- a
+        # silent gap where a team identifier should be. This case can carry a
+        # genuine, permanent text fallback: no image is being attempted, so
+        # there is no risk of initials bleeding through a crest that loads.
         initials = (t.get("short_name") or "?")[:3].upper()
         return f'<div class="badge-crest {cls}">{initials}</div>'
     return f'<div class="badge-crest {cls}" style="{_badge_style(code)}"></div>'

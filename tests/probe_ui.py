@@ -35,6 +35,62 @@ def load_app():
     return module
 
 
+def _bootstrap_teams(app):
+    import fpl_tools
+    return fpl_tools._get_bootstrap().get("teams", [])
+
+
+def _crest_binding_mismatches(app):
+    """Render a multi-club pitch; return cards whose crest is not their own.
+
+    Returns [(name, team, team_id, expected_code, rendered_code), ...].
+    """
+    import re
+    import fpl_tools
+    bs = fpl_tools._get_bootstrap()
+    teams_by_id = {t["id"]: t for t in bs.get("teams", [])}
+    pos_map = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+    quota = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    squad, seen_teams = [], set()
+    for e in bs.get("elements", []):
+        pos = pos_map.get(e.get("element_type"))
+        if not pos or quota.get(pos, 0) <= 0:
+            continue
+        # One player per club while we can, so every card carries a distinct
+        # crest and a swapped pair would be visible.
+        if e["team"] in seen_teams and len(seen_teams) < 15:
+            continue
+        quota[pos] -= 1
+        seen_teams.add(e["team"])
+        squad.append({
+            "player_id": e["id"], "name": e.get("web_name", "?"),
+            "team": teams_by_id.get(e["team"], {}).get("short_name", "?"),
+            "team_id": e["team"], "position": pos,
+            "price": e.get("now_cost", 0) / 10.0, "xp": 5.0,
+            "status": "Available", "photo": e.get("photo"),
+        })
+    if len(squad) != 15:
+        return [("__fixture__", "could not build a 15-man squad", 0, 0, 0)]
+
+    xi = fpl_tools.select_starting_xi(squad)
+    html = app._pitch_html(xi["xi"], xi["bench"])
+    by_name = {p["name"]: p for p in squad}
+    mismatches = []
+    for block in html.split('<div class="pitch-player">')[1:]:
+        m_name = re.search(r'class="nm">([^<]*?)\s*(?:<|$)', block)
+        if not m_name:
+            continue
+        p = by_name.get(m_name.group(1).strip())
+        if p is None:
+            continue
+        m_code = re.search(r"/badges/70/t(\d+)\.png", block)
+        expected = teams_by_id.get(p["team_id"], {}).get("code")
+        rendered = int(m_code.group(1)) if m_code else None
+        if expected is not None and rendered != expected:
+            mismatches.append((p["name"], p["team"], p["team_id"], expected, rendered))
+    return mismatches
+
+
 def main():
     app = load_app()
 
@@ -353,6 +409,47 @@ def main():
           fallback_html != "", "an unmapped team must not render nothing")
     check("badge_img_fallback_is_still_the_crest_class",
           "badge-crest" in fallback_html, fallback_html)
+
+    # ---- unresolved vs. legitimate fallback -------------------------------
+    # These two used to render identically. One is normal (nothing was
+    # supplied); the other is a programming error (an identifier naming no
+    # club), and it has to be distinguishable or no test can ever catch it.
+    check("badge_img_flags_an_identifier_that_names_no_club",
+          app.BADGE_UNRESOLVED_CLASS in fallback_html, fallback_html)
+    check("badge_img_does_not_flag_a_simply_absent_identifier",
+          app.BADGE_UNRESOLVED_CLASS not in app._badge_img(None),
+          "a missing team_id is legitimate, not an error")
+    check("badge_img_does_not_flag_a_real_club",
+          app.BADGE_UNRESOLVED_CLASS not in crest_html, crest_html)
+
+    # ---- NEGATIVE: a team CODE must never resolve to a valid crest ---------
+    # FPL gives every club an `id` (1..20) and a `code` (what the crest CDN
+    # wants). In the LIVE api those spaces overlap -- ids run 1..20 and codes
+    # include 3, 6, 7, 8 -- so a code passed where an id belongs resolves to a
+    # different, entirely valid club and renders a real crest for the wrong
+    # team. The synthetic fixture cannot reproduce that collision (its codes
+    # are 100..119), which is exactly why the unresolved marker above has to
+    # exist: it is the only handle the suite has on this class of mistake.
+    _team_codes = [t.get("code") for t in _bootstrap_teams(app) if t.get("code")]
+    _team_ids = {t["id"] for t in _bootstrap_teams(app)}
+    check("fixture_id_and_code_spaces_are_disjoint",
+          not (_team_ids & set(_team_codes)),
+          "fixture codes now collide with ids -- the probe below needs rewriting "
+          "to assert the crest is CORRECT rather than unresolved")
+    for _code in _team_codes[:3]:
+        _html = app._badge_img(_code)
+        check(f"badge_img_rejects_team_code_{_code}_used_as_an_id",
+              app.BADGE_UNRESOLVED_CLASS in _html,
+              f"code {_code} resolved to a crest instead of being flagged: {_html}")
+
+    # ---- crest binds to the player it is rendered beside -------------------
+    # The pitch composes name, headshot, crest and fixture dots from one dict
+    # per card. This asserts that composition end to end, across a squad
+    # spanning as many different clubs as possible so a mis-bound crest cannot
+    # hide behind everyone sharing a team.
+    _bad = _crest_binding_mismatches(app)
+    check("pitch_crest_binds_to_its_own_players_team",
+          _bad == [], f"crest/player mismatches: {_bad}")
 
     if FAILURES:
         print(f"\n{len(FAILURES)} check(s) failed:")
