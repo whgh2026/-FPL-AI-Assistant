@@ -4221,9 +4221,16 @@ def suggest_transfers_for_custom_squad(
     except Exception:
         saa_mean, scenario_matrix, stress_scenarios, multi_gw_plan = {}, {}, {}, []
 
-    def _get_moves(selected_ids, is_unlimited, parts=None):
+    def _get_moves(selected_ids, is_unlimited, parts=None, by_id=None):
         """Pair the solver's chosen 15 against the current squad, and report the
         objective decomposition that produced it.
+
+        `by_id` overrides the pool the moves are read out of. It exists for the
+        Free Hit branch, which solves a pool whose "xp" is the ONE-WEEK figure
+        (xp_gw) rather than the horizon: reading those moves back out of the
+        horizon `pool_by_id` would report a four-week xp_gain on a one-week
+        chip, which is the same units error that made Free Hit score ~3x
+        against Bench Boost before it was given its own solve.
 
         Two changes from the previous version:
 
@@ -4250,22 +4257,23 @@ def suggest_transfers_for_custom_squad(
         """
         if not selected_ids:
             return [], 0, 0.0, 0.0, {}
+        bid = by_id if by_id is not None else pool_by_id
         selected_set = set(selected_ids)
         sold = [pid for pid in current_ids if pid not in selected_set]
         bought = [pid for pid in selected_ids if pid not in current_ids]
         mvs = []
 
         for pos in ["GK", "DEF", "MID", "FWD"]:
-            sold_pos = [p for p in sold if pool_by_id[p]["position"] == pos]
-            bought_pos = [p for p in bought if pool_by_id[p]["position"] == pos]
-            for o, i in _pair_by_price(sold_pos, bought_pos, pool_by_id):
+            sold_pos = [p for p in sold if bid[p]["position"] == pos]
+            bought_pos = [p for p in bought if bid[p]["position"] == pos]
+            for o, i in _pair_by_price(sold_pos, bought_pos, bid):
                 mvs.append({
-                    "out": pool_by_id[o],
-                    "in": pool_by_id[i],
-                    "xp_gain": round(pool_by_id[i]["xp"] - pool_by_id[o]["xp"], 2),
-                    "cost": round(pool_by_id[i]["price"] - pool_by_id[o].get("sell_price", pool_by_id[o]["price"]), 2),
+                    "out": bid[o],
+                    "in": bid[i],
+                    "xp_gain": round(bid[i]["xp"] - bid[o]["xp"], 2),
+                    "cost": round(bid[i]["price"] - bid[o].get("sell_price", bid[o]["price"]), 2),
                     "rationale": _transfer_rationale(
-                        pool_by_id[o], pool_by_id[i],
+                        bid[o], bid[i],
                         elements_by_id.get(o, {}), elements_by_id.get(i, {}),
                     ),
                 })
@@ -4341,21 +4349,15 @@ def suggest_transfers_for_custom_squad(
     projected_ft = min(free_transfers + 1, 5) if roll_transfer else free_transfers
 
     # ==============================================================
-    # 2. Universe B: Unlimited Transfers (For Wildcard / Free Hit)
+    # 2. Universe B: Unlimited Transfers (Wildcard), then Free Hit
     # ==============================================================
-    unl_moves, unl_hits, unl_net, unl_cost = [], 0, 0.0, 0.0
-    if any(c in eval_chips for c in ("Wildcard", "Free Hit")):
-        unl_selected, _unl_obj, unl_parts = _solve_squad(
-            pool, budget=budget, must_include_ids=set(current_ids),
-            hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
-                        "hurdle_scale": 0.0},
-            bench_boost=("Bench Boost" in eval_chips),
-            bench_cap=_bench_cap_for(current_gw, bench_boost_gw),
-            holding_map=holding_map, current_gw=current_gw,
-            eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
-            cvar_scenarios=stress_scenarios,
-        )
-        unl_moves, unl_hits, unl_net, unl_cost, _unl_bd = _get_moves(unl_selected, True, unl_parts)
+    # There used to be a second, SEPARATE unlimited solve here ("Universe B",
+    # feeding `wildcard_transfers`) whose _solve_squad call was argument-for-
+    # argument identical to the Wildcard solve below (which fed
+    # chip_scores["Wildcard"]). Two identical MILP solves per click, and the
+    # two halves of the same recommendation -- the moves shown and the score
+    # gating them -- were free to disagree if either call ever drifted. One
+    # solve now feeds both.
 
     # Free Hit lasts exactly ONE gameweek -- the squad reverts afterwards -- so
     # it must be solved and scored on the single gameweek. It was previously
@@ -4385,6 +4387,13 @@ def suggest_transfers_for_custom_squad(
             cur_xi = sorted((fh_by_id[i]["xp"] for i in current_ids if i in fh_by_id),
                             reverse=True)[:11]
             fh_net = round(sum(fh_xi) - sum(cur_xi), 2)
+            # The one-week squad was solved but its MOVES were never derived,
+            # so Step 3 fell back to `wildcard_transfers` -- a FOUR-GAMEWEEK
+            # horizon squad applied to a one-week chip. Read them out of
+            # fh_by_id, not the horizon pool, so xp_gain is in one-week units
+            # like fh_net and chip_scores["Free Hit"] already are.
+            fh_moves, fh_hits, _fh_net_moves, fh_cost, _fh_bd = _get_moves(
+                fh_selected, True, fh_parts, by_id=fh_by_id)
 
     # Wildcard is a full-season chip: re-solve unsuppressed (no in-objective
     # scarcity_cost) and let the rebuild delta be judged solely by the
@@ -4402,7 +4411,13 @@ def suggest_transfers_for_custom_squad(
             pool, budget=budget, must_include_ids=set(current_ids),
             hit_config={"free_transfers": 15, "hit_cost": 0.0, "max_transfers": 15,
                         "hurdle_scale": 0.0},
-            bench_boost=("Bench Boost" in eval_chips),
+            # bench_boost=False, NOT ("Bench Boost" in eval_chips). Scoring all
+            # 15 at full weight is a Bench Boost assumption; folding it into
+            # the Wildcard solve made chip_scores["Wildcard"] rise purely
+            # because Bench Boost happened to be under evaluation in the same
+            # call, so the two chips could not be compared against each other.
+            # Bench Boost is scored on its own, off std_best_xi's bench.
+            bench_boost=False,
             bench_cap=_bench_cap_for(current_gw, bench_boost_gw),
             holding_map=holding_map, current_gw=current_gw,
             eo_map=eo_map, mode=mode, phase=phase, rival_ids=rival_ids,
@@ -4569,7 +4584,11 @@ def suggest_transfers_for_custom_squad(
     return {
         "transfers": std_moves,
         "standard_transfers": std_moves,
-        "wildcard_transfers": unl_moves,
+        "wildcard_transfers": wc_moves,
+        # NEW. The one-week Free Hit squad's own moves. Step 3 previously read
+        # `wildcard_transfers` for a confirmed Free Hit, applying a four-GW
+        # horizon rebuild to a chip that lasts exactly one gameweek.
+        "freehit_transfers": fh_moves,
         "hits": std_hits,
         "net_gain": std_net,
         "cost_change": std_cost,

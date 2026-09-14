@@ -2112,7 +2112,15 @@ with tab_planner:
 
             st.markdown("---")
             
-            if confirmed_chip in ("Wildcard", "Free Hit"):
+            if confirmed_chip == "Free Hit":
+                # Free Hit has its OWN one-week squad and its own move list.
+                # This used to fall through to `wildcard_transfers`, applying a
+                # four-gameweek horizon rebuild to a chip that reverts after a
+                # single gameweek. No fallback to the Wildcard list here on
+                # purpose: an empty list is honest, a wrong-horizon one is not.
+                moves = tr.get("freehit_transfers") or []
+                transfer_advice = f"<b>{confirmed_chip} Active:</b> {len(moves)} transfers optimised with 0 point penalties."
+            elif confirmed_chip == "Wildcard":
                 moves = tr.get("wildcard_transfers", tr.get("transfers", []))
                 transfer_advice = f"<b>{confirmed_chip} Active:</b> {len(moves)} transfers optimised with 0 point penalties."
             else:
@@ -2396,7 +2404,14 @@ with tab_planner:
                         )
                         if confirmed_chip and confirmed_chip != "None (Hold Chips)":
                             save_chip_play(manager_id.strip(), GW_ID, confirmed_chip)
-                        save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
+                        # The multi-GW roadmap is a PERSISTENT-squad artefact.
+                        # A Free Hit squad reverts after one gameweek, so the
+                        # schedule built from the persistent chain describes a
+                        # squad the manager will not own next week -- saving it
+                        # under this gameweek files a plan against the wrong
+                        # squad entirely.
+                        if confirmed_chip != "Free Hit":
+                            save_plan(manager_id.strip(), GW_ID, tr.get("multi_gw_plan") or [])
                     except Exception as e:
                         # A silent `pass` here meant a confirmed transfer decision
                         # could fail to persist (decision log, chip play, or the
