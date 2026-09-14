@@ -1812,8 +1812,30 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     # clean sheet at 60+ minutes. The caller evaluates this function once at 90
     # and once at 30 and weights by P(full) / P(cameo), so the threshold is
     # simply whether this branch clears 60.
-    lam_against = _to_float(f.get("lam_against")) or (xgc90 * att_adj * venue_def)
-    lam_against = max(0.0, lam_against * venue_def)
+    # venue_def is applied EXACTLY ONCE, on whichever branch produced the
+    # rate. The Dixon-Coles lambda already carries the venue shift -- it comes
+    # out of _fixture_lambdas, where the home side's rate is built with the
+    # fitted `+ gamma` home-advantage term -- so re-scaling it here counted
+    # venue twice. The previous line pair did exactly that on the fallback
+    # branch and, worse, applied `* venue_def` unconditionally afterwards:
+    #
+    #     lam = _to_float(f.get("lam_against")) or (xgc90 * att_adj * venue_def)
+    #     lam = max(0.0, lam * venue_def)
+    #
+    # so the DC path was scaled once (correct) and the fallback twice
+    # (venue_def^2: ~1.21 away, ~0.90 at home). Clean sheets run through
+    # exp(-lam), so a 21% inflation of the conceded rate is a ~19% relative
+    # cut in P(CS) for every away defender and keeper priced off the fallback.
+    #
+    # Presence is tested with `is not None`, never truthiness: a rate of
+    # exactly 0.0 is a real answer (a side expected to concede nothing), and
+    # the old `or` treated it as absent and silently re-inferred it.
+    dc_lam = f.get("lam_against")
+    if dc_lam is not None:
+        lam_against = _to_float(dc_lam)
+    else:
+        lam_against = xgc90 * att_adj * venue_def
+    lam_against = max(0.0, lam_against)
     p_cs_team = math.exp(-lam_against) if lam_against < 10 else 0.0
     plays_60 = 1.0 if emin >= 60 else 0.0
     cs_pts = CS_PTS.get(pos_id, 0) * p_cs_team * plays_60 * _w["clean_sheet_confidence"]
