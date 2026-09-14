@@ -107,8 +107,23 @@ def replay_gameweek(gameweek, snapshot=None, actuals=None):
     if not actuals:
         return None
 
+    # Two corrections, both load-bearing for a REPLAY:
+    #
+    # 1. fixtures_override. _build_fixture_lookup otherwise calls
+    #    _get_fixtures(), which is `/fixtures/?future=1` -- it EXCLUDES
+    #    finished fixtures. Replaying a gameweek that has already been played
+    #    therefore built a lookup with no entry for it at all, and every
+    #    projection came back "Blank" at 0.0. The backtester was not merely
+    #    imprecise, it was structurally unable to score a past gameweek.
+    #
+    # 2. as_of_event. Team ratings were fitted on every fixture finished
+    #    TODAY, so a GW6 replay was scored by a model that already knew how
+    #    GW6 -- and GW7..GW38 -- turned out. That is the leakage that makes a
+    #    backtest flatter the model it is supposed to audit.
     try:
-        lookup = fpl_tools._build_fixture_lookup(bootstrap)
+        lookup = fpl_tools._build_fixture_lookup(
+            bootstrap, fixtures_override=fpl_tools._get_all_fixtures(),
+            as_of_event=gameweek)
     except fpl_tools.FixtureDataUnavailable:
         return None
 

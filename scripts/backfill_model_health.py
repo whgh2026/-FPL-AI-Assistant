@@ -28,12 +28,20 @@ defaults to `_get_fixtures()` (`/fixtures/?future=1`), which excludes finished
 fixtures -- so building a lookup for a gameweek that has already been played
 would otherwise come back empty for that gameweek entirely.
 
-Like `scripts/backtest.py`, this measures/backfills "how the CURRENT model
-projects that gameweek", not "how the model actually deployed that week
-projected it" -- team ratings (`_team_attack_def_ratings`) are their own
-300-second cache fed by the live fixture list, same as the backtester. Making
-that historically exact is a larger change than this script's job of
-populating the calibration archive quickly and is left to the backtester.
+Team ratings are point-in-time too, via `as_of_event=gw`: the Dixon-Coles fit
+behind each gameweek's projection sees only fixtures from gameweeks strictly
+before it, reproducing what the live Friday snapshot could see standing in
+front of that gameweek. This previously did NOT hold -- ratings came from the
+shared live cache, fitted on every fixture finished today -- so a row
+backfilled for GW5 was projected by a model that already knew how GW5 and
+every later gameweek turned out.
+
+What this still measures is "how the CURRENT model code projects that
+gameweek", not "how the model actually deployed that week projected it": the
+weights and the projection logic are today's. That is the intended meaning for
+a calibration archive -- fitting today's weights needs today's model evaluated
+on honest point-in-time inputs -- and it is a versioning question, not a
+leakage one, which MODEL_VERSION already stamps on every row.
 
     python scripts/backfill_model_health.py                # every archived GW
     python scripts/backfill_model_health.py --from 5 --to 12
@@ -78,7 +86,15 @@ def _project_gameweek(gw, all_fixtures):
 
     teams_by_id = {t["id"]: t.get("short_name", t.get("name", "?"))
                    for t in bootstrap.get("teams", [])}
-    fixture_lookup = fpl_tools._build_fixture_lookup(bootstrap, fixtures_override=all_fixtures)
+    # as_of_event=gw is what closes the retro-projection leak. Without it the
+    # Dixon-Coles ratings came from the shared live cache -- fitted on every
+    # fixture finished TODAY -- so a row backfilled for GW5 was projected by a
+    # model that already knew how GW5, and every gameweek after it, turned
+    # out. Those rows feed auto_tune through db.get_prediction_history, which
+    # cannot tell a retro-projection from a genuine Friday snapshot, so the
+    # leakage would have landed directly in the fitted weights.
+    fixture_lookup = fpl_tools._build_fixture_lookup(
+        bootstrap, fixtures_override=all_fixtures, as_of_event=gw)
     played = ingest_actuals._fetch_played(gw)
 
     rows = []
