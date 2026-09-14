@@ -15,6 +15,7 @@ plan built on it is unexecutable.
 """
 
 import unittest
+from unittest import mock
 
 import fpl_tools
 from tests import harness
@@ -104,6 +105,89 @@ class BankInferenceTest(unittest.TestCase):
                 self.assertLess(
                     bank_after, 5.0,
                     "bank[0] is unconstrained: the plan conjured spendable cash")
+
+
+class PlanIncumbentTest(unittest.TestCase):
+    """`if LpStatus[prob.status] != "Optimal": return []` discarded a
+    perfectly usable time-limited incumbent. Under the interactive profile
+    (timeLimit=0.8s) a six-week plan over a ~40-player pool routinely runs the
+    clock out, so the roadmap vanished on exactly the solves it was most
+    needed for -- the same failure _solve_squad was fixed for in Stage 6.
+
+    Invariant I-7 is the boundary: an unproven incumbent is acceptable
+    interactively and never under `deterministic`, which must fail loudly
+    rather than return a schedule that varies with machine load.
+    """
+
+    def _timed_out(self):
+        """Force the elapsed-time check to read as a timeout without actually
+        waiting. Two readings: t0, then one far past any profile's limit."""
+        return mock.patch.object(fpl_tools.time, "monotonic",
+                                 side_effect=[0.0, 1e6])
+
+    def test_a_proven_solve_is_reported_as_proven(self):
+        with harness.synthetic_world("deterministic"):
+            schedule, _ts = _plan(bank_cash=0.3)
+            diag = fpl_tools._LAST_PLAN_SOLVE
+        self.assertTrue(schedule)
+        self.assertTrue(diag["proven_optimal"])
+        self.assertFalse(diag["timed_out"])
+        self.assertEqual(diag["status"], "Optimal")
+
+    def test_the_deterministic_profile_rejects_an_unproven_incumbent(self):
+        """I-7. A schedule that depends on how loaded the runner was is not a
+        result a golden-file suite can compare against."""
+        with harness.synthetic_world("deterministic"):
+            with self._timed_out():
+                schedule, _ts = _plan(bank_cash=0.3)
+            diag = fpl_tools._LAST_PLAN_SOLVE
+        self.assertTrue(diag["timed_out"])
+        self.assertFalse(diag["proven_optimal"])
+        self.assertEqual(schedule, [], "deterministic accepted an unproven plan")
+
+    def test_the_interactive_profile_accepts_a_valid_incumbent(self):
+        """The recovery itself: same forced timeout, opposite verdict."""
+        with harness.synthetic_world("interactive"):
+            with self._timed_out():
+                schedule, _ts = _plan(bank_cash=0.3)
+            diag = fpl_tools._LAST_PLAN_SOLVE
+        self.assertTrue(diag["timed_out"])
+        self.assertFalse(diag["proven_optimal"])
+        self.assertTrue(schedule,
+                        "a usable time-limited incumbent was thrown away")
+
+    def test_the_diagnostics_say_which_it_was(self):
+        """The UI must be able to distinguish "optimal" from "best plan found
+        in the time available" -- it cannot claim the first for the second."""
+        with harness.synthetic_world("interactive"):
+            _plan(bank_cash=0.3)
+            diag = fpl_tools._LAST_PLAN_SOLVE
+        for key in ("status", "proven_optimal", "timed_out", "elapsed",
+                    "profile", "objective"):
+            self.assertIn(key, diag)
+
+
+class PlanValidatorTest(unittest.TestCase):
+
+    def test_a_structurally_broken_week_is_rejected(self):
+        """_is_valid_plan is the gate an incumbent has to pass. An infeasible
+        solve leaves stale relaxation values behind that can look plausible --
+        _solve_squad once observed 15 selected players with a TEN-man XI -- so
+        the schedule is validated, not just its status."""
+        class _V:
+            def __init__(self, v):
+                self.varValue = v
+
+        by_id = {i: {"position": p, "team_id": 1}
+                 for i, p in enumerate(["GK"] * 2 + ["DEF"] * 5
+                                       + ["MID"] * 5 + ["FWD"] * 3)}
+        ids = list(by_id)
+        # Only fourteen held in week 0 -> not a legal squad.
+        x = {i: {0: _V(1.0 if i < 14 else 0.0)} for i in ids}
+        y = {i: {0: _V(0.0)} for i in ids}
+        ok = fpl_tools._is_valid_plan(ids, by_id, x, y, {0: _V(0.0)},
+                                      {0: _V(0.5)}, 1)
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

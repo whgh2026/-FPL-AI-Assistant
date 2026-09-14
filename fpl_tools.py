@@ -3008,6 +3008,39 @@ def _solve_squad(
     return None, None, {}
 
 
+def _is_valid_plan(ids, by_id, x, y, fh, bank, T) -> bool:
+    """Structural check on a multi-week schedule before it is trusted.
+
+    The multi-GW analogue of _is_valid_squad, and it exists for the same
+    reason: an incumbent taken from a non-proven solve can carry STALE
+    variable values from an earlier relaxation, and those values look
+    superficially plausible. Every week is checked independently, against the
+    squad that actually plays that week -- the Free Hit `y` squad when the
+    chip fires, the persistent `x` squad otherwise.
+    """
+    for t in range(T):
+        on_fh = (fh[t].varValue or 0) > 0.5
+        own = y if on_fh else x
+        held = [pid for pid in ids
+                if own[pid][t].varValue is not None and own[pid][t].varValue > 0.5]
+        if len(held) != sum(POS_COUNTS.values()):
+            return False
+        counts = {}
+        for pid in held:
+            counts[by_id[pid]["position"]] = counts.get(by_id[pid]["position"], 0) + 1
+        if counts != POS_COUNTS:
+            return False
+        clubs = {}
+        for pid in held:
+            clubs[by_id[pid]["team_id"]] = clubs.get(by_id[pid]["team_id"], 0) + 1
+        if clubs and max(clubs.values()) > 3:
+            return False
+        b = bank[t].varValue
+        if b is not None and b < -1e-6:
+            return False
+    return True
+
+
 def _is_valid_squad(selected, by_id, start) -> bool:
     """Structural check on a solver result before it is trusted."""
     if not selected or len(selected) != sum(POS_COUNTS.values()):
@@ -3945,9 +3978,38 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
     obj += lam_eq * term_equity + lam_ft * ft[T] - lam_dead * dead
 
     prob.setObjective(obj)
+    t0 = time.monotonic()
     prob.solve(_make_solver())
-    if pulp.LpStatus[prob.status] != "Optimal":
-        return []
+    elapsed = time.monotonic() - t0
+    status = pulp.LpStatus[prob.status]
+    # Same reasoning as _solve_squad's: CBC can report "Optimal" for an
+    # incumbent it merely ran out of clock on, so status alone proves nothing.
+    limit = SOLVER_PROFILES[_SOLVER_PROFILE]["timeLimit"]
+    timed_out = elapsed >= (limit * 0.95)
+    proven = (status == "Optimal") and not timed_out
+    try:
+        objective = pulp.value(prob.objective)
+    except Exception:
+        objective = None
+    _LAST_PLAN_SOLVE.update({
+        "status": status, "proven_optimal": proven, "timed_out": timed_out,
+        "elapsed": elapsed, "profile": _SOLVER_PROFILE, "objective": objective,
+    })
+
+    if not proven:
+        # `!= "Optimal" -> return []` discarded a perfectly usable time-limited
+        # incumbent. Under the interactive profile (timeLimit=0.8s) a six-week
+        # plan over a ~40-player pool routinely hits the clock, so the roadmap
+        # vanished on exactly the solves it was most needed for -- the same
+        # failure _solve_squad was fixed for in Stage 6.
+        #
+        # Invariant I-7 still holds: an unproven incumbent is returned ONLY
+        # under interactive. The deterministic profile must fail loudly rather
+        # than hand back a schedule that varies with machine load.
+        usable_status = status == "Not Solved" or (status == "Optimal" and timed_out)
+        if not (_SOLVER_PROFILE == "interactive" and usable_status
+                and _is_valid_plan(ids, by_id, x, y, fh, bank, T)):
+            return []
 
     schedule = []
     for t in range(T):
