@@ -24,15 +24,18 @@ _CACHE_RESET = {
     "_CACHE": dict,
     "_LEAGUE_AVG": lambda: None,
     "_LEAGUE_AVG_TS": float,
-    "_TEAM_RATINGS_CACHE": lambda: None,
-    "_TEAM_RATINGS_TS": float,
+    "_TEAM_RATINGS_CACHE": dict,
+    "_TEAM_RATINGS_TS": dict,
     "_TEAM_PLAYED": lambda: None,
     "_TEAM_PLAYED_TS": float,
     "_WEIGHTS_CACHE": lambda: None,
     "_WEIGHTS_STAMP": lambda: (0.0, 0.0),
+    # All five ratings/calendar caches are now dicts keyed on
+    # (as_of_event, _CACHE_EPOCH) or (start_event, n) rather than single slots,
+    # so a stale entry leaks ACROSS GAMEWEEKS as well as across tests.
     "_DC_RAW": dict,
-    "_FIXTURE_LOOKUP_CACHE": lambda: None,
-    "_FIXTURE_LOOKUP_TS": float,
+    "_FIXTURE_LOOKUP_CACHE": dict,
+    "_FIXTURE_LOOKUP_TS": dict,
     "_RECENT_CACHE": dict,
     "_RECENT_CACHE_TS": dict,
     "_EO_CACHE": dict,
@@ -40,8 +43,8 @@ _CACHE_RESET = {
     "_LIVE_CACHE": dict,
     "_LIVE_CACHE_TS": float,
     "_LIVE_CACHE_GW": lambda: None,
-    "_CALENDAR_CACHE": lambda: None,
-    "_CALENDAR_CACHE_TS": float,
+    "_CALENDAR_CACHE": dict,
+    "_CALENDAR_CACHE_TS": dict,
 }
 
 

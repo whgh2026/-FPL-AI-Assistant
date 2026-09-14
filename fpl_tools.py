@@ -693,17 +693,38 @@ def _fit_dixon_coles(finished_fixtures, decay=0.03, tau=-0.10, iterations=300, l
     return ratings, gamma, rho, mu
 
 
-_TEAM_RATINGS_CACHE: Optional[Dict[int, Dict[str, float]]] = None
-_TEAM_RATINGS_TS: float = 0.0
+# Ratings caches are keyed on (as_of_event, _CACHE_EPOCH), not held in a single
+# slot. A backfill or backtest replaying GW3 and then GW6 in one process used
+# to have the second replay silently served the FIRST one's fit -- the cache
+# was keyed on nothing at all -- so a replay's answer depended on what had been
+# replayed before it in the same process. The epoch is a module-local nonce so
+# a reimport or a fork cannot collide with a previous incarnation's entries.
+_CACHE_EPOCH = int(time.time() * 1e6) & 0xFFFFFFFF
+_TEAM_RATINGS_CACHE: Dict[Tuple[Optional[int], int], Dict[int, Dict[str, float]]] = {}
+_TEAM_RATINGS_TS: Dict[Tuple[Optional[int], int], float] = {}
 # The raw fit, kept because the [1,5] mapping is lossy. Stage 4 fixed that
 # mapping's sign and scale, but a rating squashed onto an ordinal band and then
 # read back as 3.0/x is still a poor substitute for the Poisson rate the model
 # actually estimated. _fixture_lambdas reads this instead.
-_DC_RAW: Dict[str, Any] = {}
+#
+# Keyed identically to the banded ratings above, and for a load-bearing reason:
+# _fixture_lambdas reads the RAW fit, and the raw fit is what sets the
+# clean-sheet probability. Keying only the banded ratings would mean a cache
+# HIT returns early without re-deriving _DC_RAW, so the lambdas would come from
+# whichever gameweek happened to be fitted last.
+_DC_RAW: Dict[Tuple[Optional[int], int], Dict[str, Any]] = {}
 
 
-def _clear_rating_caches() -> None:
+def _rating_key(as_of_event: Optional[int]) -> Tuple[Optional[int], int]:
+    return (int(as_of_event) if as_of_event is not None else None, _CACHE_EPOCH)
+
+
+def _clear_rating_caches(as_of_event: Optional[int] = None) -> None:
     """Drop the fitted Dixon-Coles ratings so the next call refits.
+
+    With no argument, clears EVERY key -- which is what a one-shot script
+    (snapshot_xp._lookup_at_weights) wants. With an as_of_event, clears only
+    that window, leaving other replays' fits intact.
 
     Needed by anything that changes dixon_coles_decay and wants the effect: the
     fit is time-weighted by that parameter but cached for 300s, so a caller who
@@ -711,32 +732,66 @@ def _clear_rating_caches() -> None:
     derivative of exactly zero -- indistinguishable from "this parameter does
     not matter".
     """
-    global _TEAM_RATINGS_CACHE, _TEAM_RATINGS_TS, _DC_RAW
-    global _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS
-    _TEAM_RATINGS_CACHE = None
-    _TEAM_RATINGS_TS = 0.0
-    _DC_RAW = {}
-    # The lookup embeds the ratings, so leaving it behind would serve the old
-    # fit through a different door -- exactly the failure this function exists
-    # to prevent.
-    _FIXTURE_LOOKUP_CACHE = None
-    _FIXTURE_LOOKUP_TS = 0.0
+    if as_of_event is None:
+        _TEAM_RATINGS_CACHE.clear()
+        _TEAM_RATINGS_TS.clear()
+        _DC_RAW.clear()
+        # The lookup embeds the ratings, so leaving it behind would serve the
+        # old fit through a different door -- exactly the failure this
+        # function exists to prevent.
+        _FIXTURE_LOOKUP_CACHE.clear()
+        _FIXTURE_LOOKUP_TS.clear()
+        _CALENDAR_CACHE.clear()
+        _CALENDAR_CACHE_TS.clear()
+        return
+    key = _rating_key(as_of_event)
+    for d in (_TEAM_RATINGS_CACHE, _TEAM_RATINGS_TS, _DC_RAW,
+              _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS):
+        d.pop(key, None)
 
 
-def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
+def _team_attack_def_ratings(as_of_event: Optional[int] = None,
+                             bootstrap: Optional[Dict[str, Any]] = None,
+                             fixtures: Optional[List[Dict[str, Any]]] = None) -> Dict[int, Dict[str, float]]:
     """Continuous Dixon-Coles attack/defence ratings per team on a [1,5]-ish scale.
 
     Blended with FPL overall strength early in the season (few finished fixtures)
     and shifted toward pure Dixon-Coles as results accrue. Returns
     {team_id: {'att','def','att_home','att_away','def_home','def_away'}}.
-    """
-    global _TEAM_RATINGS_CACHE, _TEAM_RATINGS_TS
-    if _TEAM_RATINGS_CACHE is not None and (time.time() - _TEAM_RATINGS_TS) < 300:
-        return _TEAM_RATINGS_CACHE
 
-    bootstrap = _get_bootstrap()
+    `as_of_event` makes the fit point-in-time: only fixtures from gameweeks
+    STRICTLY BEFORE it are fed to the solver, reproducing what this function
+    would have returned standing in front of that gameweek. Default None is
+    the live path, unchanged.
+
+    Strictly before, not `<=`, and that is the whole correctness argument: a
+    projection for gameweek N is made before N kicks off, so N's own results
+    are not knowable. Admitting them would let a player's own gameweek inform
+    the ratings used to project it -- the same future leakage this parameter
+    exists to close, merely narrowed from thirty-eight gameweeks to one. The
+    invariant worth holding is that as_of_event=N reproduces the live Friday
+    snapshot for gameweek N, where `finished` covers 1..N-1 only; that is what
+    makes a backfilled row comparable to a genuine snapshot row rather than
+    systematically sharper than one.
+
+    The gameweek number, not the kickoff timestamp, is what decides: an
+    unplayed fixture inside as_of_event's own gameweek carries a future
+    timestamp, while a postponed historical fixture's can lag arbitrarily.
+    The event number is the only thing an archived bootstrap stably carries.
+    """
+    key = _rating_key(as_of_event)
+    cached = _TEAM_RATINGS_CACHE.get(key)
+    if cached is not None and (time.time() - _TEAM_RATINGS_TS.get(key, 0.0)) < 300:
+        return cached
+
+    if bootstrap is None:
+        bootstrap = _get_bootstrap()
     teams = {t["id"]: t for t in bootstrap.get("teams", [])}
-    finished = [f for f in _get_all_fixtures() if f.get("finished")]
+    all_fixtures = fixtures if fixtures is not None else _get_all_fixtures()
+    finished = [f for f in all_fixtures if f.get("finished")]
+    if as_of_event is not None:
+        finished = [f for f in finished
+                    if f.get("event") is not None and int(f["event"]) < int(as_of_event)]
     w = _load_weights()
     scale = w.get("rating_scale", 2.0)
 
@@ -811,14 +866,18 @@ def _team_attack_def_ratings() -> Dict[int, Dict[str, float]]:
             "def_home": min(5.0, max(1.0, dfn + half)),
             "def_away": min(5.0, max(1.0, dfn - half)),
         }
-    global _DC_RAW
-    _DC_RAW = {"ratings": dc, "gamma": gamma, "mu": _mu, "rho": _rho}
-    _TEAM_RATINGS_CACHE = out
-    _TEAM_RATINGS_TS = time.time()
-    try:
-        save_team_ratings(out, _next_gameweek(bootstrap))
-    except Exception:
-        pass
+    _DC_RAW[key] = {"ratings": dc, "gamma": gamma, "mu": _mu, "rho": _rho}
+    _TEAM_RATINGS_CACHE[key] = out
+    _TEAM_RATINGS_TS[key] = time.time()
+    if as_of_event is None:
+        try:
+            save_team_ratings(out, _next_gameweek(bootstrap))
+        except Exception:
+            pass
+    # Point-in-time fits are deliberately NOT persisted: save_team_ratings
+    # stamps the row with _next_gameweek(bootstrap) -- TODAY's gameweek -- so
+    # writing a historical fit through it would file GW5's ratings under GW17
+    # and corrupt the very audit table this call is reconstructing.
     return out
 
 # ------------------------------------------------------------------
@@ -1103,7 +1162,8 @@ def _fetch_market_win_probs(bootstrap: Optional[Dict[str, Any]] = None) -> Dict[
     return result
 
 
-def _fixture_lambdas(home_id: int, away_id: int) -> Tuple[float, float]:
+def _fixture_lambdas(home_id: int, away_id: int,
+                     as_of_event: Optional[int] = None) -> Tuple[float, float]:
     """(lambda_home, lambda_away): expected goals for each side in this fixture.
 
     This is what the Dixon-Coles fit actually estimates, and it was being thrown
@@ -1115,7 +1175,10 @@ def _fixture_lambdas(home_id: int, away_id: int) -> Tuple[float, float]:
 
     Falls back to the league average when there is no fit yet (early season).
     """
-    raw = _DC_RAW or {}
+    # Reads the raw fit under the SAME key the banded ratings were stored
+    # under, so the lambdas and the ratings in one lookup can never come from
+    # different gameweeks' fits.
+    raw = _DC_RAW.get(_rating_key(as_of_event)) or {}
     ratings = raw.get("ratings") or {}
     mu = raw.get("mu", math.log(1.40))
     gamma = raw.get("gamma", 0.25)
@@ -1134,13 +1197,14 @@ def _fixture_lambdas(home_id: int, away_id: int) -> Tuple[float, float]:
             min(LAMBDA_MAX, max(LAMBDA_MIN, lam_a)))
 
 
-_FIXTURE_LOOKUP_CACHE: Optional[Dict[int, List[Dict[str, Any]]]] = None
-_FIXTURE_LOOKUP_TS: float = 0.0
+_FIXTURE_LOOKUP_CACHE: Dict[Tuple[Optional[int], int], Dict[int, List[Dict[str, Any]]]] = {}
+_FIXTURE_LOOKUP_TS: Dict[Tuple[Optional[int], int], float] = {}
 FIXTURE_LOOKUP_TTL_SECONDS = 300.0
 
 
 def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None,
-                           fixtures_override: Optional[List[Dict]] = None) -> Dict[int, List[Dict[str, Any]]]:
+                           fixtures_override: Optional[List[Dict]] = None,
+                           as_of_event: Optional[int] = None) -> Dict[int, List[Dict[str, Any]]]:
     """Per-team fixture lists, decorated with ratings, lambdas and odds.
 
     Memoised. This is called from more than fifty sites -- score_my_squad,
@@ -1161,11 +1225,12 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None,
     must never read stale entries from, or overwrite, the cache the running
     app shares across requests.
     """
+    key = _rating_key(as_of_event)
     if fixtures_override is None:
-        global _FIXTURE_LOOKUP_CACHE, _FIXTURE_LOOKUP_TS
-        if (_FIXTURE_LOOKUP_CACHE is not None
-                and (time.time() - _FIXTURE_LOOKUP_TS) < FIXTURE_LOOKUP_TTL_SECONDS):
-            return _FIXTURE_LOOKUP_CACHE
+        hit = _FIXTURE_LOOKUP_CACHE.get(key)
+        if (hit is not None
+                and (time.time() - _FIXTURE_LOOKUP_TS.get(key, 0.0)) < FIXTURE_LOOKUP_TTL_SECONDS):
+            return hit
 
     if bootstrap is None:
         bootstrap = _get_bootstrap()
@@ -1185,8 +1250,13 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None,
             raise FixtureDataUnavailable(
                 "could not load the FPL fixture list") from exc
 
-    win_probs = _fetch_market_win_probs(bootstrap)
-    ratings = _team_attack_def_ratings()
+    # Live bookmaker prices are a TODAY input. A historical replay that mixed
+    # them into a past gameweek's fixture would be reading the market's
+    # opinion of matches that have already been played, which is leakage of a
+    # purer kind than the ratings fit ever was.
+    win_probs = {} if as_of_event is not None else _fetch_market_win_probs(bootstrap)
+    ratings = _team_attack_def_ratings(as_of_event=as_of_event, bootstrap=bootstrap,
+                                       fixtures=fixtures_override)
 
     lookup: Dict[int, List[Dict[str, Any]]] = {}
     for f in fixtures:
@@ -1194,7 +1264,7 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None,
         event = f.get("event")
         rh = ratings.get(h, {})
         ra = ratings.get(a, {})
-        lam_h, lam_a = _fixture_lambdas(h, a)
+        lam_h, lam_a = _fixture_lambdas(h, a, as_of_event=as_of_event)
         home_fx = {
             "event": event,
             "is_home": True,
@@ -1232,8 +1302,8 @@ def _build_fixture_lookup(bootstrap: Optional[Dict[str, Any]] = None,
     for t in lookup:
         lookup[t].sort(key=lambda x: x["event"] if x["event"] is not None else 999)
     if fixtures_override is None:
-        _FIXTURE_LOOKUP_CACHE = lookup
-        _FIXTURE_LOOKUP_TS = time.time()
+        _FIXTURE_LOOKUP_CACHE[key] = lookup
+        _FIXTURE_LOOKUP_TS[key] = time.time()
     return lookup
 
 
@@ -2324,8 +2394,18 @@ def _gw_fixtures(fx: List[Dict[str, Any]], event: int) -> List[Dict[str, Any]]:
     return [x for x in fx if x.get("event") == event]
 
 
-_CALENDAR_CACHE: Optional[Dict[int, Dict[str, Any]]] = None
-_CALENDAR_CACHE_TS: float = 0.0
+# Keyed on (start_event, n), not held in a single time-guarded slot. A call
+# for start_event=10 after one for start_event=1 used to return GW1's map for
+# the next 300 seconds -- and the Free Hit emergency check in
+# suggest_transfers_for_custom_squad calls this with a DIFFERENT start_event
+# every gameweek, so it silently inherited whatever was cached last.
+#
+# Deliberately NOT keyed on id(fixture_lookup): CPython reuses id() values
+# after garbage collection, so a freed lookup's id can be reassigned to a
+# different object and produce a false HIT with a silently wrong calendar.
+# An explicitly supplied lookup bypasses the cache entirely instead.
+_CALENDAR_CACHE: Dict[Tuple[int, int], Dict[int, Dict[str, Any]]] = {}
+_CALENDAR_CACHE_TS: Dict[Tuple[int, int], float] = {}
 BGW_MIN_BLANKS = 4       # clubs without a fixture before a gameweek counts as blank
 DGW_MIN_DOUBLES = 4      # clubs with two fixtures before it counts as double
 
@@ -2339,10 +2419,12 @@ def _fixture_calendar(fixture_lookup=None, start_event=1, n=38) -> Dict[int, Dic
     is a scheduling artefact that resolves; poor form is a property of the
     player. Chip logic needs the same distinction to target a Free Hit.
     """
-    global _CALENDAR_CACHE, _CALENDAR_CACHE_TS
-    if _CALENDAR_CACHE is not None and (time.time() - _CALENDAR_CACHE_TS) < 300:
-        return _CALENDAR_CACHE
-    if fixture_lookup is None:
+    key = (int(start_event), int(n))
+    explicit = fixture_lookup is not None
+    if not explicit:
+        hit = _CALENDAR_CACHE.get(key)
+        if hit is not None and (time.time() - _CALENDAR_CACHE_TS.get(key, 0.0)) < 300:
+            return hit
         fixture_lookup = _build_fixture_lookup()
 
     counts: Dict[int, Dict[int, int]] = {}
@@ -2369,8 +2451,9 @@ def _fixture_calendar(fixture_lookup=None, start_event=1, n=38) -> Dict[int, Dic
             "is_bgw": blanks >= BGW_MIN_BLANKS,
             "is_dgw": doubles >= DGW_MIN_DOUBLES,
         }
-    _CALENDAR_CACHE = out
-    _CALENDAR_CACHE_TS = time.time()
+    if not explicit:
+        _CALENDAR_CACHE[key] = out
+        _CALENDAR_CACHE_TS[key] = time.time()
     return out
 
 

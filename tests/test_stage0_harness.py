@@ -20,6 +20,12 @@ _EXEMPT = {
     "_ODDS_CACHE": "reset explicitly (dict with a different shape)",
     "_LAST_FETCH_TIME": "diagnostic only, never read for correctness",
     "_LAST_SOLVE": "per-solve diagnostics, overwritten on every call",
+    "_LAST_PLAN_SOLVE": "per-plan diagnostics, overwritten on every call",
+    # A process-local NONCE, not a cache. It is part of every ratings cache
+    # key precisely so entries from a previous incarnation of the module can
+    # never be read back; resetting it between tests would defeat that, and
+    # it holds no state that can leak.
+    "_CACHE_EPOCH": "process nonce in the cache key, must survive a reset",
 }
 
 

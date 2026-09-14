@@ -231,9 +231,16 @@ class DecayGradientTest(unittest.TestCase):
         with harness.synthetic_world():
             bootstrap, _ = harness.load_synthetic()
             fpl_tools._build_fixture_lookup(bootstrap)
-            self.assertIsNotNone(fpl_tools._TEAM_RATINGS_CACHE)
+            # RE-BASELINED for the scoped caches. These were single slots
+            # (None / {}); they are now dicts keyed on (as_of_event,
+            # _CACHE_EPOCH), so "populated" is a non-empty dict and "cleared"
+            # is an empty one. The property under test is unchanged: clearing
+            # is what makes the decay probe measure a real derivative instead
+            # of exactly 0.0.
+            self.assertTrue(fpl_tools._TEAM_RATINGS_CACHE)
+            self.assertTrue(fpl_tools._DC_RAW)
             fpl_tools._clear_rating_caches()
-            self.assertIsNone(fpl_tools._TEAM_RATINGS_CACHE)
+            self.assertEqual(fpl_tools._TEAM_RATINGS_CACHE, {})
             self.assertEqual(fpl_tools._DC_RAW, {})
 
 
