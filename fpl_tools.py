@@ -1053,7 +1053,40 @@ def _canonical_club(name: str, bootstrap: Optional[Dict[str, Any]] = None) -> Op
 
 
 DEVIG_POWER_BRACKET_LOW = 1.0
-DEVIG_POWER_BRACKET_HIGH = 5.0
+# Headroom, not a fix. f(k) = sum(p_i^k) - 1 is strictly decreasing (every
+# p_i is in (0, 1)), so the root is unique and widening can only ADD coverage:
+# a root found in [1, 5] is still found in [1, 10].
+#
+# Measured before changing it: k only grows large when some outcome is priced
+# near certainty, and even a three-way book carrying a 20% overround with the
+# favourite at decimal odds 1.001 solves at k = 2.85. 5.0 was never the
+# binding constraint for any football market that can exist, and the audit
+# claim that it "undershoots on a juiced book" does not reproduce. 10.0 costs
+# nothing and removes the question; the half of that finding that was real is
+# the fallback telemetry below -- until now a permanent degradation to the
+# proportional split was completely silent.
+DEVIG_POWER_BRACKET_HIGH = 10.0
+
+
+def _log_devig_fallback(total: float, implied_probs: List[float], reason: str) -> None:
+    """Report a de-vig that gave up and used proportional normalisation.
+
+    Silent until now, and the two outcomes look identical from the outside: a
+    de-vigged market and a proportionally-split one are both three numbers
+    summing to 1.0. But the flat split hands the whole bookmaker margin to the
+    longshot side, so a permanent fallback is a systematic bias in every
+    market-adjusted projection downstream -- and nothing said so.
+
+    fpl_tools carries no logger by design (see the note beside _LAST_SOLVE);
+    stderr is what _log_ft_error already uses and what Railway captures.
+
+    The overround is printed because it is the field that distinguishes the
+    two causes worth acting on: a pathological book (near 1.0, or below it)
+    from a heavily juiced one the bracket is simply too narrow for.
+    """
+    print(f"[fpl_tools] _devig_power fell back to proportional "
+          f"(overround={total:.4f}, n={len(implied_probs)}): {reason}",
+          file=sys.stderr, flush=True)
 
 
 def _devig_power(implied_probs: List[float]) -> List[float]:
@@ -1079,8 +1112,9 @@ def _devig_power(implied_probs: List[float]) -> List[float]:
     is strictly decreasing too, meaning it has at most one root and brentq's
     bracketed search is exactly the right tool: k=1 always overshoots
     (f(1) = S - 1 > 0, since a real market always carries an overround) and
-    k=5 comfortably undershoots for any realistic football market's margin,
-    so [1, 5] reliably brackets the root.
+    the high end comfortably undershoots for any realistic football
+    market's margin, so [DEVIG_POWER_BRACKET_LOW, DEVIG_POWER_BRACKET_HIGH]
+    reliably brackets the root.
 
     Falls back to plain proportional normalisation if brentq cannot bracket
     a root in [DEVIG_POWER_BRACKET_LOW, DEVIG_POWER_BRACKET_HIGH] (a same-
@@ -1099,6 +1133,7 @@ def _devig_power(implied_probs: List[float]) -> List[float]:
         # A zero or negative implied probability breaks p^k for non-integer k
         # (0^k is fine, but a negative price should never reach here) --
         # proportional normalisation degrades gracefully instead.
+        _log_devig_fallback(total, implied_probs, "non-positive implied probability")
         return [p / total for p in implied_probs]
 
     def _root(k: float) -> float:
@@ -1113,8 +1148,14 @@ def _devig_power(implied_probs: List[float]) -> List[float]:
             if f_low * f_high <= 0:
                 k = _brentq(_root, DEVIG_POWER_BRACKET_LOW, DEVIG_POWER_BRACKET_HIGH)
                 return [p ** k for p in implied_probs]
-        except Exception:
-            pass
+            reason = (f"no sign change on [{DEVIG_POWER_BRACKET_LOW}, "
+                      f"{DEVIG_POWER_BRACKET_HIGH}] "
+                      f"(f_low={f_low:.4g}, f_high={f_high:.4g})")
+        except Exception as exc:
+            reason = f"{exc.__class__.__name__}: {str(exc) or 'no detail'}"
+    else:
+        reason = "scipy not installed"
+    _log_devig_fallback(total, implied_probs, reason)
     return [p / total for p in implied_probs]
 
 

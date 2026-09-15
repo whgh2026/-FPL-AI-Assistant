@@ -587,3 +587,49 @@ class DevigPowerTest(unittest.TestCase):
         self.assertIn("_devig_power(", src)
         self.assertNotIn("h_imp / total", src,
                          "the old flat proportional normalisation survived alongside it")
+
+
+class DevigFallbackTelemetryTest(unittest.TestCase):
+    """A de-vigged market and a proportionally-split one are both three
+    numbers summing to 1.0, so a permanent fallback was indistinguishable from
+    the power method working -- while handing the entire bookmaker margin to
+    the longshot side of every fixture the engine projects."""
+
+    def _capture(self, probs):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            out = fpl_tools._devig_power(probs)
+        return out, buf.getvalue()
+
+    def test_a_normal_three_way_book_is_solved_and_says_nothing(self):
+        out, err = self._capture([0.55, 0.30, 0.25])
+        self.assertAlmostEqual(sum(out), 1.0, places=6)
+        self.assertEqual(err, "", f"a successful de-vig should be silent: {err!r}")
+
+    def test_a_same_signed_bracket_reports_the_overround_and_the_reason(self):
+        """An "already fair" or inverted book (sum <= 1.0) has no root above
+        k=1, so brentq cannot bracket one."""
+        out, err = self._capture([0.4, 0.4])
+        self.assertAlmostEqual(sum(out), 1.0, places=6)
+        self.assertIn("fell back to proportional", err)
+        self.assertIn("overround=0.8000", err)
+        self.assertIn("no sign change", err)
+
+    def test_a_non_positive_price_reports_its_own_reason(self):
+        _out, err = self._capture([0.5, 0.0])
+        self.assertIn("non-positive implied probability", err)
+
+    def test_the_bracket_spans_every_market_that_can_exist(self):
+        """k grows only as an outcome approaches certainty. A three-way book
+        at a 20% overround with the favourite at decimal odds 1.001 -- far
+        past anything a real market quotes -- still solves well inside the
+        bracket, so the widening is headroom rather than a recovered case."""
+        if not fpl_tools.HAS_SCIPY:
+            self.skipTest("scipy required")
+        probs = [0.999, 0.1005, 0.1005]
+        out, err = self._capture(probs)
+        self.assertEqual(err, "", f"extreme book fell back: {err!r}")
+        self.assertAlmostEqual(sum(out), 1.0, places=6)
+        self.assertGreaterEqual(fpl_tools.DEVIG_POWER_BRACKET_HIGH, 5.0)
