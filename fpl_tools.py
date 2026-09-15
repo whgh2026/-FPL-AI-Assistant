@@ -2240,13 +2240,19 @@ def calibration_features(p: Dict[str, Any],
 
 
 def _player_xp(p: Dict[str, Any], fixture_lookup: Dict[int, List[Dict[str, Any]]], event: Optional[int] = None,
-              gk_cs_dampener: float = 1.0) -> Tuple[float, str]:
+              gk_cs_dampener: float = 1.0, blend_ep: bool = True) -> Tuple[float, str]:
     """Single-gameweek expected points. A pure forecast.
 
     Takes no `risk` argument by design: strategy must not reach the projection.
     See the Layer 1 note on _player_xp_raw.
+
+    `blend_ep` is a straight passthrough to _player_xp_raw. It exists so a
+    caller projecting a WEEK OTHER THAN THE NEXT ONE -- _generate_scenarios
+    walking a six-week horizon -- can suppress the ep_next blend without
+    reaching past this function to _player_xp_raw and re-implementing the
+    global_xP_modifier step alongside it. One place applies gmod.
     """
-    raw, note = _player_xp_raw(p, fixture_lookup, event, gk_cs_dampener)
+    raw, note = _player_xp_raw(p, fixture_lookup, event, gk_cs_dampener, blend_ep=blend_ep)
     gmod = _load_weights()["global_xP_modifier"]
     return round(max(raw, 0.0) * gmod, 2), note
 
@@ -3675,7 +3681,15 @@ def _generate_scenarios(player_ids, fixture_lookup, event, risk="balanced",
         dampener = GK_TRANSFER_IN_CS_DAMPENER if pid in gk_transfer_in_ids else 1.0
         row = []
         for t in range(n):
-            xp, _ = _player_xp(e, fixture_lookup, event=event + t, gk_cs_dampener=dampener)
+            # blend_ep only at t == 0, mirroring _player_xp_horizon. FPL
+            # publishes ep_next for the NEXT gameweek only -- it is a single
+            # number, not a series -- so blending it into every horizon week
+            # pins a constant onto weeks it says nothing about and flattens
+            # the fixture sensitivity the horizon exists to surface. This was
+            # the surviving copy of the defect blend_ep was added to close:
+            # _player_xp_horizon stopped doing it, the SAA base kept on.
+            xp, _ = _player_xp(e, fixture_lookup, event=event + t,
+                               gk_cs_dampener=dampener, blend_ep=(t == 0))
             row.append(xp)
         base[pid] = row
         _p0, _pc, _pf = _minute_distribution(e, e.get("status", "a"))
@@ -4627,11 +4641,19 @@ def suggest_transfers_for_custom_squad(
                 horizon = sum(HORIZON_WEIGHTS[t] * (m[t] if t < len(m) else 0.0)
                               for t in range(len(HORIZON_WEIGHTS)))
                 # C12. This overwrite REPLACES the horizon xP that
-                # _player_xp_horizon produced, and the SAA mean is rebuilt from
-                # single-gameweek projections that never saw the suspension
-                # haircut. So a player one booking from a ban had his 15%
-                # discount silently reverted for the entire solve -- the one
-                # place it was meant to change a decision.
+                # _player_xp_horizon produced, so it has to reproduce
+                # everything that function does or it silently drops it. Two
+                # such drops have now been closed: the SAA base is built under
+                # the same blend_ep discipline (see _generate_scenarios), and
+                # the tightrope haircut is re-applied below -- it lives on the
+                # horizon, and a per-fixture mean has no notion of a
+                # multi-week suspension risk.
+                #
+                # Still divergent, deliberately: this folds HORIZON_WEIGHTS
+                # (4 weeks) while _plan_transfers_multi_gw reads saa_mean
+                # under PLAN_WEIGHTS (6). Correct for the single-GW solve,
+                # but the two consumers do not mean the same thing by
+                # "horizon xP".
                 if p.get("on_yellow_card_tightrope"):
                     horizon *= TIGHTROPE_DISCOUNT
                 p["xp"] = round(horizon, 2)

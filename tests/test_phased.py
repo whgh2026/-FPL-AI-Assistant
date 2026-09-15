@@ -332,13 +332,29 @@ class BankCashWiringTest(unittest.TestCase):
                 squad, bank=0.3, free_transfers=1, eval_chips=[],
                 event=EVENT, risk="balanced", holding_map=None, current_gw=EVENT,
                 allow_hits=False)
+            diag = dict(fpl_tools._LAST_PLAN_SOLVE)
         plan = res.get("multi_gw_plan") or []
         self.assertTrue(plan, "expected a multi-GW plan to be produced")
+
+        # Assert the opening bank directly rather than inferring it from a
+        # downstream bank_after. bank_after is an OUTCOME: any change to the
+        # objective legitimately moves how much cash a plan chooses to hold,
+        # and a plain "< 20.0" then fails for reasons that have nothing to do
+        # with the wiring this test is about. opening_bank is the input the
+        # defect was in.
+        self.assertFalse(diag.get("bank_inferred"),
+                         "bank_cash was not supplied, so the planner fell back "
+                         "to reconstructing the opening bank from squad equity")
+        self.assertAlmostEqual(diag.get("opening_bank"), 0.3, places=6)
+
+        # Sanity bound on the outcome, scaled to the fixture instead of a magic
+        # constant: total purchasing power here is ~166, so anything at or
+        # above half the squad's value means bank[0] took the equity again.
         for s in plan:
             self.assertLess(
-                s["bank_after"], 20.0,
+                s["bank_after"], total_squad_value / 2.0,
                 f"bank_after tracked squad value (~{total_squad_value:.1f}) rather "
-                f"than the manager's real £0.3m bank: {s}")
+                f"than the manager's real 0.3m bank: {s}")
 
 
 class FreeTransferStateMachineTest(unittest.TestCase):

@@ -30,7 +30,13 @@ def _run(squad, horizon, gwxp, notes, free_transfers, allow_hits=False, elements
                  "events": [{"id": GW, "is_next": True, "finished": False}]}
     def h(e, fl, ev, risk="balanced", n=4, gk_cs_dampener=1.0):
         return horizon.get(e["id"], 12.0), notes.get(e["id"], "Available")
-    def g(e, fl, event=None, risk="balanced", gk_cs_dampener=1.0):
+    # blend_ep is accepted and ignored: this stub injects a fixed per-player
+    # projection, so there is no ep_next for the flag to blend. It has to be in
+    # the signature all the same -- _generate_scenarios passes it, and a
+    # TypeError here is swallowed by suggest_transfers_for_custom_squad's
+    # broad except, which silently empties saa_mean and leaves the solve
+    # running on unoverwritten horizon values.
+    def g(e, fl, event=None, risk="balanced", gk_cs_dampener=1.0, blend_ep=True):
         return gwxp.get(e["id"], 3.0), notes.get(e["id"], "Available")
     with mock.patch.object(fpl_tools, "_get_bootstrap", return_value=bootstrap), \
          mock.patch.object(fpl_tools, "_build_fixture_lookup", return_value={}), \
