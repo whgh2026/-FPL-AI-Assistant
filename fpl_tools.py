@@ -151,6 +151,14 @@ DIXON_COLES_DECAY_DEFAULT = 0.03  # reference decay for the calibration re-proje
 LAMBDA_MIN = 0.15
 LAMBDA_MAX = 5.0
 
+# Floor on the opponent defensive rating before 3.0/x is taken. 3.0/x is
+# convex, so it over-rewards the very weakest defences: at the old floor of 1.0
+# an attacker facing the bottom club had their xG *tripled*. 1.5 caps the boost
+# at 2.0x. Module scope rather than a local inside _xp_for_fixture because
+# _arith_fingerprint() has to hash it -- it changes what _player_xp_raw
+# returns, so a change to it must invalidate the calibration archive.
+DEF_ADJ_FLOOR = 1.5
+
 # Bonus (C7). Expected bonus scales as (player bps90 / positional bps90) raised
 # to BONUS_CONVEXITY, around the positional constant as prior. The exponent is
 # above 1 because bonus is a rank-order tournament -- the top three BPS in a
@@ -1879,7 +1887,8 @@ def _xp_for_fixture(p: Dict[str, Any], f: Dict[str, Any], emin: float, pos_id: i
     # the scale exposed it. The 1.5 floor caps the boost at 2.0x as a stopgap --
     # the real fix is Stage 5b, which replaces this ratio with the fitted
     # Dixon-Coles lambda for the fixture and drops the [1,5] round-trip entirely.
-    DEF_ADJ_FLOOR = 1.5
+    # Defined at module scope, beside LAMBDA_MAX, so _arith_fingerprint
+    # can hash it.
     def_adj = 3.0 / max(_to_float(f.get("opp_strength_def")), DEF_ADJ_FLOOR)
     att_adj = max(_to_float(f.get("opp_strength_att")), 1.0) / 3.0
 
