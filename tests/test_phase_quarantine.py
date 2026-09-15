@@ -53,6 +53,78 @@ class ArithFingerprintTest(unittest.TestCase):
         finally:
             fpl_tools.MODEL_VERSION = saved
 
+    # Every constant below changes what _player_xp_raw returns, and none of
+    # them were in the blob before v10 -- so editing any one of them produced
+    # rows carrying an UNCHANGED fingerprint, and the calibrator pooled two
+    # different functions under one hash. Perturbed one at a time, because a
+    # single combined test cannot tell which one was forgotten.
+    _PROJECTION_CONSTANTS = {
+        "DOUBT_CAMEO_SHIFT": lambda v: v + 0.1,
+        "AVG_SUB_MINUTES": lambda v: v + 1.0,
+        "DEFCON_BASE_PER90": lambda v: {**v, 2: v[2] + 1.0},
+        "DEFCON_THRESHOLD": lambda v: {**v, 2: v[2] + 1},
+        "DGW_FATIGUE_TURNAROUND_HOURS": lambda v: v + 1.0,
+        "_DGW_FATIGUE_DISCOUNT": lambda v: {**v, 3: v[3] - 0.01},
+        "DEF_ADJ_FLOOR": lambda v: v + 0.1,
+        "BONUS_CAP": lambda v: v + 0.1,
+        "YELLOW_CARD_PTS": lambda v: v + 1.0,
+        "RED_CARD_PTS": lambda v: v + 1.0,
+        "EP_BLEND": lambda v: v + 0.1,
+        "EP_BLEND_FADE_MINUTES": lambda v: v + 10.0,
+        "PRIOR_STARTS": lambda v: v + 1.0,
+        "PRIOR_GAMES": lambda v: v + 1.0,
+        "PRIOR_MINUTES": lambda v: v + 10.0,
+        "TIGHTROPE_DISCOUNT": lambda v: v - 0.05,
+        "DIXON_COLES_DECAY_DEFAULT": lambda v: v + 0.01,
+        "LAMBDA_MIN": lambda v: v + 0.01,
+        "LAMBDA_MAX": lambda v: v + 0.5,
+    }
+
+    def test_every_projection_constant_is_inside_the_hash(self):
+        before = fpl_tools._arith_fingerprint()
+        for name, perturb in self._PROJECTION_CONSTANTS.items():
+            with self.subTest(constant=name):
+                saved = getattr(fpl_tools, name)
+                setattr(fpl_tools, name, perturb(saved))
+                try:
+                    self.assertNotEqual(
+                        before, fpl_tools._arith_fingerprint(),
+                        f"{name} changes what _player_xp_raw returns but is "
+                        f"not hashed -- rows either side of a change to it "
+                        f"carry the same fingerprint")
+                finally:
+                    setattr(fpl_tools, name, saved)
+                self.assertEqual(before, fpl_tools._arith_fingerprint(),
+                                 f"restoring {name} did not restore the hash")
+
+
+class ImportOrderTest(unittest.TestCase):
+    """ARITH_FINGERPRINT is evaluated at import, so every constant in the blob
+    has to be defined ABOVE the assignment. Five of them (AVG_SUB_MINUTES,
+    DOUBT_CAMEO_SHIFT, DEF_ADJ_FLOOR and the DGW fatigue pair) sit a thousand
+    lines below where the assignment used to be; adding them to the blob
+    without moving it raises NameError at import and takes the whole app down.
+
+    A fresh subprocess is the only honest check: this process has fpl_tools
+    imported already, so an ordering fault here would not surface in-process.
+    """
+
+    def test_the_module_imports_and_the_stored_digest_matches(self):
+        import subprocess
+        import sys
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        r = subprocess.run(
+            [sys.executable, "-c",
+             "import fpl_tools as f; "
+             "assert f.ARITH_FINGERPRINT == f._arith_fingerprint(), "
+             "'stored digest does not match a fresh call'; "
+             "print(f.ARITH_FINGERPRINT)"],
+            cwd=root, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0,
+                         f"importing fpl_tools failed:\n{r.stderr}")
+        self.assertIn(fpl_tools.ARITH_FINGERPRINT, r.stdout)
+
 
 class QuarantineClauseTest(unittest.TestCase):
     """D-B. The spec's own quarantine SQL was

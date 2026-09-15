@@ -196,7 +196,14 @@ RED_CARD_PTS = 3.0
 # low-score correction was being applied with home and away rates swapped for
 # those two scorelines, distorting the fitted attack/defence ratings that
 # every fixture-adjusted projection is built from.
-MODEL_VERSION = "v9-historical-isolation"
+# v10 completes _arith_fingerprint's constant set. DOUBT_CAMEO_SHIFT,
+# AVG_SUB_MINUTES, DEFCON_BASE_PER90/DEFCON_THRESHOLD, the DGW fatigue pair and
+# DEF_ADJ_FLOOR all change what _player_xp_raw returns, and none of them were
+# hashed -- so a change to any of the five produced rows stamped with an
+# unchanged fingerprint, and the calibrator pooled them. The label bump is what
+# keeps v9 rows, fitted under a fingerprint that could not see those constants,
+# out of the same population as v10 rows that can.
+MODEL_VERSION = "v10-arith-fingerprint-complete"
 
 
 def _arith_fingerprint() -> str:
@@ -225,6 +232,17 @@ def _arith_fingerprint() -> str:
         "tightrope": TIGHTROPE_DISCOUNT,
         "dc_default": DIXON_COLES_DECAY_DEFAULT,
         "lam_bounds": [LAMBDA_MIN, LAMBDA_MAX],
+        "doubt_cameo_shift": DOUBT_CAMEO_SHIFT,
+        "avg_sub_minutes": AVG_SUB_MINUTES,
+        # The DefCon and fatigue entries are dicts keyed by element_type. json
+        # coerces the int keys to strings and sort_keys makes the result
+        # canonical, so the digest is stable across runs while still moving
+        # when any single rate, threshold or discount does.
+        "defcon_base": DEFCON_BASE_PER90,
+        "defcon_threshold": DEFCON_THRESHOLD,
+        "dgw_fatigue_hours": DGW_FATIGUE_TURNAROUND_HOURS,
+        "dgw_fatigue_discount": _DGW_FATIGUE_DISCOUNT,
+        "def_adj_floor": DEF_ADJ_FLOOR,
     }, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
@@ -401,10 +419,6 @@ VALID_FORMATIONS = [
 # edge once that variance is priced in.
 CAPTAINCY_SAFE_POSITIONS = {"MID", "FWD"}
 CAPTAINCY_OVERRIDE_MARGIN = 1.5
-
-# Computed here, not beside _arith_fingerprint: every constant it hashes has
-# to exist first.
-ARITH_FINGERPRINT = _arith_fingerprint()
 
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _LAST_FETCH_TIME = None
@@ -2029,6 +2043,14 @@ _DGW_FATIGUE_DISCOUNT = {
     3: 0.84,    # MID
     4: 0.88,    # FWD
 }
+
+# Computed here, not beside _arith_fingerprint: every constant it hashes has to
+# exist first, and _DGW_FATIGUE_DISCOUNT above is the last of them. Anything
+# added to the blob must be defined ABOVE this line -- the fingerprint is
+# evaluated at import, so a constant declared below it is a NameError that
+# takes the whole module down. ImportOrderTest in test_phase_quarantine.py
+# holds that.
+ARITH_FINGERPRINT = _arith_fingerprint()
 
 
 def _dgw_fatigue_multiplier(prev_fixture: Dict[str, Any], fixture: Dict[str, Any], pos_id: int) -> float:

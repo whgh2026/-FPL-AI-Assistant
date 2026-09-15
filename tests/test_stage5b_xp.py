@@ -357,9 +357,14 @@ class ModelVersionTest(unittest.TestCase):
         _player_xp returns. Rows either side of it are not one population.
 
         Note that as_of_event threading, landing in the same stage, is NOT
-        part of this rationale: at its default of None it is a no-op by
-        construction, and there is a test asserting exactly that. The bump is
+        part of that rationale: at its default of None it is a no-op by
+        construction, and there is a test asserting exactly that. v9 was
         earned by venue_def alone.
+
+        v10 is earned separately, by _arith_fingerprint's constant set being
+        completed. Five constants that change what _player_xp_raw returns were
+        outside the hash, so rows written either side of a change to any of
+        them carried the SAME fingerprint -- the label is what separates them.
         """
         import re
         m = re.match(r"^v(\d+)-", fpl_tools.MODEL_VERSION)
@@ -369,7 +374,7 @@ class ModelVersionTest(unittest.TestCase):
     def test_the_version_name_is_the_canonical_one(self):
         """One string, everywhere. An alias in a second place is how two
         populations end up under what looks like one label."""
-        self.assertEqual(fpl_tools.MODEL_VERSION, "v9-historical-isolation")
+        self.assertEqual(fpl_tools.MODEL_VERSION, "v10-arith-fingerprint-complete")
 
     def test_version_is_past_the_stage_5b_boundary(self):
         """Stage 4 -> v2, Stage 2 -> v3, Stage 5b -> v4, Stage 8 -> v5. Each
