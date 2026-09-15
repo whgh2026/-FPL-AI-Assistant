@@ -136,3 +136,89 @@ class RowMappingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FingerprintFilterTest(unittest.TestCase):
+    """The column was written by both writers and read by nobody: the whole
+    point of _arith_fingerprint is that MODEL_VERSION can lag the code it
+    labels, and filtering on the label alone leaves exactly the window the
+    hash exists to close."""
+
+    def setUp(self):
+        self._saved = db.get_db_connection
+
+    def tearDown(self):
+        db.get_db_connection = self._saved
+
+    def _sql_for(self, call):
+        conn, cursor = _fake_db(tuple(v for _, v in COLUMNS))
+
+        class CountingCursor:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, params=None):
+                self._inner.execute(sql, params)
+
+            def fetchall(self):
+                return self._inner.fetchall()
+
+            def fetchone(self):
+                return (7,)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        conn.cursor = lambda: CountingCursor(cursor)
+        db.get_db_connection = lambda: conn
+        call()
+        return cursor.sql, cursor.params
+
+    def test_each_reader_appends_exactly_one_fingerprint_clause(self):
+        calls = {
+            "get_prediction_history":
+                lambda: db.get_prediction_history("v-test", arith_fingerprint="abc123"),
+            "count_checked_predictions":
+                lambda: db.count_checked_predictions("v-test", arith_fingerprint="abc123"),
+            "prediction_accuracy_by_gw":
+                lambda: db.prediction_accuracy_by_gw("v-test", arith_fingerprint="abc123"),
+        }
+        for name, call in calls.items():
+            with self.subTest(reader=name):
+                sql, params = self._sql_for(call)
+                self.assertEqual(sql.count("arith_fingerprint = %s"), 1, sql)
+                self.assertIn("model_version = %s", sql)
+                self.assertIn("abc123", params)
+                self.assertLess(params.index("v-test"), params.index("abc123"),
+                                "parameter order does not match clause order")
+
+    def test_the_limit_stays_last_in_the_accuracy_query(self):
+        """prediction_accuracy_by_gw's LIMIT %s is appended after the WHERE
+        clauses, so a fingerprint parameter inserted in the wrong position
+        would silently become the row limit."""
+        sql, params = self._sql_for(
+            lambda: db.prediction_accuracy_by_gw("v-test", limit=9, arith_fingerprint="abc123"))
+        self.assertTrue(sql.rstrip().endswith("LIMIT %s"), sql)
+        self.assertEqual(params[-1], 9)
+
+    def test_it_is_keyword_only_on_every_reader(self):
+        """prediction_accuracy_by_gw's second positional is `limit`. Passing a
+        fingerprint there would set the row cap to a hex string instead of
+        raising, so none of the three may accept it positionally."""
+        import inspect
+        for fn in (db.get_prediction_history, db.count_checked_predictions,
+                   db.prediction_accuracy_by_gw):
+            with self.subTest(reader=fn.__name__):
+                param = inspect.signature(fn).parameters["arith_fingerprint"]
+                self.assertEqual(param.kind, inspect.Parameter.KEYWORD_ONLY)
+                self.assertIsNone(param.default)
+
+    def test_omitting_it_leaves_the_query_untouched(self):
+        """Inspection callers, and every existing positional call site, must
+        keep working unchanged."""
+        sql, params = self._sql_for(lambda: db.get_prediction_history("v-test"))
+        self.assertNotIn("arith_fingerprint", sql)
+        self.assertEqual(params, ("v-test",))

@@ -604,7 +604,7 @@ _V8_QUARANTINE = ("NOT (model_version = 'v8-tau-correction' "
                   "AND base_pts IS NULL)")
 
 
-def get_prediction_history(model_version=None):
+def get_prediction_history(model_version=None, *, arith_fingerprint=None):
     """Return calibration rows for one model version.
 
     Filtering matters: the Dixon-Coles centring and sign fix changed what
@@ -612,6 +612,15 @@ def get_prediction_history(model_version=None):
     Fitting across the boundary would have the calibrator chase a discontinuity
     rather than the model's real error. Passing None returns every row, which is
     only appropriate for inspection, never for tuning.
+
+    `arith_fingerprint` narrows further, to rows written under one ARITHMETIC.
+    MODEL_VERSION is a hand-maintained label and can lag the code it describes,
+    so rows written inside that window carry the new arithmetic under the old
+    label; the fingerprint is derived from the constants themselves and cannot.
+    Rows predating the column carry NULL and are excluded by the `=` comparison
+    -- deliberately: their arithmetic is not reproducible against today's
+    fpl_tools. Keyword-only, so it can never be mistaken for a positional
+    `limit`.
     """
     try:
         conn = get_db_connection()
@@ -621,12 +630,17 @@ def get_prediction_history(model_version=None):
             cur = conn.cursor()
             cols = ("SELECT player_id, gameweek, predicted_xp, actual_points, base_pts, cameo_mass, "
                     "rotation_variance, dc_sensitivity, raw_total, xp_cameo, "
-                    "ep_w, ep_term FROM fpl_predictions "
-                    "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE)
-            if model_version is None:
-                cur.execute(cols)
-            else:
-                cur.execute(cols + " AND model_version = %s", (model_version,))
+                    "ep_w, ep_term FROM fpl_predictions")
+            # Accumulated rather than branched, so the two filters compose.
+            where = "actual_points IS NOT NULL AND " + _V8_QUARANTINE
+            params = []
+            if model_version is not None:
+                where += " AND model_version = %s"
+                params.append(model_version)
+            if arith_fingerprint is not None:
+                where += " AND arith_fingerprint = %s"
+                params.append(arith_fingerprint)
+            cur.execute(f"{cols} WHERE {where}", tuple(params))
             rows = []
             for r in cur.fetchall():
                 rows.append({
@@ -725,7 +739,7 @@ def load_bootstrap_snapshot(gameweek, captured_date=None):
         conn.close()
 
 
-def count_checked_predictions(model_version=None):
+def count_checked_predictions(model_version=None, *, arith_fingerprint=None):
     """How many predictions have been paired with a real result, for one model
     version. Returns None when the database is unreachable -- distinct from 0,
     which means "connected, nothing banked yet".
@@ -734,19 +748,31 @@ def count_checked_predictions(model_version=None):
     wrong twice over: the count restarts at each model_version bump, and with
     the active-player filter 5,000 rows is ~18 gameweeks, not the ~7 an
     unfiltered count suggests.
+
+    `arith_fingerprint` narrows further, to rows written under one ARITHMETIC.
+    MODEL_VERSION is a hand-maintained label and can lag the code it describes,
+    so rows written inside that window carry the new arithmetic under the old
+    label; the fingerprint is derived from the constants themselves and cannot.
+    Rows predating the column carry NULL and are excluded by the `=` comparison
+    -- deliberately: their arithmetic is not reproducible against today's
+    fpl_tools. Keyword-only, so it can never be mistaken for a positional
+    `limit`.
     """
     conn = get_db_connection()
     if conn is None:
         return None
     try:
+        where = "actual_points IS NOT NULL AND " + _V8_QUARANTINE
+        params = []
+        if model_version is not None:
+            where += " AND model_version = %s"
+            params.append(model_version)
+        if arith_fingerprint is not None:
+            where += " AND arith_fingerprint = %s"
+            params.append(arith_fingerprint)
         with conn.cursor() as cur:
-            if model_version is None:
-                cur.execute("SELECT count(*) FROM fpl_predictions "
-                            "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE)
-            else:
-                cur.execute("SELECT count(*) FROM fpl_predictions "
-                            "WHERE actual_points IS NOT NULL AND " + _V8_QUARANTINE
-                            + " AND model_version = %s", (model_version,))
+            cur.execute(f"SELECT count(*) FROM fpl_predictions WHERE {where}",
+                        tuple(params))
             row = cur.fetchone()
         global _LAST_DB_ERROR
         _LAST_DB_ERROR = None      # a prior failure is now stale; don't haunt the UI
@@ -764,7 +790,8 @@ def count_checked_predictions(model_version=None):
         conn.close()
 
 
-def prediction_accuracy_by_gw(model_version=None, limit=12):
+def prediction_accuracy_by_gw(model_version=None, limit=12, *,
+                              arith_fingerprint=None):
     """Per-gameweek forecast accuracy, newest last. [] when unavailable.
 
     The app claims a self-checking model, so the check has to be visible: this
@@ -776,6 +803,15 @@ def prediction_accuracy_by_gw(model_version=None, limit=12):
 
     Rows with no result yet are excluded, as are gameweeks with too few paired
     rows for the statistics to mean anything.
+
+    `arith_fingerprint` narrows further, to rows written under one ARITHMETIC.
+    MODEL_VERSION is a hand-maintained label and can lag the code it describes,
+    so rows written inside that window carry the new arithmetic under the old
+    label; the fingerprint is derived from the constants themselves and cannot.
+    Rows predating the column carry NULL and are excluded by the `=` comparison
+    -- deliberately: their arithmetic is not reproducible against today's
+    fpl_tools. Keyword-only, so it can never be mistaken for a positional
+    `limit`.
     """
     conn = get_db_connection()
     if conn is None:
@@ -786,6 +822,9 @@ def prediction_accuracy_by_gw(model_version=None, limit=12):
         if model_version is not None:
             where += " AND model_version = %s"
             params.append(model_version)
+        if arith_fingerprint is not None:
+            where += " AND arith_fingerprint = %s"
+            params.append(arith_fingerprint)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT gameweek, count(*), "
