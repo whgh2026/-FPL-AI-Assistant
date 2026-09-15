@@ -261,3 +261,102 @@ class ObjectiveAlignmentTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TerminalDeadWeightTest(unittest.TestCase):
+    """The planner's terminal penalty classified a player as dead by testing
+    membership of _NON_PLAYING_NOTES or xp <= 0.1. _pool_entry writes the
+    DISPLAY note into "status", and a doubt is rendered as f"{chance}% Chance"
+    -- not in that tuple, and not zero-xP either, because doubt is priced into
+    p_full/p_cameo rather than zeroing the projection. So the planner valued a
+    player three-quarters likely to be unavailable at full terminal equity.
+    """
+
+    def test_the_fixed_vocabulary_still_counts(self):
+        for note in fpl_tools._NON_PLAYING_NOTES:
+            with self.subTest(note=note):
+                self.assertTrue(
+                    fpl_tools._is_terminally_dead({"status": note, "xp": 4.0}))
+
+    def test_a_deep_doubt_flag_counts(self):
+        """The defect in one assertion: "25% Chance" is a real note
+        _pool_entry emits, carries a healthy projection, and was classified
+        alive."""
+        self.assertTrue(
+            fpl_tools._is_terminally_dead({"status": "25% Chance", "xp": 4.0}))
+
+    def test_a_shallow_doubt_flag_does_not(self):
+        """A 75%-chance player is a live asset. Treating every doubt as dead
+        would have the planner churn out of anyone carrying a knock."""
+        for note in ("50% Chance", "75% Chance", "Doubtful", "Available"):
+            with self.subTest(note=note):
+                self.assertFalse(
+                    fpl_tools._is_terminally_dead({"status": note, "xp": 4.0}))
+
+    def test_the_boundary_is_inclusive(self):
+        self.assertEqual(fpl_tools.DOUBT_DEAD_MAX_CHANCE, 25.0)
+        self.assertTrue(fpl_tools._is_terminally_dead(
+            {"status": f"{int(fpl_tools.DOUBT_DEAD_MAX_CHANCE)}% Chance", "xp": 4.0}))
+        self.assertFalse(fpl_tools._is_terminally_dead(
+            {"status": f"{int(fpl_tools.DOUBT_DEAD_MAX_CHANCE) + 1}% Chance", "xp": 4.0}))
+
+    def test_the_zero_xp_fallback_survives(self):
+        self.assertTrue(
+            fpl_tools._is_terminally_dead({"status": "Available", "xp": 0.05}))
+
+    def test_a_missing_or_non_string_note_does_not_raise(self):
+        for entry in ({"xp": 4.0}, {"status": None, "xp": 4.0},
+                      {"status": 42, "xp": 4.0}):
+            with self.subTest(entry=entry):
+                self.assertFalse(fpl_tools._is_terminally_dead(entry))
+
+    def test_the_planner_sheds_a_deep_doubt_by_the_terminal_week(self):
+        """End to end: the same squad, the same everything, one held player
+        flagged. At 25% the planner moves them on; at 75% it keeps them. Run as
+        a pair, because a single run cannot distinguish "the penalty fired"
+        from "the planner churned anyway".
+
+        term_dead is raised for the test. At its production 0.5 the penalty is
+        real but smaller than the transfer friction a swap costs (HURDLE_BASE
+        is 0.8 before sigma), so on a fixture where every player projects an
+        identical 5.0 the planner correctly declines to pay 0.8 to avoid 0.5
+        and the flag never gets to decide anything. The magnitude is a tunable
+        weight; what this test is about is whether the CLASSIFICATION reaches
+        the objective at all, which is where the defect was.
+        """
+        def terminal_holds(note):
+            pool = _pool()
+            current_ids = {p["id"] for p in pool[:15]}
+            flagged = pool[10]["id"]              # a held MID
+            self.assertIn(flagged, current_ids)
+            pool[10]["status"] = note
+            # _pool()'s only unowned players are forwards, and the squad needs
+            # exactly five midfielders -- so without a spare MID in the market
+            # the flagged player is structurally unsellable and the plan comes
+            # out identical whatever the flag says. The penalty has to be given
+            # a legal move before it can be observed at all.
+            spare = dict(pool[10])
+            spare.update({"id": 99, "name": "P99", "team_id": 2, "team": "T2",
+                          "status": "Available"})
+            pool.append(spare)
+            saa_mean = {p["id"]: [p["xp"]] * 4 for p in pool}
+            total_sell = sum(p["price"] for p in pool[:15])
+            loud = dict(fpl_tools._load_weights())
+            loud["term_dead"] = 20.0
+            with harness.synthetic_world(), \
+                 mock.patch.object(fpl_tools, "_load_weights", return_value=loud):
+                schedule = fpl_tools._plan_transfers_multi_gw(
+                    pool, total_sell + 5.0, 5, current_ids, saa_mean,
+                    event=10, n=4, bank_cash=5.0)
+            self.assertTrue(schedule, f"no schedule produced for {note}")
+            sold = {name.split()[0] for s in schedule for name in s["sells"]}
+            return f"P{flagged}" not in sold, flagged
+
+        shed_at_25, pid = terminal_holds("25% Chance")
+        shed_at_75, _ = terminal_holds("75% Chance")
+        self.assertFalse(shed_at_25,
+                         f"P{pid} at 25% chance was still held at the terminal "
+                         f"week -- the doubt flag is not reaching the penalty")
+        self.assertTrue(shed_at_75,
+                        f"P{pid} at 75% chance was sold -- the penalty is "
+                        f"firing on live assets, not just dead ones")

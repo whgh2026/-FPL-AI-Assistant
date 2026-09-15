@@ -2714,7 +2714,8 @@ def _transfer_hurdle_bar(position: str, sigma: float, hurdle_scale: float = 1.0)
 
 def _locked_starting_gk(current_ids: List[Any], elements_by_id: Dict[Any, Dict[str, Any]],
                         pool_by_id: Dict[Any, Dict[str, Any]],
-                        gk_hurdle_xp: float = GKP_TRANSFER_HURDLE_XP) -> Optional[Any]:
+                        gk_hurdle_xp: float = GKP_TRANSFER_HURDLE_XP,
+                        bank: float = 0.0) -> Optional[Any]:
     """The currently-owned goalkeeper the standard transfer solve must not
     remove, or None if there is nothing to protect.
 
@@ -2764,10 +2765,25 @@ def _locked_starting_gk(current_ids: List[Any], elements_by_id: Dict[Any, Dict[s
     current_xp = pool_by_id[protected].get("xp", 0.0)
     owned_gk_ids = {pid for pid in current_ids if pool_by_id.get(pid, {}).get("position") == "GK"}
     protected_price = pool_by_id[protected].get("sell_price", pool_by_id[protected].get("price", 0.0))
+    # Affordability, not price parity. The solver's budget constraint for a
+    # one-for-one swap is bank + sell_price(protected) >= price(alt), and the
+    # filter this replaces compared price alone -- which is the same test only
+    # when the bank is empty. With money in the bank it was strictly TIGHTER
+    # than the solver: a genuine upgrade the manager could comfortably fund
+    # was filtered out of `best_alt`, the release condition never fired, and
+    # the lock stayed on against a transfer the solver would have accepted.
+    #
+    # `bank` is the caller's liquid cash, NOT `budget`. budget is
+    # bank + total_sell across the whole squad, so charging a single swap
+    # against squad-wide equity overstates what is affordable by ~GBP 80m and
+    # would release the lock for essentially any alternative in the pool --
+    # the opposite failure, and the reason this takes a separate argument
+    # rather than reusing the one already threaded through the solve.
+    affordable_ceiling = protected_price + max(0.0, float(bank))
     best_alt = max(
         (entry.get("xp", 0.0) for pid, entry in pool_by_id.items()
          if entry.get("position") == "GK" and pid not in owned_gk_ids
-         and entry.get("price", 0.0) <= protected_price + 1e-6),
+         and entry.get("price", 0.0) <= affordable_ceiling + 1e-6),
         default=0.0)
     if best_alt - current_xp >= gk_hurdle_xp:
         return None
@@ -4233,7 +4249,8 @@ def _plan_transfers_multi_gw(pool, budget, free_transfers, current_ids, saa_mean
         obj += gw_w * (pts_t[t] - 4.0 * hits[t])
 
     term_equity = pulp.lpSum(x[pid][T - 1] * by_id[pid].get("sell_price", by_id[pid]["price"]) for pid in ids)
-    dead = pulp.lpSum(x[pid][T - 1] * (1.0 if (by_id[pid].get("status") in _NON_PLAYING_NOTES or by_id[pid].get("xp", 0.0) <= 0.1) else 0.0) for pid in ids)
+    dead = pulp.lpSum(x[pid][T - 1] * (1.0 if _is_terminally_dead(by_id[pid]) else 0.0)
+                      for pid in ids)
     obj += lam_eq * term_equity + lam_ft * ft[T] - lam_dead * dead
 
     prob.setObjective(obj)
@@ -4754,7 +4771,8 @@ def suggest_transfers_for_custom_squad(
     # explicitly asked for, where locking one player back in would be a
     # surprising and unwanted constraint on a chip whose entire point is
     # reconsidering the whole 15.
-    locked_gk_id = _locked_starting_gk(current_ids, elements_by_id, pool_by_id)
+    locked_gk_id = _locked_starting_gk(current_ids, elements_by_id, pool_by_id,
+                                       bank=bank)
     std_selected, _std_obj, std_parts = _solve_squad(
         pool, budget=budget, must_include_ids=set(current_ids),
         hit_config={"free_transfers": free_transfers, "hit_cost": hit_charge, "max_transfers": max_transfers},
@@ -5332,6 +5350,40 @@ def _fixture_swing_scores(fixture_lookup, start_event, n=6):
 
 
 _NON_PLAYING_NOTES = ("Injured", "Suspended", "Unavailable", "No minutes", "OUT", "Blank")
+
+# A doubt flag at or below this chance is a terminal-value risk, not a live
+# asset: the terminal squad is what the manager is left holding at the end of
+# the plan, and a player 75% likely to be unavailable is one the planner should
+# have moved on by then.
+#
+# Deliberately NOT part of _arith_fingerprint: this is a multi-GW planner
+# objective term and never reaches _player_xp_raw.
+DOUBT_DEAD_MAX_CHANCE = 25.0
+
+# _pool_entry writes the DISPLAY note into "status" -- "Injured", or
+# f"{chance}% Chance" for a doubt -- so the percentage flags are not in
+# _NON_PLAYING_NOTES and never will be: that tuple is a fixed vocabulary and
+# the percentages are generated.
+_DOUBT_NOTE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)%\s*Chance\s*$", re.IGNORECASE)
+
+
+def _is_terminally_dead(entry: Dict[str, Any]) -> bool:
+    """True when a pool entry should not still be held at the end of the plan.
+
+    The planner's terminal penalty previously tested membership of
+    _NON_PLAYING_NOTES or xp <= 0.1, and a percentage doubt flag satisfies
+    neither: "25% Chance" is not in the tuple, and doubt is priced into
+    p_full/p_cameo rather than zeroing the projection, so such a player still
+    projects positive. The result was a terminal-value bias -- the planner
+    valued a player three-quarters likely to be unavailable at full equity.
+    """
+    note = entry.get("status")
+    if note in _NON_PLAYING_NOTES:
+        return True
+    m = _DOUBT_NOTE_RE.match(note) if isinstance(note, str) else None
+    if m is not None and float(m.group(1)) <= DOUBT_DEAD_MAX_CHANCE:
+        return True
+    return _to_float(entry.get("xp", 0.0)) <= 0.1
 
 
 # Each check carries a stable `key` alongside its display `label`. Callers and

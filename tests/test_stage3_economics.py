@@ -400,6 +400,74 @@ class GKLockTest(unittest.TestCase):
     def test_empty_squad_is_safe(self):
         self.assertIsNone(fpl_tools._locked_starting_gk([], {}, {}))
 
+    # ------------------------------------------------------------------
+    # Affordability. The release check filtered alternatives on
+    #   price(alt) <= sell_price(protected)
+    # which is price parity, not what the solver's budget constraint
+    # actually says:
+    #   bank + sell_price(protected) >= price(alt)
+    # With money in the bank the old filter was too TIGHT -- it hid
+    # alternatives the manager could genuinely afford and kept the lock on
+    # against a real upgrade. The bank argument is what makes the two agree.
+    # ------------------------------------------------------------------
+
+    def _priced(self, alt_price, protected_sell=4.5):
+        elements = self._elements()
+        elements[3] = {"id": 3, "status": "a", "chance_of_playing_next_round": None}
+        pool = self._pool()
+        pool[1].update({"price": protected_sell, "sell_price": protected_sell})
+        pool[2].update({"price": 4.0, "sell_price": 4.0})
+        # Comfortably past the hurdle on xP, so affordability is the only
+        # thing left that can decide the outcome.
+        pool[3] = {"id": 3, "position": "GK", "minutes_floor": 1.0,
+                   "price": alt_price, "sell_price": alt_price,
+                   "xp": pool[1]["xp"] + fpl_tools.GKP_TRANSFER_HURDLE_XP + 1.0}
+        return elements, pool
+
+    def test_an_unaffordable_upgrade_does_not_release_the_lock(self):
+        """GBP 0.0 in the bank and a GBP 5.5m alternative against a GBP 4.5m
+        keeper. The solver's budget constraint would reject that swap, so the
+        lock must stand -- releasing it would leave the goalkeeper exposed to
+        a churn that cannot actually happen. Holds under both the old price
+        filter and the new ceiling; it is here to pin the direction the
+        ceiling must NOT drift in."""
+        elements, pool = self._priced(alt_price=5.5)
+        self.assertEqual(
+            fpl_tools._locked_starting_gk([1, 2], elements, pool, bank=0.0), 1)
+
+    def test_the_same_upgrade_releases_it_once_the_bank_covers_the_gap(self):
+        """Same squad, same alternative, GBP 1.0m in the bank. Now the swap is
+        fundable and the lock must not stand in its way."""
+        elements, pool = self._priced(alt_price=5.5)
+        self.assertIsNone(
+            fpl_tools._locked_starting_gk([1, 2], elements, pool, bank=1.0))
+
+    def test_a_like_for_like_price_still_releases_it_on_zero_bank(self):
+        """The fix must not over-lock: an alternative at or below the
+        protected keeper's selling price is affordable with no bank at all,
+        which is the case the old price filter already got right."""
+        elements, pool = self._priced(alt_price=4.5)
+        self.assertIsNone(
+            fpl_tools._locked_starting_gk([1, 2], elements, pool, bank=0.0))
+
+    def test_a_negative_bank_is_floored_rather_than_shrinking_the_ceiling(self):
+        """A negative bank is not a licence to release the lock for something
+        cheaper than the keeper; max(0.0, bank) keeps the ceiling at parity."""
+        elements, pool = self._priced(alt_price=4.5)
+        self.assertIsNone(
+            fpl_tools._locked_starting_gk([1, 2], elements, pool, bank=-2.0))
+
+    def test_the_caller_supplies_the_managers_bank_not_the_budget(self):
+        """budget is bank + the sell value of the whole squad. Passing that
+        here would put ~GBP 80m against a single swap and release the lock for
+        essentially anything in the pool."""
+        import inspect
+        src = inspect.getsource(fpl_tools.suggest_transfers_for_custom_squad)
+        self.assertIn("_locked_starting_gk(current_ids, elements_by_id, pool_by_id,", src)
+        self.assertIn("bank=bank)", src)
+        self.assertNotIn("_locked_starting_gk(current_ids, elements_by_id, pool_by_id,\n"
+                         "                                       bank=budget)", src)
+
     def test_hard_lock_holds_even_against_a_gain_that_would_otherwise_clear_the_hurdle(self):
         pool = _toy_squad_pool()
         held_ids = {e["id"] for e in pool}
