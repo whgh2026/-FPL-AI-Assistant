@@ -14,7 +14,9 @@ no real database behind it, and assertions on what the write path was asked
 to run.
 """
 
+import io
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -30,6 +32,33 @@ import backfill_model_health as backfill
 from tests import harness
 
 GW = 4   # inside the synthetic fixture's event range (1-12) with real fixtures
+
+
+def _insert_columns():
+    """Column names from backfill's own INSERT, in order.
+
+    Indexing the row tuple by hand is how get_prediction_history came to read
+    every field two columns to the left: a column was added to one half of the
+    statement and the positional indices in the other half were not moved with
+    it. Deriving the positions from the SQL means a future column addition
+    fails here, loudly, instead of shifting an assertion onto its neighbour.
+    """
+    src = io.open(os.path.join(ROOT, "scripts", "backfill_model_health.py"),
+                  encoding="utf-8").read()
+    m = re.search(r'INSERT INTO fpl_predictions "\s*\n(.*?)VALUES \((.*?)\) ',
+                  src, re.S)
+    assert m, "could not find the INSERT statement"
+    joined = "".join(re.findall(r'"([^"]*)"', m.group(1)))
+    names = [c.strip() for c in joined.strip().lstrip("(").rstrip(") ").split(",")
+             if c.strip()]
+    placeholders = m.group(2).count("%s")
+    assert len(names) == placeholders, (
+        f"{len(names)} columns but {placeholders} placeholders -- "
+        f"the INSERT is malformed")
+    return {name: i for i, name in enumerate(names)}
+
+
+COL = _insert_columns()
 
 
 class _FakeCursor:
@@ -97,8 +126,8 @@ class NoLeakageTest(unittest.TestCase):
             rows = backfill._project_gameweek(GW, all_fixtures=fixtures)
         self.assertTrue(rows, "expected rows from the synthetic snapshot")
         for row in rows:
-            self.assertEqual(row[1], GW)                        # gameweek
-            self.assertEqual(row[10], fpl_tools.MODEL_VERSION)   # model_version
+            self.assertEqual(row[COL["gameweek"]], GW)
+            self.assertEqual(row[COL["model_version"]], fpl_tools.MODEL_VERSION)
 
 
 class BackfillWriteTest(unittest.TestCase):
@@ -140,8 +169,8 @@ class BackfillWriteTest(unittest.TestCase):
         self.assertEqual(page_size, 1000)
         self.assertTrue(rows)
         for row in rows:
-            self.assertEqual(row[1], 1)
-            self.assertEqual(row[10], fpl_tools.MODEL_VERSION)
+            self.assertEqual(row[COL["gameweek"]], 1)
+            self.assertEqual(row[COL["model_version"]], fpl_tools.MODEL_VERSION)
 
     def test_actual_points_upsert_never_clobbers_a_checked_in_result(self):
         """A re-run (or a later ingest_actuals.py pass) must never destroy an
@@ -162,3 +191,59 @@ class BackfillWriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DcSensitivityTest(unittest.TestCase):
+    """dc_sensitivity was in neither the row tuple nor the INSERT, so every
+    backfilled row left the column NULL. reproject() multiplies it by
+    (decay - default_decay), so NULL reads as a zero gradient and
+    dixon_coles_decay -- one of the four parameters the tuner fits -- could
+    never move. The backfill is what refills the archive after a
+    MODEL_VERSION bump, so that was the whole archive."""
+
+    def _rows(self):
+        bootstrap, fixtures = harness.load_synthetic()
+        with harness.synthetic_world() as (_bs, _fx), \
+             mock.patch.object(db, "load_bootstrap_snapshot", return_value=bootstrap), \
+             mock.patch.object(ingest_actuals, "_fetch_played", return_value={}):
+            return backfill._project_gameweek(GW, all_fixtures=fixtures)
+
+    def test_the_column_is_written_at_all(self):
+        self.assertIn("dc_sensitivity", COL,
+                      "the INSERT still does not carry dc_sensitivity")
+
+    def test_some_player_has_a_non_zero_gradient(self):
+        """A per-player forward difference that comes back identically zero
+        for everyone means the perturbed lookup was served from the cache --
+        the exact failure _lookup_at_weights' cache clear exists to prevent."""
+        rows = self._rows()
+        self.assertTrue(rows)
+        vals = [r[COL["dc_sensitivity"]] for r in rows]
+        self.assertTrue(any(abs(v) > 1e-9 for v in vals),
+                        "every dc_sensitivity came back 0.0 -- the probe is "
+                        "measuring the base fit against itself")
+
+    def test_the_probe_step_matches_the_other_writer(self):
+        """Both writers feed this column into the same surrogate, so a
+        different step makes the two populations incomparable."""
+        import snapshot_xp
+        self.assertEqual(backfill.DC_PROBE_H, snapshot_xp.DC_PROBE_H)
+
+    def test_the_probe_is_point_in_time_like_the_base_projection(self):
+        """as_of_event on both sides of the difference. Without it the probe
+        is fitted on every fixture finished today while the base is fitted on
+        fixtures strictly before gw, and the difference measures the leakage
+        rather than the decay."""
+        import inspect
+        src = inspect.getsource(backfill._lookup_at_weights)
+        self.assertIn("as_of_event=as_of_event", src)
+        caller = inspect.getsource(backfill._project_gameweek)
+        self.assertIn("_lookup_at_weights(dc_probe, bootstrap, all_fixtures, gw)", caller)
+
+    def test_the_weights_cache_is_always_restored(self):
+        """The probe swaps _WEIGHTS_CACHE for neutral weights. Leaking that
+        into the rest of the process would silently re-scale every subsequent
+        projection."""
+        before = fpl_tools._WEIGHTS_CACHE
+        self._rows()
+        self.assertIs(fpl_tools._WEIGHTS_CACHE, before)

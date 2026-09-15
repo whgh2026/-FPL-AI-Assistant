@@ -28,6 +28,14 @@ defaults to `_get_fixtures()` (`/fixtures/?future=1`), which excludes finished
 fixtures -- so building a lookup for a gameweek that has already been played
 would otherwise come back empty for that gameweek entirely.
 
+`dc_sensitivity` is measured here, not written as a NULL. It is the derivative
+of the projection with respect to `dixon_coles_decay`, taken as a forward
+difference under neutral weights with both sides of the difference built
+`as_of_event=gw`, exactly as `snapshot_xp.py` does it and with the same
+`DC_PROBE_H`. Leaving it NULL made `reproject()` read a zero gradient, which
+pins `dixon_coles_decay` -- and since this script is what refills the archive
+after a MODEL_VERSION bump, it pinned it across the whole archive.
+
 Team ratings are point-in-time too, via `as_of_event=gw`: the Dixon-Coles fit
 behind each gameweek's projection sees only fixtures from gameweeks strictly
 before it, reproducing what the live Friday snapshot could see standing in
@@ -58,6 +66,39 @@ import db
 import ingest_actuals
 
 MAX_GAMEWEEKS = 38
+
+# Forward-difference step for the dixon_coles_decay derivative. Large enough
+# that the perturbed fit is distinguishable from the base one, small enough to
+# stay in the linear regime the surrogate assumes. Must match snapshot_xp.py's
+# DC_PROBE_H: the two writers feed the same column into the same surrogate, so
+# a different step would make the two populations incomparable.
+DC_PROBE_H = 0.01
+
+
+def _lookup_at_weights(weights, bootstrap, all_fixtures, as_of_event):
+    """Rebuild the fixture lookup with a different set of weights in force.
+
+    The Dixon-Coles fit is time-weighted by dixon_coles_decay and cached, so a
+    perturbed decay needs both the weight swap and a cache clear -- otherwise
+    this silently returns the base ratings and the derivative comes out as
+    exactly 0.0, which is the very bug it exists to fix.
+
+    `as_of_event` is threaded through so the perturbed lookup is point-in-time
+    exactly like the base one, and cleared per-window rather than globally so
+    the loop does not throw away every other gameweek's fit on each pass.
+    Without it the probe would be fitted on every fixture finished TODAY while
+    the base was fitted on fixtures strictly before `gw`, and the difference
+    would measure the leakage rather than the decay.
+    """
+    orig_cache = fpl_tools._WEIGHTS_CACHE
+    fpl_tools._WEIGHTS_CACHE = weights
+    try:
+        fpl_tools._clear_rating_caches(as_of_event)
+        return fpl_tools._build_fixture_lookup(
+            bootstrap, fixtures_override=all_fixtures, as_of_event=as_of_event)
+    finally:
+        fpl_tools._WEIGHTS_CACHE = orig_cache
+        fpl_tools._clear_rating_caches(as_of_event)
 
 
 def _connect():
@@ -97,18 +138,47 @@ def _project_gameweek(gw, all_fixtures):
         bootstrap, fixtures_override=all_fixtures, as_of_event=gw)
     played = ingest_actuals._fetch_played(gw)
 
+    # dc_sensitivity was absent from this script's row tuple and INSERT
+    # entirely, so every backfilled row left the column NULL. reproject()
+    # multiplies it by (decay - default_decay), so a NULL reads as a zero
+    # gradient and dixon_coles_decay -- one of the four parameters the tuner
+    # fits -- could never move on backfilled data. Since the backfill is the
+    # mechanism that refills the archive after a MODEL_VERSION bump, that is
+    # the whole archive.
+    #
+    # It is a derivative, so measure it, the same way snapshot_xp.py does: two
+    # projections either side of a perturbed decay, under NEUTRAL weights so
+    # the surrogate sees the pre-penalty scale it was fitted against. The
+    # perturbed ratings are shared across all players, so the lookup is built
+    # once per gameweek rather than once per player.
+    neutral = dict(fpl_tools._load_weights())
+    neutral.update({"global_xP_modifier": 1.0, "autosub_ref": 0.0,
+                    "rotation_convexity": 0.0,
+                    "dixon_coles_decay": fpl_tools.DIXON_COLES_DECAY_DEFAULT})
+    dc_probe = dict(neutral)
+    dc_probe["dixon_coles_decay"] = fpl_tools.DIXON_COLES_DECAY_DEFAULT + DC_PROBE_H
+    perturbed_lookup = _lookup_at_weights(dc_probe, bootstrap, all_fixtures, gw)
+    _orig_cache = fpl_tools._WEIGHTS_CACHE
+
     rows = []
     for e in bootstrap.get("elements", []):
         pos = fpl_tools.POS_MAP.get(e.get("element_type"))
         if not pos:
             continue
         xp, _note = fpl_tools._player_xp(e, fixture_lookup, event=gw)
-        feats = fpl_tools.calibration_features(e, fixture_lookup, event=gw)
         minutes_floor = fpl_tools._expected_playing_fraction(e, e.get("status", "a"))
+        fpl_tools._WEIGHTS_CACHE = neutral
+        try:
+            feats = fpl_tools.calibration_features(e, fixture_lookup, event=gw)
+            probe = fpl_tools.calibration_features(e, perturbed_lookup, event=gw)
+        finally:
+            fpl_tools._WEIGHTS_CACHE = _orig_cache
+        dc_sensitivity = (probe["raw_total"] - feats["raw_total"]) / DC_PROBE_H
         rows.append((
             e["id"], gw, e.get("web_name", "?"), pos, teams_by_id.get(e.get("team"), "?"),
             float(xp), played.get(e["id"]),
-            feats["cameo_mass"], feats["rotation_variance"], minutes_floor,
+            feats["cameo_mass"], feats["rotation_variance"], dc_sensitivity,
+            minutes_floor,
             fpl_tools.MODEL_VERSION, feats["raw_total"], feats["xp_cameo"],
             feats["ep_w"], feats["ep_term"], fpl_tools.ARITH_FINGERPRINT,
         ))
@@ -143,10 +213,11 @@ def main(argv=None) -> int:
                     cur,
                     "INSERT INTO fpl_predictions "
                     "(player_id, gameweek, player_name, position, team, predicted_xp, "
-                    "actual_points, cameo_mass, rotation_variance, minutes_floor, "
+                    "actual_points, cameo_mass, rotation_variance, dc_sensitivity, "
+                    "minutes_floor, "
                     "model_version, raw_total, xp_cameo, ep_w, ep_term, "
                     "arith_fingerprint) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (player_id, gameweek, model_version) DO UPDATE SET "
                     "player_name = EXCLUDED.player_name, position = EXCLUDED.position, "
                     "team = EXCLUDED.team, predicted_xp = EXCLUDED.predicted_xp, "
@@ -156,6 +227,7 @@ def main(argv=None) -> int:
                     # historical result cannot actually change.
                     "actual_points = COALESCE(fpl_predictions.actual_points, EXCLUDED.actual_points), "
                     "cameo_mass = EXCLUDED.cameo_mass, rotation_variance = EXCLUDED.rotation_variance, "
+                    "dc_sensitivity = EXCLUDED.dc_sensitivity, "
                     "minutes_floor = EXCLUDED.minutes_floor, raw_total = EXCLUDED.raw_total, "
                     "xp_cameo = EXCLUDED.xp_cameo, ep_w = EXCLUDED.ep_w, "
                     "ep_term = EXCLUDED.ep_term, "
