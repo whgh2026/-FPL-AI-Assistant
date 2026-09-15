@@ -55,9 +55,25 @@ def _split(rows):
     on one side.
     """
     step = int(1 / HOLDOUT_FRACTION)
-    rows = sorted(rows, key=lambda r: (r.get("gameweek", 0), r.get("player_id", 0)))
-    holdout = rows[::step]
-    train = [r for i, r in enumerate(rows) if i % step != 0]
+    # Stratify WITHIN each gameweek. A global stride over a globally-sorted
+    # list carries its phase across gameweek boundaries, so an uneven player
+    # count in one week shifts which slice of the next week lands in holdout --
+    # and since rows are ordered by player_id, that slice is correlated with
+    # position and price. Restarting the stride per gameweek gives every week
+    # the same share at the same phase.
+    #
+    # This also depends on get_prediction_history actually EMITTING player_id
+    # and gameweek. It did not until recently: the keys were absent, .get()
+    # returned 0 for every row, and a stable sort on a constant key is a no-op
+    # -- the split looked deterministic because it was doing nothing at all.
+    by_gw = {}
+    for r in rows:
+        by_gw.setdefault(r.get("gameweek", 0), []).append(r)
+    train, holdout = [], []
+    for gw in sorted(by_gw):
+        gw_rows = sorted(by_gw[gw], key=lambda r: r.get("player_id", 0))
+        for i, r in enumerate(gw_rows):
+            (holdout if i % step == 0 else train).append(r)
     return train, holdout
 
 
@@ -67,10 +83,20 @@ def _blended(metrics):
 
 def main() -> None:
     ensure_calibration_columns()
-    rows = get_prediction_history(model_version=fpl_tools.MODEL_VERSION)
+    # Filter on the arithmetic fingerprint as well as the label. MODEL_VERSION
+    # is hand-maintained and can lag the code it describes, so rows written in
+    # that window carry the NEW arithmetic under the OLD label -- fitting
+    # across them mixes two different functions under one name, which is
+    # exactly what _arith_fingerprint() exists to prevent. Rows written before
+    # the column existed carry NULL and are correctly excluded.
+    rows = get_prediction_history(
+        model_version=fpl_tools.MODEL_VERSION,
+        arith_fingerprint=fpl_tools.ARITH_FINGERPRINT,
+    )
 
     n = len(rows)
-    print(f"Calibration rows for {fpl_tools.MODEL_VERSION}: {n} (threshold {MIN_ROWS})")
+    print(f"Calibration rows for {fpl_tools.MODEL_VERSION} "
+          f"[{fpl_tools.ARITH_FINGERPRINT}]: {n} (threshold {MIN_ROWS})")
 
     if not ENABLED:
         print("Auto-tune is disabled (FPL_AUTOTUNE_ENABLED=0). No weights written.")
