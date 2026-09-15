@@ -1520,7 +1520,13 @@ def _calibration_status_html() -> str:
     """
     try:
         import db as _db
-        banked = _db.count_checked_predictions(fpl_tools.MODEL_VERSION)
+        # Fingerprint as well as label, matching what auto_tune actually
+        # fits. MODEL_VERSION is hand-maintained and can lag the arithmetic it
+        # names, so counting on the label alone reports a population the tuner
+        # will not select -- the recalibration copy would promise a threshold
+        # that never arrives.
+        banked = _db.count_checked_predictions(
+            fpl_tools.MODEL_VERSION, arith_fingerprint=fpl_tools.ARITH_FINGERPRINT)
         target = 5000
     except Exception:
         banked = None
@@ -3062,8 +3068,13 @@ with tab_health:
     _mh_target = 5000
     try:
         import db as _mh_db
-        _mh_banked = _mh_db.count_checked_predictions(fpl_tools.MODEL_VERSION)
-        _mh_rows = _mh_db.prediction_accuracy_by_gw(fpl_tools.MODEL_VERSION)
+        # Same population the tuner fits, or Model Health reports a row count
+        # and an RMSE for rows auto_tune will never see. Keyword form at both
+        # sites: prediction_accuracy_by_gw's second positional is `limit`.
+        _mh_banked = _mh_db.count_checked_predictions(
+            fpl_tools.MODEL_VERSION, arith_fingerprint=fpl_tools.ARITH_FINGERPRINT)
+        _mh_rows = _mh_db.prediction_accuracy_by_gw(
+            fpl_tools.MODEL_VERSION, arith_fingerprint=fpl_tools.ARITH_FINGERPRINT)
     except Exception:
         _mh_banked, _mh_rows = None, []
 

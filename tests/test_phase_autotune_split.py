@@ -106,3 +106,41 @@ class FingerprintSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UiPopulationMatchesTunerTest(unittest.TestCase):
+    """The Model Health tab's row count and the tuner's fitting population
+    have to be the same set. Counting on MODEL_VERSION alone while the tuner
+    also filters on the fingerprint makes the UI promise a MIN_ROWS threshold
+    that the tuner will never see reached."""
+
+    def _read_calls(self):
+        src = io.open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        wanted = {"count_checked_predictions", "prediction_accuracy_by_gw"}
+        out = []
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in wanted):
+                out.append(n)
+        return out
+
+    def test_every_read_site_passes_the_fingerprint(self):
+        calls = self._read_calls()
+        self.assertGreaterEqual(len(calls), 3, "expected three read sites in app.py")
+        for call in calls:
+            with self.subTest(fn=call.func.attr, line=call.lineno):
+                self.assertIn("arith_fingerprint", {k.arg for k in call.keywords},
+                              f"app.py:{call.lineno} counts a population the "
+                              f"tuner does not fit")
+
+    def test_the_fingerprint_is_never_passed_positionally(self):
+        """prediction_accuracy_by_gw(model_version, limit) -- a fingerprint in
+        the second slot would silently become the row limit. The signature is
+        keyword-only so it would raise, but the call sites should not be
+        relying on that to catch it."""
+        for call in self._read_calls():
+            with self.subTest(fn=call.func.attr, line=call.lineno):
+                self.assertLessEqual(len(call.args), 1,
+                                     f"app.py:{call.lineno} passes more than "
+                                     f"model_version positionally")
