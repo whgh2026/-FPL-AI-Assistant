@@ -630,20 +630,33 @@ def get_prediction_history(model_version=None):
             rows = []
             for r in cur.fetchall():
                 rows.append({
-                    "predicted_xp": r[0] or 0.0,
-                    "actual_points": r[1] or 0.0,
-                    "base_pts": r[2] if r[2] is not None else (r[0] or 0.0),
-                    "cameo_mass": r[3] or 0.0,
-                    "rotation_variance": r[4] or 0.0,
-                    "dc_sensitivity": r[5] or 0.0,
+                    # player_id and gameweek were prepended to the SELECT above
+                    # so auto_tune._split could stratify on them, but the
+                    # indices below were not shifted with it -- every field was
+                    # read two columns to the left, so predicted_xp held a
+                    # player id and actual_points held a gameweek number, and
+                    # the tuner fitted one against the other.
+                    #
+                    # They are also emitted as keys here. Without them
+                    # _split's sort key resolved to (0, 0) for every row and,
+                    # Python's sort being stable, the "deterministic split"
+                    # reordered nothing at all.
+                    "player_id": r[0],
+                    "gameweek": r[1],
+                    "predicted_xp": r[2] or 0.0,
+                    "actual_points": r[3] or 0.0,
+                    "base_pts": r[4] if r[4] is not None else (r[2] or 0.0),
+                    "cameo_mass": r[5] or 0.0,
+                    "rotation_variance": r[6] or 0.0,
+                    "dc_sensitivity": r[7] or 0.0,
                     # None, not 0.0: reproject() distinguishes "no clamp input
                     # recorded" (fall back to the old unclamped arithmetic) from
                     # "the cameo projection really was zero", and 0.0 would make
                     # the clamp bind on every legacy row.
-                    "raw_total": r[6],
-                    "xp_cameo": r[7],
-                    "ep_w": r[8],
-                    "ep_term": r[9] or 0.0,
+                    "raw_total": r[8],
+                    "xp_cameo": r[9],
+                    "ep_w": r[10],
+                    "ep_term": r[11] or 0.0,
                 })
             return rows
         finally:
